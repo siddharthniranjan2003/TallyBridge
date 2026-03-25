@@ -1,7 +1,58 @@
 {
+  "name": "tallybridge",
+  "version": "1.0.0",
+  "description": "TallyPrime cloud sync desktop connector",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
+    "build:renderer": "vite build",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build": "npm run build:renderer && npm run build:main",
+    "dist": "npm run build && electron-builder",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "build": {
+    "appId": "com.tallybridge.app",
+    "productName": "TallyBridge",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "src/python/**/*",
+      "assets/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "src/python/",
+        "to": "python/"
+      },
+      {
+        "from": "assets/",
+        "to": "assets/"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "runAfterFinish": true
+    }
+  },
   "dependencies": {
     "axios": "^1.13.6",
-    "electron": "^41.0.4",
     "electron-is-dev": "^3.0.1",
     "electron-store": "^11.0.2",
     "react": "^19.2.4",
@@ -16,9 +67,13 @@
     "@vitejs/plugin-react": "^6.0.1",
     "concurrently": "^9.2.1",
     "cross-env": "^10.1.0",
+    "electron": "^41.0.4",
     "electron-builder": "^26.8.1",
     "typescript": "^6.0.2",
     "vite": "^8.0.2",
     "wait-on": "^9.0.4"
-  }
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
 }

@@ -1,0 +1,32 @@
+appId: com.tallybridge.app
+productName: TallyBridge
+copyright: Copyright © 2026
+
+directories:
+  output: release
+
+files:
+  - dist/**/*
+  - package.json
+
+extraResources:
+  - from: src/python/
+    to: python/
+  - from: assets/
+    to: assets/
+
+win:
+  icon: assets/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  installerIcon: assets/icon.ico
+  runAfterFinish: true
+
+publish: null
