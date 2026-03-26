@@ -81,12 +81,12 @@ def parse_ledgers(xml_text: str) -> list:
             name = ledger.get("@NAME", "").strip()
             if not name or name == "?":
                 continue
-            result.append({
-                "name": name,
-                "group_name": ledger.get("PARENT", ""),
-                "opening_balance": safe_float(ledger.get("OPENINGBALANCE", 0)),
-                "closing_balance": safe_float(ledger.get("OPENINGBALANCE", 0)),
-            })
+           result.append({
+            "name": name,
+            "group_name": ledger.get("PARENT", ""),
+            "opening_balance": safe_float(ledger.get("OPENINGBALANCE", 0)),
+            "closing_balance": safe_float(ledger.get("CLOSINGBALANCE", 0)),  # ← fixed
+})
         return result
     except Exception as e:
         print(f"[Parser] ledger error: {e}")
