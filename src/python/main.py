@@ -17,7 +17,6 @@ COMPANY = os.environ.get("TALLY_COMPANY", "")
 def main():
     print(f"[TallyBridge] Starting sync: {COMPANY}")
 
-    # Financial year date range
     today = date.today()
     fy_year = today.year - 1 if today.month < 4 else today.year
     from_date = f"{fy_year}0401"
@@ -52,7 +51,6 @@ def main():
             "outstanding": outstanding,
         })
 
-        # Print JSON summary as last line — Electron reads this
         print(json.dumps({
             "status": "success",
             "records": {
