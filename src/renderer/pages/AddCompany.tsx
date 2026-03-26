@@ -1,22 +1,40 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 
-type Step = "form" | "checking" | "success" | "error";
+type Step = "loading" | "select" | "noTally" | "checking" | "success" | "error";
 
 export default function AddCompany() {
-  const [step, setStep] = useState<Step>("form");
-  const [name, setName] = useState("");
+  const [step, setStep] = useState<Step>("loading");
+  const [companies, setCompanies] = useState<string[]>([]);
+  const [selected, setSelected] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const navigate = useNavigate();
 
-  const handleSubmit = async () => {
-    if (!name.trim()) return;
+  // Auto-fetch companies when page loads
+  useEffect(() => {
+    fetchCompanies();
+  }, []);
+
+  const fetchCompanies = async () => {
+    setStep("loading");
+    const result = await window.electronAPI.getTallyCompanies();
+    if (result.success && result.companies.length > 0) {
+      setCompanies(result.companies);
+      setSelected(result.companies[0]);
+      setStep("select");
+    } else {
+      setStep("noTally");
+    }
+  };
+
+  const handleAdd = async () => {
+    if (!selected) return;
     setStep("checking");
-    const result = await window.electronAPI.addCompany(name.trim());
+    const result = await window.electronAPI.addCompany(selected);
     if (result.success) {
       setStep("success");
     } else {
-      setErrorMsg(result.error);
+      setErrorMsg(result.error || "Unknown error");
       setStep("error");
     }
   };
@@ -26,51 +44,96 @@ export default function AddCompany() {
       <button onClick={() => navigate("/")} style={backBtn}>← Back</button>
       <h1 style={{ fontSize: 20, fontWeight: 600, margin: "16px 0 6px" }}>Add Company</h1>
       <p style={{ fontSize: 13, color: "#6c757d", marginBottom: 28 }}>
-        Connect a TallyPrime company to start syncing its data to the cloud.
+        Companies currently open in TallyPrime on this PC.
       </p>
 
-      {step === "form" && (
+      {/* Loading */}
+      {step === "loading" && (
+        <CentreState icon="⏳" title="Detecting companies..." subtitle="Reading from TallyPrime..." />
+      )}
+
+      {/* Tally not running */}
+      {step === "noTally" && (
+        <CentreState
+          icon="⚠️"
+          title="TallyPrime not detected"
+          subtitle="Open TallyPrime and load your company, then try again."
+          error
+          action={
+            <button onClick={fetchCompanies} style={primaryBtn}>
+              ↺ Retry
+            </button>
+          }
+        />
+      )}
+
+      {/* Company selector */}
+      {step === "select" && (
         <>
-          {/* Instructions box */}
           <div style={infoBox}>
-            <p style={{ fontWeight: 500, marginBottom: 8 }}>Before you add:</p>
-            <ol style={{ paddingLeft: 18, lineHeight: 2, color: "#495057" }}>
-              <li>Open <strong>TallyPrime</strong> on this PC</li>
-              <li>Select your company — you should see <em>Gateway of Tally</em></li>
-              <li>Note the company name shown at the top exactly</li>
-            </ol>
+            <p style={{ fontWeight: 500, marginBottom: 6, fontSize: 13 }}>
+              ✓ TallyPrime is connected
+            </p>
+            <p style={{ fontSize: 12, color: "#6c757d" }}>
+              {companies.length} {companies.length === 1 ? "company" : "companies"} found
+            </p>
           </div>
 
-          <label style={labelStyle}>
-            Company Name <span style={{ color: "#adb5bd", fontWeight: 400 }}>(exactly as in TallyPrime)</span>
-          </label>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Demo Trading Co"
-            onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-            autoFocus
-            style={{ marginBottom: 16 }}
-          />
+          <label style={labelStyle}>Select Company</label>
 
-          <button
-            onClick={handleSubmit}
-            disabled={!name.trim()}
-            style={{ ...primaryBtn, width: "100%", opacity: name.trim() ? 1 : 0.5 }}
-          >
-            Verify & Add Company →
-          </button>
+          {/* Company list — like BizAnalyst */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+            {companies.map((name) => (
+              <div
+                key={name}
+                onClick={() => setSelected(name)}
+                style={{
+                  padding: "12px 16px",
+                  borderRadius: 10,
+                  border: `2px solid ${selected === name ? "#1a1a2e" : "#e9ecef"}`,
+                  background: selected === name ? "#f0f0f5" : "#fff",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12,
+                  transition: "all 0.15s",
+                }}
+              >
+                <span style={{ fontSize: 20 }}>🏢</span>
+                <div>
+                  <p style={{ fontWeight: 500, fontSize: 14, margin: 0 }}>{name}</p>
+                  <p style={{ fontSize: 11, color: "#6c757d", margin: 0 }}>TallyPrime</p>
+                </div>
+                {selected === name && (
+                  <span style={{ marginLeft: "auto", color: "#1a1a2e", fontSize: 16 }}>✓</span>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={fetchCompanies} style={{ ...outlineBtn, flex: 1 }}>
+              ↺ Refresh
+            </button>
+            <button
+              onClick={handleAdd}
+              disabled={!selected}
+              style={{ ...primaryBtn, flex: 2, opacity: selected ? 1 : 0.5 }}
+            >
+              Add {selected ? `"${selected}"` : "Company"} →
+            </button>
+          </div>
         </>
       )}
 
       {step === "checking" && (
-        <CentreState icon="⏳" title="Verifying..." subtitle="Connecting to TallyPrime..." />
+        <CentreState icon="⏳" title="Adding company..." subtitle={`Verifying "${selected}" in TallyPrime...`} />
       )}
 
       {step === "success" && (
         <CentreState
           icon="✅"
-          title={`${name} added!`}
+          title={`${selected} added!`}
           subtitle="First sync will start automatically in a few seconds."
           action={<button onClick={() => navigate("/")} style={primaryBtn}>Go to Home →</button>}
         />
@@ -84,7 +147,7 @@ export default function AddCompany() {
           error
           action={
             <div style={{ display: "flex", gap: 10 }}>
-              <button onClick={() => setStep("form")} style={outlineBtn}>Try Again</button>
+              <button onClick={() => setStep("select")} style={outlineBtn}>Try Again</button>
               <button onClick={() => navigate("/settings")} style={primaryBtn}>Check Settings</button>
             </div>
           }
@@ -108,12 +171,13 @@ function CentreState({ icon, title, subtitle, action, error }: any) {
 const primaryBtn: React.CSSProperties = {
   background: "#1a1a2e", color: "#fff", border: "none",
   borderRadius: 8, padding: "10px 20px", cursor: "pointer",
-  fontSize: 13, fontWeight: 500,
+  fontSize: 13, fontWeight: 500, textAlign: "center",
 };
 const outlineBtn: React.CSSProperties = {
   background: "transparent", color: "#1a1a2e",
   border: "1px solid #1a1a2e", borderRadius: 8,
   padding: "10px 20px", cursor: "pointer", fontSize: 13,
+  textAlign: "center",
 };
 const backBtn: React.CSSProperties = {
   background: "none", border: "none", cursor: "pointer",
@@ -121,10 +185,10 @@ const backBtn: React.CSSProperties = {
 };
 const labelStyle: React.CSSProperties = {
   display: "block", fontSize: 13, fontWeight: 500,
-  marginBottom: 6, color: "#374151",
+  marginBottom: 10, color: "#374151",
 };
 const infoBox: React.CSSProperties = {
-  background: "#f8f9fa", borderRadius: 10,
-  padding: 16, marginBottom: 20, fontSize: 13,
-  border: "1px solid #e9ecef",
+  background: "#f0fdf4", borderRadius: 10,
+  padding: "12px 16px", marginBottom: 20,
+  border: "1px solid #bbf7d0",
 };
