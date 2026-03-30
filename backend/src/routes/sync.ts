@@ -9,6 +9,8 @@ const router = Router();
 router.post("/", requireApiKey, async (req, res) => {
   const {
     company_name,
+    company_info,
+    groups,
     ledgers,
     vouchers,
     stock_items,
@@ -27,7 +29,14 @@ router.post("/", requireApiKey, async (req, res) => {
     const { data: company, error: companyErr } = await supabase
       .from("companies")
       .upsert(
-        { name: company_name, last_synced_at: new Date().toISOString() },
+        { 
+          name: company_name, 
+          last_synced_at: new Date().toISOString(),
+          ...(company_info?.books_from ? { books_from: company_info.books_from } : {}),
+          ...(company_info?.books_to ? { books_to: company_info.books_to } : {}),
+          ...(company_info?.gstin ? { gstin: company_info.gstin } : {}),
+          ...(company_info?.address ? { address: company_info.address } : {}),
+        },
         { onConflict: "name" }
       )
       .select("id")
@@ -38,6 +47,13 @@ router.post("/", requireApiKey, async (req, res) => {
     }
     const company_id = company.id;
 
+    // 1.5 Upsert groups
+    if (groups?.length) {
+      const rows = groups.map((g: any) => ({ ...g, company_id, synced_at: new Date().toISOString() }));
+      const { error } = await supabase.from("groups").upsert(rows, { onConflict: "company_id,name" });
+      if (error) console.error("[Sync] Groups error:", error.message);
+    }
+
     // 2. Upsert ledgers
     if (ledgers?.length) {
       const rows = ledgers.map((l: any) => ({ ...l, company_id, synced_at: new Date().toISOString() }));
@@ -45,10 +61,11 @@ router.post("/", requireApiKey, async (req, res) => {
       if (error) console.error("[Sync] Ledger error:", error.message);
     }
 
-    // 3. Upsert vouchers + items
+    // 3. Upsert vouchers + items + ledger entries
     if (vouchers?.length) {
       for (const v of vouchers) {
-        const { items, ...vData } = v;
+        // Extract related collections so they don't get sent to the 'vouchers' table insertion
+        const { items, ledger_entries, ...vData } = v;
 
         // Skip vouchers with no guid
         if (!vData.tally_guid) continue;
@@ -72,6 +89,26 @@ router.post("/", requireApiKey, async (req, res) => {
             .map((i: any) => ({ ...i, voucher_id: upserted.id }));
           if (itemRows.length) {
             await supabase.from("voucher_items").insert(itemRows);
+          }
+        }
+
+        if (ledger_entries?.length) {
+          // Delete old ledger entries then re-insert fresh
+          await supabase.from("voucher_ledger_entries").delete().eq("voucher_id", upserted.id);
+          const entryRows = ledger_entries
+            .filter((le: any) => le.ledger_name)
+            .map((le: any) => {
+              // Extract bill_allocations to prevent it trying to insert into the entries table directly 
+              // (can optionally be saved to another table, but we will store it as jsonb for now)
+              const { bill_allocations, ...leData } = le;
+              return { 
+                ...leData, 
+                voucher_id: upserted.id,
+                bill_allocations: bill_allocations || []
+              };
+            });
+          if (entryRows.length) {
+            await supabase.from("voucher_ledger_entries").insert(entryRows);
           }
         }
       }
@@ -133,6 +170,7 @@ router.post("/", requireApiKey, async (req, res) => {
       company_id,
       status: "success",
       records_synced: {
+        groups: groups?.length || 0,
         ledgers: ledgers?.length || 0,
         vouchers: vouchers?.length || 0,
         stock_items: stock_items?.length || 0,
@@ -147,6 +185,7 @@ router.post("/", requireApiKey, async (req, res) => {
       success: true,
       company_id,
       records: {
+        groups: groups?.length || 0,
         ledgers: ledgers?.length || 0,
         vouchers: vouchers?.length || 0,
         stock_items: stock_items?.length || 0,
