@@ -114,15 +114,25 @@ export class SyncEngine {
 
       proc.on("close", (code) => {
         if (code === 0) {
-          // Parse last JSON line from Python output for record counts
           let records = { ledgers: 0, vouchers: 0, stock: 0, outstanding: 0 };
+          let status = "success";
           try {
-            const lastLine = outputLines[outputLines.length - 1];
-            if (lastLine?.startsWith("{")) {
-              const parsed = JSON.parse(lastLine);
+            // Find the last line that starts with "{" (tally/python logs might have trailing empty lines or junk)
+            const validJsonLine = [...outputLines].reverse().find(line => line.trim().startsWith("{"));
+            if (validJsonLine) {
+              const parsed = JSON.parse(validJsonLine.trim());
               records = parsed.records || records;
+              status = parsed.status || "success";
             }
-          } catch {}
+          } catch (e) {
+             console.error("JSON parse error from python output:", e);
+          }
+
+          // If sync was skipped (no changes), keep previous record counts
+          if (status === "skipped") {
+            const existing = store.get("companies").find((c) => c.id === companyId);
+            records = existing?.lastSyncRecords || records;
+          }
 
           updateCompanyStatus(companyId, {
             lastSyncStatus: "success",
@@ -132,7 +142,7 @@ export class SyncEngine {
           });
           this.emit("company-synced", { id: companyId, name: companyName, records });
         } else {
-          const errMsg = errorOutput.trim() || "Unknown error";
+          const errMsg = errorOutput.trim() || "Unknown error (database insert failed or python crashed)";
           updateCompanyStatus(companyId, {
             lastSyncStatus: "error",
             lastSyncError: errMsg,

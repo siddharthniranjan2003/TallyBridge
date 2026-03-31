@@ -4,13 +4,15 @@ import json
 from datetime import date
 
 from tally_client import (
-    get_company_alter_ids,
+    get_company_info, get_company_alter_ids,
+    get_groups,
     get_ledgers, get_vouchers, get_stock_items,
     get_outstanding_receivables, get_outstanding_payables,
     get_profit_and_loss, get_balance_sheet, get_trial_balance,
 )
 from xml_parser import (
-    parse_alter_ids,
+    parse_company_info, parse_alter_ids,
+    parse_groups,
     parse_ledgers, parse_vouchers, parse_stock, parse_outstanding,
     parse_profit_and_loss, parse_balance_sheet, parse_trial_balance,
 )
@@ -65,18 +67,55 @@ def has_data_changed(current_ids: dict) -> bool:
     return False
 
 
+# ── Financial year helpers ───────────────────────────────────────
+
+def get_fy_dates_fallback() -> tuple:
+    """Hardcoded April-March FY as fallback."""
+    today = date.today()
+    fy_year = today.year - 1 if today.month < 4 else today.year
+    from_date = f"{fy_year}0401"
+    to_date = today.strftime("%Y%m%d")
+    return from_date, to_date
+
+def fy_date_from_iso(iso_str: str) -> str:
+    """Convert ISO date '2025-04-01' → Tally format '20250401'."""
+    if not iso_str:
+        return ""
+    return iso_str.replace("-", "")
+
+
 # ── Main sync ────────────────────────────────────────────────────
 
 def main():
     print(f"[TallyBridge] Starting sync: {COMPANY}")
 
-    # Financial year date range
-    today = date.today()
-    fy_year = today.year - 1 if today.month < 4 else today.year
-    from_date = f"{fy_year}0401"
-    to_date = today.strftime("%Y%m%d")
+    # ── Step 0: Fetch company info (FY dates) ────────────────
+    from_date, to_date = get_fy_dates_fallback()
+    company_info = {}
+    try:
+        print("[Tally] Fetching company info...")
+        raw_info = get_company_info()
+        company_info = parse_company_info(raw_info)
+        if company_info:
+            books_from = company_info.get("books_from")
+            books_to = company_info.get("books_to")
+            if books_from and books_to:
+                from_date = fy_date_from_iso(books_from)
+                to_date = fy_date_from_iso(books_to)
+                print(f"[Tally] Company FY: {books_from} to {books_to}")
+            else:
+                print("[Tally] Could not read FY dates — using default April-March")
+            if company_info.get("gstin"):
+                print(f"[Tally] GSTIN: {company_info['gstin']}")
+        else:
+            print("[Tally] Could not read company info — using default FY dates")
+    except Exception as e:
+        print(f"[Tally] Company info fetch failed ({e}) — using default FY dates")
+
+    print(f"[Tally] Date range: {from_date} to {to_date}")
 
     # ── Step 1: Change detection ─────────────────────────────
+    current_ids = {}
     try:
         print("[Tally] Checking for changes...")
         raw_ids = get_company_alter_ids()
@@ -104,6 +143,10 @@ def main():
 
     # ── Step 2: Fetch all data ───────────────────────────────
     try:
+        print("[Tally] Fetching groups...")
+        groups = parse_groups(get_groups())
+        print(f"[Tally] Got {len(groups)} groups")
+
         print("[Tally] Fetching ledgers...")
         ledgers = parse_ledgers(get_ledgers())
         print(f"[Tally] Got {len(ledgers)} ledgers")
@@ -123,7 +166,7 @@ def main():
         )
         print(f"[Tally] Got {len(outstanding)} outstanding entries")
 
-        # ── NEW: Financial reports ───────────────────────────
+        # ── Financial reports ────────────────────────────────
         print("[Tally] Fetching Profit & Loss...")
         profit_loss = parse_profit_and_loss(get_profit_and_loss(from_date, to_date))
         print(f"[Tally] Got {len(profit_loss)} P&L line items")
@@ -140,6 +183,8 @@ def main():
         print("[Cloud] Pushing to backend...")
         push({
             "company_name": COMPANY,
+            "company_info": company_info,
+            "groups": groups,
             "ledgers": ledgers,
             "vouchers": vouchers,
             "stock_items": stock,
@@ -158,6 +203,7 @@ def main():
         print(json.dumps({
             "status": "success",
             "records": {
+                "groups": len(groups),
                 "ledgers": len(ledgers),
                 "vouchers": len(vouchers),
                 "stock": len(stock),

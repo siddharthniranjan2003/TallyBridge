@@ -25,6 +25,7 @@ def push(payload: dict) -> bool:
             data = response.json()
             records = data.get("records", {})
             print(f"[Cloud] Sync successful!")
+            print(f"[Cloud] Groups: {records.get('groups', 0)}")
             print(f"[Cloud] Ledgers: {records.get('ledgers', 0)}")
             print(f"[Cloud] Vouchers: {records.get('vouchers', 0)}")
             print(f"[Cloud] Stock: {records.get('stock_items', 0)}")

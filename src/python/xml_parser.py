@@ -38,6 +38,14 @@ def safe_int(val) -> int:
     except:
         return 0
 
+def safe_str(val) -> str:
+    """Extract a string from a value that might be a dict or None."""
+    if val is None:
+        return ""
+    if isinstance(val, dict):
+        return str(val.get("#text", "")).strip()
+    return str(val).strip()
+
 def parse_tally_date(val: str):
     if not val:
         return None
@@ -47,7 +55,7 @@ def parse_tally_date(val: str):
             return date(int(val[:4]), int(val[4:6]), int(val[6:8])).isoformat()
         except:
             return None
-    for fmt in ("%d-%b-%y", "%d-%b-%Y"):
+    for fmt in ("%d-%b-%y", "%d-%b-%Y", "%d-%m-%Y"):
         try:
             return datetime.strptime(val, fmt).date().isoformat()
         except:
@@ -63,6 +71,53 @@ def get_messages(raw: dict) -> list:
     if p:
         return p if isinstance(p, list) else [p]
     return []
+
+def _ensure_list(val) -> list:
+    """Convert None to [], single dict to [dict], leave lists as-is."""
+    if val is None:
+        return []
+    if isinstance(val, dict):
+        return [val]
+    return val
+
+
+# ── company info ─────────────────────────────────────────────────
+
+def parse_company_info(xml_text: str) -> dict:
+    """Extract company metadata: FY dates, address, GSTIN, etc."""
+    try:
+        raw = xmltodict.parse(clean_xml(xml_text))
+        body = raw.get("ENVELOPE", {}).get("BODY", {}).get("DATA", {})
+        collection = body.get("COLLECTION", {})
+        company = collection.get("COMPANY", {})
+        if isinstance(company, list):
+            company = company[0] if company else {}
+
+        books_from = safe_str(company.get("BOOKSFROM", ""))
+        books_to = safe_str(company.get("BOOKSTO", ""))
+
+        return {
+            "name":        safe_str(company.get("NAME")),
+            "books_from":  parse_tally_date(books_from),
+            "books_to":    parse_tally_date(books_to),
+            "books_from_raw": books_from,
+            "books_to_raw":   books_to,
+            "guid":        safe_str(company.get("GUID")),
+            "master_id":   safe_int(company.get("MASTERID", 0)),
+            "address":     safe_str(company.get("BASICCOMPANYADDRESS")),
+            "state":       safe_str(company.get("STATENAME")),
+            "country":     safe_str(company.get("COUNTRYNAME")),
+            "pincode":     safe_str(company.get("PINCODE")),
+            "email":       safe_str(company.get("EMAIL")),
+            "phone":       safe_str(company.get("PHONENUMBER")),
+            "gst_type":    safe_str(company.get("GSTREGISTRATIONTYPE")),
+            "gstin":       safe_str(company.get("PARTYGSTIN")),
+            "pan":         safe_str(company.get("INCOMETAXNUMBER")),
+        }
+    except Exception as e:
+        print(f"[Parser] company_info error: {e}")
+        return {}
+
 
 # ── change detection ─────────────────────────────────────────────
 
@@ -89,32 +144,93 @@ def parse_alter_ids(xml_text: str) -> dict:
         print(f"[Parser] alter_ids error: {e}")
         return {}
 
+
+# ── groups ────────────────────────────────────────────────────────
+
+def parse_groups(xml_text: str) -> list:
+    """Parse accounting groups from Collection response."""
+    try:
+        raw = xmltodict.parse(clean_xml(xml_text))
+        body = raw.get("ENVELOPE", {}).get("BODY", {}).get("DATA", {})
+        collection = body.get("COLLECTION", {})
+        groups = _ensure_list(collection.get("GROUP", []))
+
+        result = []
+        for g in groups:
+            if not g:
+                continue
+            name = safe_str(g.get("NAME") or g.get("@NAME", ""))
+            if not name:
+                continue
+            result.append({
+                "name":             name,
+                "parent":           safe_str(g.get("PARENT", "")),
+                "master_id":        safe_int(g.get("MASTERID", 0)),
+                "is_revenue":       safe_str(g.get("ISREVENUE", "No")),
+                "affects_stock":    safe_str(g.get("AFFECTSSTOCK", "No")),
+                "is_subledger":     safe_str(g.get("ISSUBLEDGER", "No")),
+            })
+        return result
+    except Exception as e:
+        print(f"[Parser] groups error: {e}")
+        return []
+
+
 # ── ledgers ───────────────────────────────────────────────────────
 
 def parse_ledgers(xml_text: str) -> list:
+    """Parse ledgers from Collection+FETCH response (with extended fields)."""
     try:
         raw = xmltodict.parse(clean_xml(xml_text))
-        messages = get_messages(raw)
+
+        # Collection response format: ENVELOPE > BODY > DATA > COLLECTION > LEDGER
+        body = raw.get("ENVELOPE", {}).get("BODY", {}).get("DATA", {})
+        collection = body.get("COLLECTION", {})
+        ledgers = _ensure_list(collection.get("LEDGER", []))
+
+        # If Collection format didn't work, fall back to TALLYMESSAGE format
+        if not ledgers:
+            messages = get_messages(raw)
+            for msg in messages:
+                if not msg:
+                    continue
+                ledger = msg.get("LEDGER")
+                if ledger:
+                    ledgers.append(ledger)
+
         result = []
-        for msg in messages:
-            if not msg:
-                continue
-            ledger = msg.get("LEDGER")
+        for ledger in ledgers:
             if not ledger:
                 continue
-            name = ledger.get("@NAME", "").strip()
+            name = safe_str(ledger.get("NAME") or ledger.get("@NAME", ""))
             if not name or name == "?":
                 continue
             result.append({
                 "name":            name,
-                "group_name":      ledger.get("PARENT", ""),
+                "group_name":      safe_str(ledger.get("PARENT", "")),
                 "opening_balance": safe_float(ledger.get("OPENINGBALANCE", 0)),
                 "closing_balance": safe_float(ledger.get("CLOSINGBALANCE", 0)),
+                "master_id":       safe_int(ledger.get("MASTERID", 0)),
+                "email":           safe_str(ledger.get("EMAIL", "")),
+                "phone":           safe_str(ledger.get("LEDGERPHONE", "")),
+                "mobile":          safe_str(ledger.get("LEDGERMOBILE", "")),
+                "pincode":         safe_str(ledger.get("PINCODE", "")),
+                "gstin":           safe_str(ledger.get("PARTYGSTIN", "")),
+                "state":           safe_str(ledger.get("LEDSTATENAME", "")),
+                "country":         safe_str(ledger.get("COUNTRYNAME", "")),
+                "credit_period":   safe_str(ledger.get("CREDITPERIOD", "")),
+                "credit_limit":    safe_float(ledger.get("CREDITLIMIT", 0)),
+                "bank_account":    safe_str(ledger.get("BANKACCOUNT", "")),
+                "ifsc_code":       safe_str(ledger.get("IFSCODE", "")),
+                "pan":             safe_str(ledger.get("INCOMETAXNUMBER", "")),
+                "mailing_name":    safe_str(ledger.get("MAILINGNAME", "")),
+                "guid":            safe_str(ledger.get("GUID", "")),
             })
         return result
     except Exception as e:
         print(f"[Parser] ledger error: {e}")
         return []
+
 
 # ── vouchers ──────────────────────────────────────────────────────
 
@@ -136,11 +252,14 @@ def parse_vouchers(xml_text: str) -> list:
             vdate  = parse_tally_date(v.get("DATE", ""))
             party  = v.get("PARTYLEDGERNAME", "")
             amount = safe_float(v.get("AMOUNT", 0))
+            reference = safe_str(v.get("REFERENCE", ""))
+            persisted_view = safe_str(v.get("PERSISTEDVIEW", ""))
+            is_invoice = safe_str(v.get("ISINVOICE", "No"))
 
+            # ── Inventory items ──────────────────────────────
             raw_inv = v.get("ALLINVENTORYENTRIES.LIST") or \
                       v.get("INVENTORYENTRIES.LIST") or []
-            if isinstance(raw_inv, dict):
-                raw_inv = [raw_inv]
+            raw_inv = _ensure_list(raw_inv)
 
             items = []
             for inv in raw_inv:
@@ -157,20 +276,68 @@ def parse_vouchers(xml_text: str) -> list:
                     "amount":          safe_float(inv.get("AMOUNT", 0)),
                 })
 
-            # If voucher-level amount is 0, derive it from items
-            if amount == 0 and items:
-                amount = sum(abs(i["amount"]) for i in items)
+            # ── Ledger entries (accounting allocations) ──────
+            raw_ledger_entries = v.get("ALLLEDGERENTRIES.LIST") or \
+                                 v.get("LEDGERENTRIES.LIST") or []
+            raw_ledger_entries = _ensure_list(raw_ledger_entries)
+
+            ledger_entries = []
+            for le in raw_ledger_entries:
+                if not le:
+                    continue
+                le_name = safe_str(le.get("LEDGERNAME", ""))
+                if not le_name:
+                    continue
+                le_amount = safe_float(le.get("AMOUNT", 0))
+                is_party = safe_str(le.get("ISPARTYLEDGER", "No"))
+                is_deemed = safe_str(le.get("ISDEEMEDPOSITIVE", "No"))
+
+                # Bill allocations
+                raw_bills = _ensure_list(le.get("BILLALLOCATIONS.LIST", []))
+                bill_allocs = []
+                for bill in raw_bills:
+                    if not bill:
+                        continue
+                    bill_allocs.append({
+                        "name":      safe_str(bill.get("NAME", "")),
+                        "bill_type": safe_str(bill.get("BILLTYPE", "")),
+                        "amount":    safe_float(bill.get("AMOUNT", 0)),
+                    })
+
+                ledger_entries.append({
+                    "ledger_name":        le_name,
+                    "amount":             le_amount,
+                    "is_party_ledger":    is_party == "Yes",
+                    "is_deemed_positive": is_deemed == "Yes",
+                    "bill_allocations":   bill_allocs,
+                })
+
+            # If voucher-level amount is 0, derive it from items or ledger entries
+            if amount == 0:
+                if items:
+                    amount = sum(abs(i["amount"]) for i in items)
+                elif ledger_entries:
+                    # Take the party ledger amount, or the largest absolute amount
+                    party_amounts = [abs(le["amount"]) for le in ledger_entries if le["is_party_ledger"]]
+                    if party_amounts:
+                        amount = max(party_amounts)
+                    else:
+                        amount = max(abs(le["amount"]) for le in ledger_entries) if ledger_entries else 0
 
             result.append({
-                "tally_guid":    guid,
-                "voucher_number": vnum,
-                "voucher_type":  vtype,
-                "date":          vdate,
-                "party_name":    party,
-                "amount":        abs(amount),
-                "narration":     v.get("NARRATION", ""),
-                "is_cancelled":  v.get("ISCANCELLED", "No") == "Yes",
-                "items":         items,
+                "tally_guid":      guid,
+                "voucher_number":  vnum,
+                "voucher_type":    vtype,
+                "date":            vdate,
+                "party_name":      party,
+                "amount":          abs(amount),
+                "narration":       v.get("NARRATION", ""),
+                "is_cancelled":    v.get("ISCANCELLED", "No") == "Yes",
+                "reference":       reference,
+                "is_invoice":      is_invoice == "Yes",
+                "view":            persisted_view,
+                "items":           items,
+                "ledger_entries":  ledger_entries,
             })
         return result
     except Exception as e:
@@ -243,12 +410,12 @@ def parse_outstanding(xml_text: str, type_: str) -> list:
         return []
 
 # ── profit & loss ─────────────────────────────────────────────────
+# Output keys match Supabase profit_loss table: particulars, amount, is_debit
 
 def parse_profit_and_loss(xml_text: str) -> list:
     """
-    P&L display format. Tag names confirmed from 09_profit_and_loss.xml.
-    Uses BSMAINAMT (shared with Balance Sheet) — sign determines side.
-    account_name/amount/side matches Supabase profit_loss table schema.
+    P&L display format. Uses BSMAINAMT / PLSUBAMT tags.
+    Output keys: particulars, amount, is_debit — matches DB schema.
     """
     try:
         cleaned = clean_xml(xml_text)
@@ -265,10 +432,9 @@ def parse_profit_and_loss(xml_text: str) -> list:
                 continue
             raw = safe_float(amounts[i]) if i < len(amounts) else 0.0
             result.append({
-                "account_name": name,
-                "amount":       abs(raw),
-                "side":         "credit" if raw < 0 else "debit",
-                "level":        0,
+                "particulars": name,
+                "amount":      abs(raw),
+                "is_debit":    raw >= 0,   # positive = debit in Tally convention
             })
         return result
     except Exception as e:
@@ -276,10 +442,11 @@ def parse_profit_and_loss(xml_text: str) -> list:
         return []
 
 # ── balance sheet ─────────────────────────────────────────────────
+# Output keys match Supabase balance_sheet table: particulars, amount, side
 
 def parse_balance_sheet(xml_text: str) -> list:
     """
-    account_name/amount/side matches Supabase balance_sheet table schema.
+    Output keys: particulars, amount, side ('asset'/'liability') — matches DB schema.
     """
     try:
         cleaned  = clean_xml(xml_text)
@@ -299,19 +466,17 @@ def parse_balance_sheet(xml_text: str) -> list:
                 raw = safe_float(bs_main[i]) if bs_main[i].strip() else \
                       safe_float(bs_sub[i]) if i < len(bs_sub) else 0.0
                 result.append({
-                    "account_name": name,
-                    "amount":       abs(raw),
-                    "side":         "liabilities" if raw > 0 else "assets",
-                    "level":        0,
+                    "particulars": name,
+                    "amount":      abs(raw),
+                    "side":        "liability" if raw > 0 else "asset",
                 })
             elif dr_amts and i < len(dr_amts):
                 dr = abs(safe_float(dr_amts[i]))
                 cr = abs(safe_float(cr_amts[i])) if i < len(cr_amts) else 0.0
                 result.append({
-                    "account_name": name,
-                    "amount":       dr if dr else cr,
-                    "side":         "assets" if dr else "liabilities",
-                    "level":        0,
+                    "particulars": name,
+                    "amount":      dr if dr else cr,
+                    "side":        "asset" if dr else "liability",
                 })
         return result
     except Exception as e:
@@ -319,10 +484,11 @@ def parse_balance_sheet(xml_text: str) -> list:
         return []
 
 # ── trial balance ─────────────────────────────────────────────────
+# Output keys match Supabase trial_balance table: particulars, debit, credit
 
 def parse_trial_balance(xml_text: str) -> list:
     """
-    account_name/debit_amount/credit_amount matches Supabase trial_balance schema.
+    Output keys: particulars, debit, credit — matches DB schema.
     """
     try:
         cleaned = clean_xml(xml_text)
@@ -336,10 +502,9 @@ def parse_trial_balance(xml_text: str) -> list:
             if not name:
                 continue
             result.append({
-                "account_name":  name,
-                "debit_amount":  abs(safe_float(dr_amts[i])) if i < len(dr_amts) else 0.0,
-                "credit_amount": abs(safe_float(cr_amts[i])) if i < len(cr_amts) else 0.0,
-                "level":         0,
+                "particulars":   name,
+                "debit":         abs(safe_float(dr_amts[i])) if i < len(dr_amts) else 0.0,
+                "credit":        abs(safe_float(cr_amts[i])) if i < len(cr_amts) else 0.0,
             })
         return result
     except Exception as e:
