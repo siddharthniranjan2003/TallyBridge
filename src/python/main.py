@@ -17,6 +17,7 @@ from xml_parser import (
     parse_profit_and_loss, parse_balance_sheet, parse_trial_balance,
 )
 from cloud_pusher import push
+from definition_extractor import fetch_structured_section
 
 COMPANY = os.environ.get("TALLY_COMPANY", "")
 
@@ -186,8 +187,14 @@ def main():
     company_info = {}
     try:
         print("[Tally] Fetching company info...")
-        raw_info = get_company_info()
-        company_info = parse_company_info(raw_info)
+        try:
+            company_info = fetch_structured_section("company_info")
+            if company_info:
+                print("[Tally] Company info loaded via definition-driven collection")
+        except Exception as structured_error:
+            print(f"[Tally] Structured company info fetch failed ({structured_error}) — falling back to legacy parser")
+            raw_info = get_company_info()
+            company_info = parse_company_info(raw_info)
         if company_info:
             books_from = company_info.get("books_from")
             books_to = company_info.get("books_to")
@@ -263,12 +270,22 @@ def main():
 
         if sync_plan.get("need_groups"):
             print("[Tally] Fetching groups...")
-            groups = parse_groups(get_groups())
+            try:
+                groups = fetch_structured_section("groups")
+                print("[Tally] Groups loaded via definition-driven collection")
+            except Exception as structured_error:
+                print(f"[Tally] Structured groups fetch failed ({structured_error}) — falling back to legacy parser")
+                groups = parse_groups(get_groups())
             print(f"[Tally] Got {len(groups)} groups")
 
         if sync_plan.get("need_ledgers"):
             print("[Tally] Fetching ledgers...")
-            ledgers = parse_ledgers(get_ledgers())
+            try:
+                ledgers = fetch_structured_section("ledgers")
+                print("[Tally] Ledgers loaded via definition-driven collection")
+            except Exception as structured_error:
+                print(f"[Tally] Structured ledgers fetch failed ({structured_error}) — falling back to legacy parser")
+                ledgers = parse_ledgers(get_ledgers())
             record_updates["ledgers"] = len(ledgers)
             print(f"[Tally] Got {len(ledgers)} ledgers")
 
@@ -276,14 +293,27 @@ def main():
             voucher_from_date = sync_plan.get("voucher_from_date", from_date)
             voucher_to_date = sync_plan.get("voucher_to_date", to_date)
             print(f"[Tally] Fetching vouchers ({voucher_from_date} to {voucher_to_date})...")
-            vouchers = parse_vouchers(get_vouchers(voucher_from_date, voucher_to_date))
+            try:
+                vouchers = fetch_structured_section("vouchers", {
+                    "from_date": voucher_from_date,
+                    "to_date": voucher_to_date,
+                })
+                print("[Tally] Vouchers loaded via definition-driven collection")
+            except Exception as structured_error:
+                print(f"[Tally] Structured voucher fetch failed ({structured_error}) — falling back to Day Book parser")
+                vouchers = parse_vouchers(get_vouchers(voucher_from_date, voucher_to_date))
             record_updates["vouchers"] = len(vouchers)
             print(f"[Tally] Got {len(vouchers)} vouchers")
 
         if sync_plan.get("need_stock"):
             print("[Tally] Fetching stock items...")
             try:
-                stock = parse_stock(get_stock_items())
+                try:
+                    stock = fetch_structured_section("stock_items")
+                    print("[Tally] Stock items loaded via definition-driven collection")
+                except Exception as structured_error:
+                    print(f"[Tally] Structured stock collection failed ({structured_error}) — falling back to legacy parser")
+                    stock = parse_stock(get_stock_items())
                 metrics_detected = any(
                     item.get("closing_value") or item.get("rate")
                     for item in stock
@@ -302,25 +332,57 @@ def main():
 
         if sync_plan.get("need_outstanding"):
             print("[Tally] Fetching outstanding...")
-            outstanding = (
-                parse_outstanding(get_outstanding_receivables(), "receivable") +
-                parse_outstanding(get_outstanding_payables(), "payable")
-            )
+            try:
+                outstanding = (
+                    fetch_structured_section("outstanding_receivables") +
+                    fetch_structured_section("outstanding_payables")
+                )
+                print("[Tally] Outstanding loaded via definition-driven report parsing")
+            except Exception as structured_error:
+                print(f"[Tally] Structured outstanding fetch failed ({structured_error}) — falling back to legacy parser")
+                outstanding = (
+                    parse_outstanding(get_outstanding_receivables(), "receivable") +
+                    parse_outstanding(get_outstanding_payables(), "payable")
+                )
             record_updates["outstanding"] = len(outstanding)
             print(f"[Tally] Got {len(outstanding)} outstanding entries")
 
         if sync_plan.get("need_reports"):
             # ── Financial reports ────────────────────────────────
             print("[Tally] Fetching Profit & Loss...")
-            profit_loss = parse_profit_and_loss(get_profit_and_loss(from_date, to_date))
+            try:
+                profit_loss = fetch_structured_section("profit_loss", {
+                    "from_date": from_date,
+                    "to_date": to_date,
+                })
+                print("[Tally] Profit & Loss loaded via definition-driven report parsing")
+            except Exception as structured_error:
+                print(f"[Tally] Structured Profit & Loss fetch failed ({structured_error}) — falling back to legacy parser")
+                profit_loss = parse_profit_and_loss(get_profit_and_loss(from_date, to_date))
             print(f"[Tally] Got {len(profit_loss)} P&L line items")
 
             print("[Tally] Fetching Balance Sheet...")
-            balance_sheet = parse_balance_sheet(get_balance_sheet(from_date, to_date))
+            try:
+                balance_sheet = fetch_structured_section("balance_sheet", {
+                    "from_date": from_date,
+                    "to_date": to_date,
+                })
+                print("[Tally] Balance Sheet loaded via definition-driven report parsing")
+            except Exception as structured_error:
+                print(f"[Tally] Structured Balance Sheet fetch failed ({structured_error}) — falling back to legacy parser")
+                balance_sheet = parse_balance_sheet(get_balance_sheet(from_date, to_date))
             print(f"[Tally] Got {len(balance_sheet)} Balance Sheet items")
 
             print("[Tally] Fetching Trial Balance...")
-            trial_balance = parse_trial_balance(get_trial_balance(from_date, to_date))
+            try:
+                trial_balance = fetch_structured_section("trial_balance", {
+                    "from_date": from_date,
+                    "to_date": to_date,
+                })
+                print("[Tally] Trial Balance loaded via definition-driven report parsing")
+            except Exception as structured_error:
+                print(f"[Tally] Structured Trial Balance fetch failed ({structured_error}) — falling back to legacy parser")
+                trial_balance = parse_trial_balance(get_trial_balance(from_date, to_date))
             print(f"[Tally] Got {len(trial_balance)} Trial Balance items")
 
         # ── Step 3: Push to cloud ────────────────────────────

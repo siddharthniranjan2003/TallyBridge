@@ -1,0 +1,932 @@
+{
+  "company_info": {
+    "request": {
+      "id": "CompanyInfo",
+      "collection_name": "CompanyInfo",
+      "object_type": "Company",
+      "fetch": [
+        "NAME",
+        "BOOKSFROM",
+        "BOOKSTO",
+        "GUID",
+        "MASTERID",
+        "BASICCOMPANYADDRESS",
+        "STATENAME",
+        "COUNTRYNAME",
+        "PINCODE",
+        "EMAIL",
+        "PHONENUMBER",
+        "GSTREGISTRATIONTYPE",
+        "PARTYGSTIN",
+        "INCOMETAXNUMBER"
+      ],
+      "filters": [
+        "NonAggrFilter"
+      ],
+      "system_formulae": [
+        {
+          "name": "NonAggrFilter",
+          "expression": "$isaggregate = \"No\""
+        }
+      ]
+    },
+    "response": {
+      "mode": "single",
+      "row_tag": "COMPANY",
+      "fields": {
+        "name": {
+          "sources": [
+            "NAME",
+            "@NAME"
+          ],
+          "transform": "string"
+        },
+        "books_from": {
+          "sources": [
+            "BOOKSFROM"
+          ],
+          "transform": "date"
+        },
+        "books_to": {
+          "sources": [
+            "BOOKSTO"
+          ],
+          "transform": "date"
+        },
+        "books_from_raw": {
+          "sources": [
+            "BOOKSFROM"
+          ],
+          "transform": "string"
+        },
+        "books_to_raw": {
+          "sources": [
+            "BOOKSTO"
+          ],
+          "transform": "string"
+        },
+        "guid": {
+          "sources": [
+            "GUID"
+          ],
+          "transform": "string"
+        },
+        "master_id": {
+          "sources": [
+            "MASTERID"
+          ],
+          "transform": "int"
+        },
+        "address": {
+          "sources": [
+            "BASICCOMPANYADDRESS"
+          ],
+          "transform": "string"
+        },
+        "state": {
+          "sources": [
+            "STATENAME"
+          ],
+          "transform": "string"
+        },
+        "country": {
+          "sources": [
+            "COUNTRYNAME"
+          ],
+          "transform": "string"
+        },
+        "pincode": {
+          "sources": [
+            "PINCODE"
+          ],
+          "transform": "string"
+        },
+        "email": {
+          "sources": [
+            "EMAIL"
+          ],
+          "transform": "string"
+        },
+        "phone": {
+          "sources": [
+            "PHONENUMBER"
+          ],
+          "transform": "string"
+        },
+        "gst_type": {
+          "sources": [
+            "GSTREGISTRATIONTYPE"
+          ],
+          "transform": "string"
+        },
+        "gstin": {
+          "sources": [
+            "PARTYGSTIN"
+          ],
+          "transform": "string"
+        },
+        "pan": {
+          "sources": [
+            "INCOMETAXNUMBER"
+          ],
+          "transform": "string"
+        }
+      }
+    }
+  },
+  "groups": {
+    "request": {
+      "id": "AllGroups",
+      "collection_name": "AllGroups",
+      "object_type": "Group",
+      "fetch": [
+        "NAME",
+        "PARENT",
+        "MASTERID",
+        "ISREVENUE",
+        "ISDEEMEDPOSITIVE",
+        "SORTPOSITION",
+        "AFFECTSSTOCK",
+        "ISSUBLEDGER"
+      ]
+    },
+    "response": {
+      "mode": "list",
+      "row_tag": "GROUP",
+      "required_field": "name",
+      "fields": {
+        "name": {
+          "sources": [
+            "NAME",
+            "@NAME"
+          ],
+          "transform": "string"
+        },
+        "parent": {
+          "sources": [
+            "PARENT"
+          ],
+          "transform": "string"
+        },
+        "master_id": {
+          "sources": [
+            "MASTERID"
+          ],
+          "transform": "int"
+        },
+        "is_revenue": {
+          "sources": [
+            "ISREVENUE"
+          ],
+          "transform": "string",
+          "default": "No"
+        },
+        "affects_stock": {
+          "sources": [
+            "AFFECTSSTOCK"
+          ],
+          "transform": "string",
+          "default": "No"
+        },
+        "is_subledger": {
+          "sources": [
+            "ISSUBLEDGER"
+          ],
+          "transform": "string",
+          "default": "No"
+        }
+      }
+    }
+  },
+  "ledgers": {
+    "request": {
+      "id": "AllLedgers",
+      "collection_name": "AllLedgers",
+      "object_type": "Ledger",
+      "fetch": [
+        "NAME",
+        "PARENT",
+        "OPENINGBALANCE",
+        "CLOSINGBALANCE",
+        "MASTERID",
+        "EMAIL",
+        "LEDGERPHONE",
+        "LEDGERMOBILE",
+        "PINCODE",
+        "PARTYGSTIN",
+        "LEDSTATENAME",
+        "COUNTRYNAME",
+        "CREDITPERIOD",
+        "CREDITLIMIT",
+        "BANKACCOUNT",
+        "IFSCODE",
+        "INCOMETAXNUMBER",
+        "MAILINGNAME",
+        "GUID"
+      ]
+    },
+    "response": {
+      "mode": "list",
+      "row_tag": "LEDGER",
+      "required_field": "name",
+      "fields": {
+        "name": {
+          "sources": [
+            "NAME",
+            "@NAME"
+          ],
+          "transform": "string"
+        },
+        "group_name": {
+          "sources": [
+            "PARENT"
+          ],
+          "transform": "string"
+        },
+        "opening_balance": {
+          "sources": [
+            "OPENINGBALANCE"
+          ],
+          "transform": "float"
+        },
+        "closing_balance": {
+          "sources": [
+            "CLOSINGBALANCE"
+          ],
+          "transform": "float"
+        },
+        "master_id": {
+          "sources": [
+            "MASTERID"
+          ],
+          "transform": "int"
+        },
+        "email": {
+          "sources": [
+            "EMAIL"
+          ],
+          "transform": "string"
+        },
+        "phone": {
+          "sources": [
+            "LEDGERPHONE"
+          ],
+          "transform": "string"
+        },
+        "mobile": {
+          "sources": [
+            "LEDGERMOBILE"
+          ],
+          "transform": "string"
+        },
+        "pincode": {
+          "sources": [
+            "PINCODE"
+          ],
+          "transform": "string"
+        },
+        "gstin": {
+          "sources": [
+            "PARTYGSTIN"
+          ],
+          "transform": "string"
+        },
+        "state": {
+          "sources": [
+            "LEDSTATENAME"
+          ],
+          "transform": "string"
+        },
+        "country": {
+          "sources": [
+            "COUNTRYNAME"
+          ],
+          "transform": "string"
+        },
+        "credit_period": {
+          "sources": [
+            "CREDITPERIOD"
+          ],
+          "transform": "string"
+        },
+        "credit_limit": {
+          "sources": [
+            "CREDITLIMIT"
+          ],
+          "transform": "float"
+        },
+        "bank_account": {
+          "sources": [
+            "BANKACCOUNT"
+          ],
+          "transform": "string"
+        },
+        "ifsc_code": {
+          "sources": [
+            "IFSCODE"
+          ],
+          "transform": "string"
+        },
+        "pan": {
+          "sources": [
+            "INCOMETAXNUMBER"
+          ],
+          "transform": "string"
+        },
+        "mailing_name": {
+          "sources": [
+            "MAILINGNAME"
+          ],
+          "transform": "string"
+        },
+        "guid": {
+          "sources": [
+            "GUID"
+          ],
+          "transform": "string"
+        }
+      }
+    }
+  },
+  "vouchers": {
+    "request": {
+      "id": "AllVouchers",
+      "collection_name": "AllVouchers",
+      "object_type": "Voucher",
+      "fetch": [
+        "GUID",
+        "DATE",
+        "VOUCHERTYPENAME",
+        "VOUCHERNUMBER",
+        "PARTYLEDGERNAME",
+        "AMOUNT",
+        "REFERENCE",
+        "PERSISTEDVIEW",
+        "ISINVOICE",
+        "ISCANCELLED",
+        "NARRATION",
+        "ALLINVENTORYENTRIES",
+        "ALLLEDGERENTRIES"
+      ],
+      "filters": [
+        "NotCancelledVouchers",
+        "NotOptionalVouchers"
+      ],
+      "system_formulae": [
+        {
+          "name": "NotCancelledVouchers",
+          "expression": "NOT $IsCancelled"
+        },
+        {
+          "name": "NotOptionalVouchers",
+          "expression": "NOT $IsOptional"
+        }
+      ],
+      "static_variables": [
+        {
+          "name": "SVFROMDATE",
+          "value": "{{from_date}}"
+        },
+        {
+          "name": "SVTODATE",
+          "value": "{{to_date}}"
+        }
+      ]
+    },
+    "response": {
+      "mode": "list",
+      "row_path_options": [
+        "ENVELOPE.BODY.DATA.COLLECTION.VOUCHER",
+        "messages.VOUCHER"
+      ],
+      "required_field": "tally_guid",
+      "fields": {
+        "tally_guid": {
+          "sources": [
+            "@REMOTEID",
+            "GUID"
+          ],
+          "transform": "string"
+        },
+        "voucher_number": {
+          "sources": [
+            "VOUCHERNUMBER"
+          ],
+          "transform": "string"
+        },
+        "voucher_type": {
+          "sources": [
+            "@VCHTYPE",
+            "VOUCHERTYPENAME"
+          ],
+          "transform": "string"
+        },
+        "date": {
+          "sources": [
+            "DATE"
+          ],
+          "transform": "date"
+        },
+        "party_name": {
+          "sources": [
+            "PARTYLEDGERNAME"
+          ],
+          "transform": "string"
+        },
+        "amount": {
+          "sources": [
+            "AMOUNT"
+          ],
+          "transform": "float"
+        },
+        "narration": {
+          "sources": [
+            "NARRATION"
+          ],
+          "transform": "string"
+        },
+        "is_cancelled": {
+          "sources": [
+            "ISCANCELLED"
+          ],
+          "transform": "bool_yesno"
+        },
+        "reference": {
+          "sources": [
+            "REFERENCE"
+          ],
+          "transform": "string"
+        },
+        "is_invoice": {
+          "sources": [
+            "ISINVOICE"
+          ],
+          "transform": "bool_yesno"
+        },
+        "view": {
+          "sources": [
+            "PERSISTEDVIEW",
+            "@OBJVIEW"
+          ],
+          "transform": "string"
+        }
+      },
+      "children": [
+        {
+          "name": "items",
+          "source_paths": [
+            "ALLINVENTORYENTRIES.LIST",
+            "INVENTORYENTRIES.LIST"
+          ],
+          "required_field": "stock_item_name",
+          "fields": {
+            "stock_item_name": {
+              "sources": [
+                "STOCKITEMNAME"
+              ],
+              "transform": "string"
+            },
+            "quantity": {
+              "sources": [
+                "ACTUALQTY"
+              ],
+              "transform": "quantity_value_abs"
+            },
+            "unit": {
+              "sources": [
+                "ACTUALQTY"
+              ],
+              "transform": "quantity_unit",
+              "default": "Nos"
+            },
+            "rate": {
+              "sources": [
+                "RATE"
+              ],
+              "transform": "float"
+            },
+            "discount_pct": {
+              "sources": [
+                "DISCOUNT"
+              ],
+              "transform": "float"
+            },
+            "amount": {
+              "sources": [
+                "AMOUNT"
+              ],
+              "transform": "float"
+            }
+          }
+        },
+        {
+          "name": "ledger_entries",
+          "source_paths": [
+            "ALLLEDGERENTRIES.LIST",
+            "LEDGERENTRIES.LIST"
+          ],
+          "required_field": "ledger_name",
+          "fields": {
+            "ledger_name": {
+              "sources": [
+                "LEDGERNAME"
+              ],
+              "transform": "string"
+            },
+            "amount": {
+              "sources": [
+                "AMOUNT"
+              ],
+              "transform": "float"
+            },
+            "is_party_ledger": {
+              "sources": [
+                "ISPARTYLEDGER"
+              ],
+              "transform": "bool_yesno"
+            },
+            "is_deemed_positive": {
+              "sources": [
+                "ISDEEMEDPOSITIVE"
+              ],
+              "transform": "bool_yesno"
+            }
+          },
+          "children": [
+            {
+              "name": "bill_allocations",
+              "source_paths": [
+                "BILLALLOCATIONS.LIST"
+              ],
+              "fields": {
+                "name": {
+                  "sources": [
+                    "NAME"
+                  ],
+                  "transform": "string"
+                },
+                "bill_type": {
+                  "sources": [
+                    "BILLTYPE"
+                  ],
+                  "transform": "string"
+                },
+                "amount": {
+                  "sources": [
+                    "AMOUNT"
+                  ],
+                  "transform": "float"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "outstanding_receivables": {
+    "request": {
+      "type": "Data",
+      "id": "Bills Receivable"
+    },
+    "response": {
+      "mode": "indexed_rows",
+      "length_source": "bill",
+      "required_field": "party_name",
+      "index_sources": {
+        "bill": "ENVELOPE.BILLFIXED",
+        "closing": "ENVELOPE.BILLCL",
+        "due": "ENVELOPE.BILLDUE",
+        "overdue": "ENVELOPE.BILLOVERDUE"
+      },
+      "fields": {
+        "party_name": {
+          "sources": [
+            "bill.BILLPARTY"
+          ],
+          "transform": "string"
+        },
+        "type": {
+          "sources": [],
+          "transform": "string",
+          "default": "receivable"
+        },
+        "voucher_number": {
+          "sources": [
+            "bill.BILLREF"
+          ],
+          "transform": "string"
+        },
+        "voucher_date": {
+          "sources": [
+            "bill.BILLDATE"
+          ],
+          "transform": "date"
+        },
+        "due_date": {
+          "sources": [
+            "due"
+          ],
+          "transform": "date"
+        },
+        "original_amount": {
+          "sources": [
+            "closing"
+          ],
+          "transform": "abs_float"
+        },
+        "pending_amount": {
+          "sources": [
+            "closing"
+          ],
+          "transform": "abs_float"
+        },
+        "days_overdue": {
+          "sources": [
+            "overdue"
+          ],
+          "transform": "int"
+        }
+      }
+    }
+  },
+  "outstanding_payables": {
+    "request": {
+      "type": "Data",
+      "id": "Bills Payable"
+    },
+    "response": {
+      "mode": "indexed_rows",
+      "length_source": "bill",
+      "required_field": "party_name",
+      "index_sources": {
+        "bill": "ENVELOPE.BILLFIXED",
+        "closing": "ENVELOPE.BILLCL",
+        "due": "ENVELOPE.BILLDUE",
+        "overdue": "ENVELOPE.BILLOVERDUE"
+      },
+      "fields": {
+        "party_name": {
+          "sources": [
+            "bill.BILLPARTY"
+          ],
+          "transform": "string"
+        },
+        "type": {
+          "sources": [],
+          "transform": "string",
+          "default": "payable"
+        },
+        "voucher_number": {
+          "sources": [
+            "bill.BILLREF"
+          ],
+          "transform": "string"
+        },
+        "voucher_date": {
+          "sources": [
+            "bill.BILLDATE"
+          ],
+          "transform": "date"
+        },
+        "due_date": {
+          "sources": [
+            "due"
+          ],
+          "transform": "date"
+        },
+        "original_amount": {
+          "sources": [
+            "closing"
+          ],
+          "transform": "abs_float"
+        },
+        "pending_amount": {
+          "sources": [
+            "closing"
+          ],
+          "transform": "abs_float"
+        },
+        "days_overdue": {
+          "sources": [
+            "overdue"
+          ],
+          "transform": "int"
+        }
+      }
+    }
+  },
+  "profit_loss": {
+    "request": {
+      "type": "Data",
+      "id": "Profit and Loss",
+      "static_variables": [
+        {
+          "name": "SVFROMDATE",
+          "value": "{{from_date}}"
+        },
+        {
+          "name": "SVTODATE",
+          "value": "{{to_date}}"
+        }
+      ]
+    },
+    "response": {
+      "mode": "indexed_rows",
+      "length_source": "name_row",
+      "required_field": "particulars",
+      "index_sources": {
+        "name_row": "ENVELOPE.DSPACCNAME",
+        "amount_row": "ENVELOPE.PLAMT"
+      },
+      "fields": {
+        "particulars": {
+          "sources": [
+            "name_row.DSPDISPNAME"
+          ],
+          "transform": "string"
+        },
+        "_raw_amount": {
+          "sources": [
+            "amount_row.PLSUBAMT",
+            "amount_row.BSMAINAMT"
+          ],
+          "transform": "string"
+        }
+      }
+    }
+  },
+  "balance_sheet": {
+    "request": {
+      "type": "Data",
+      "id": "Balance Sheet",
+      "static_variables": [
+        {
+          "name": "SVFROMDATE",
+          "value": "{{from_date}}"
+        },
+        {
+          "name": "SVTODATE",
+          "value": "{{to_date}}"
+        }
+      ]
+    },
+    "response": {
+      "mode": "indexed_rows",
+      "length_source": "name_row",
+      "required_field": "particulars",
+      "index_sources": {
+        "name_row": "ENVELOPE.DSPACCNAME",
+        "amount_row": "ENVELOPE.BSAMT",
+        "info_row": "ENVELOPE.DSPACCINFO"
+      },
+      "fields": {
+        "particulars": {
+          "sources": [
+            "name_row.DSPDISPNAME"
+          ],
+          "transform": "string"
+        },
+        "_main_amount": {
+          "sources": [
+            "amount_row.BSMAINAMT"
+          ],
+          "transform": "string"
+        },
+        "_sub_amount": {
+          "sources": [
+            "amount_row.BSSUBAMT"
+          ],
+          "transform": "string"
+        },
+        "_debit_amount": {
+          "sources": [
+            "info_row.DSPCLDRAMT.DSPCLDRAMTA"
+          ],
+          "transform": "string"
+        },
+        "_credit_amount": {
+          "sources": [
+            "info_row.DSPCLCRAMT.DSPCLCRAMTA"
+          ],
+          "transform": "string"
+        }
+      }
+    }
+  },
+  "trial_balance": {
+    "request": {
+      "type": "Data",
+      "id": "Trial Balance",
+      "static_variables": [
+        {
+          "name": "SVFROMDATE",
+          "value": "{{from_date}}"
+        },
+        {
+          "name": "SVTODATE",
+          "value": "{{to_date}}"
+        }
+      ]
+    },
+    "response": {
+      "mode": "indexed_rows",
+      "length_source": "name_row",
+      "required_field": "particulars",
+      "index_sources": {
+        "name_row": "ENVELOPE.DSPACCNAME",
+        "info_row": "ENVELOPE.DSPACCINFO"
+      },
+      "fields": {
+        "particulars": {
+          "sources": [
+            "name_row.DSPDISPNAME"
+          ],
+          "transform": "string"
+        },
+        "debit": {
+          "sources": [
+            "info_row.DSPCLDRAMT.DSPCLDRAMTA"
+          ],
+          "transform": "float"
+        },
+        "credit": {
+          "sources": [
+            "info_row.DSPCLCRAMT.DSPCLCRAMTA"
+          ],
+          "transform": "float"
+        }
+      }
+    }
+  },
+  "stock_items": {
+    "request": {
+      "id": "StockItemSummary",
+      "collection_name": "StockItemSummary",
+      "object_type": "StockItem",
+      "fetch": [
+        "NAME",
+        "PARENT",
+        "BASEUNITS",
+        "CLOSINGBALANCE",
+        "CLOSINGVALUE",
+        "CLOSINGRATE"
+      ]
+    },
+    "response": {
+      "mode": "list",
+      "row_tag": "STOCKITEM",
+      "required_field": "name",
+      "fields": {
+        "name": {
+          "sources": [
+            "NAME",
+            "@NAME"
+          ],
+          "transform": "string"
+        },
+        "group_name": {
+          "sources": [
+            "PARENT"
+          ],
+          "transform": "string"
+        },
+        "unit": {
+          "sources": [
+            "BASEUNITS",
+            "CLOSINGBALANCE",
+            "STKCLOSINGBALANCE",
+            "STKCLBALANCE",
+            "CLOSINGQTY"
+          ],
+          "transform": "quantity_unit",
+          "default": "Nos"
+        },
+        "closing_qty": {
+          "sources": [
+            "CLOSINGBALANCE",
+            "STKCLOSINGBALANCE",
+            "STKCLBALANCE",
+            "CLOSINGQTY"
+          ],
+          "transform": "quantity_value_abs"
+        },
+        "closing_value": {
+          "sources": [
+            "CLOSINGVALUE",
+            "STKCLOSINGVALUE",
+            "CLOSINGAMOUNT"
+          ],
+          "transform": "abs_float"
+        },
+        "rate": {
+          "sources": [
+            "CLOSINGRATE",
+            "RATE"
+          ],
+          "transform": "float"
+        }
+      }
+    }
+  }
+}
