@@ -4,6 +4,13 @@ import path from "path";
 import isDev from "electron-is-dev";
 import { store, updateCompanyStatus } from "./store";
 
+type SyncRecordCounts = {
+  ledgers: number;
+  vouchers: number;
+  stock: number;
+  outstanding: number;
+};
+
 export class SyncEngine {
   private timer: NodeJS.Timeout | null = null;
   private mainWindow: BrowserWindow;
@@ -75,7 +82,7 @@ export class SyncEngine {
 
       // Python path — system Python in dev, bundled exe in production
       const pythonBin = isDev
-        ? "python"
+        ? process.platform === "win32" ? "python" : "python3"
         : path.join(process.resourcesPath, "python-runtime", "tallybridge-engine.exe");
 
       const scriptPath = isDev
@@ -114,14 +121,20 @@ export class SyncEngine {
 
       proc.on("close", (code) => {
         if (code === 0) {
-          let records = { ledgers: 0, vouchers: 0, stock: 0, outstanding: 0 };
+          const existing = store.get("companies").find((c) => c.id === companyId);
+          let records: SyncRecordCounts = existing?.lastSyncRecords || {
+            ledgers: 0,
+            vouchers: 0,
+            stock: 0,
+            outstanding: 0,
+          };
           let status = "success";
           try {
             // Find the last line that starts with "{" (tally/python logs might have trailing empty lines or junk)
             const validJsonLine = [...outputLines].reverse().find(line => line.trim().startsWith("{"));
             if (validJsonLine) {
               const parsed = JSON.parse(validJsonLine.trim());
-              records = parsed.records || records;
+              records = this.mergeRecordCounts(records, parsed.records);
               status = parsed.status || "success";
             }
           } catch (e) {
@@ -130,7 +143,6 @@ export class SyncEngine {
 
           // If sync was skipped (no changes), keep previous record counts
           if (status === "skipped") {
-            const existing = store.get("companies").find((c) => c.id === companyId);
             records = existing?.lastSyncRecords || records;
           }
 
@@ -160,5 +172,17 @@ export class SyncEngine {
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
       this.mainWindow.webContents.send(channel, data);
     }
+  }
+
+  private mergeRecordCounts(
+    base: SyncRecordCounts,
+    updates: Partial<Record<keyof SyncRecordCounts, number>> | undefined,
+  ): SyncRecordCounts {
+    return {
+      ledgers: typeof updates?.ledgers === "number" ? updates.ledgers : base.ledgers,
+      vouchers: typeof updates?.vouchers === "number" ? updates.vouchers : base.vouchers,
+      stock: typeof updates?.stock === "number" ? updates.stock : base.stock,
+      outstanding: typeof updates?.outstanding === "number" ? updates.outstanding : base.outstanding,
+    };
   }
 }

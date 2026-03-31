@@ -3,6 +3,94 @@ import { supabase } from "../db/supabase.js";
 import { requireApiKey } from "../middleware/auth.js";
 
 const router = Router();
+const BATCH_SIZE = 250;
+
+function chunkArray<T>(items: T[], size = BATCH_SIZE): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function buildRecordCounts(sections: Record<string, unknown>) {
+  const records: Record<string, number> = {};
+  for (const [key, value] of Object.entries(sections)) {
+    if (Array.isArray(value)) {
+      records[key] = value.length;
+    }
+  }
+  return records;
+}
+
+async function upsertInBatches(
+  table: string,
+  rows: any[],
+  onConflict: string,
+  label: string
+) {
+  if (!rows.length) return;
+
+  for (const chunk of chunkArray(rows)) {
+    const { error } = await supabase.from(table).upsert(chunk, { onConflict });
+    if (error) {
+      throw new Error(`${label} upsert failed: ${error.message}`);
+    }
+  }
+}
+
+async function insertInBatches(table: string, rows: any[], label: string) {
+  if (!rows.length) return;
+
+  for (const chunk of chunkArray(rows)) {
+    const { error } = await supabase.from(table).insert(chunk);
+    if (error) {
+      throw new Error(`${label} insert failed: ${error.message}`);
+    }
+  }
+}
+
+async function deleteByEq(table: string, column: string, value: string, label: string) {
+  const { error } = await supabase.from(table).delete().eq(column, value);
+  if (error) {
+    throw new Error(`${label} delete failed: ${error.message}`);
+  }
+}
+
+async function deleteByIn(table: string, column: string, values: string[], label: string) {
+  if (!values.length) return;
+
+  for (const chunk of chunkArray(values)) {
+    const { error } = await supabase.from(table).delete().in(column, chunk);
+    if (error) {
+      throw new Error(`${label} delete failed: ${error.message}`);
+    }
+  }
+}
+
+async function getVoucherIdMap(companyId: string, tallyGuids: string[]) {
+  const voucherIdMap = new Map<string, string>();
+
+  for (const chunk of chunkArray(tallyGuids)) {
+    const { data, error } = await supabase
+      .from("vouchers")
+      .select("id, tally_guid")
+      .eq("company_id", companyId)
+      .in("tally_guid", chunk);
+
+    if (error) {
+      throw new Error(`Voucher id lookup failed: ${error.message}`);
+    }
+
+    for (const row of data || []) {
+      if (row.tally_guid && row.id) {
+        voucherIdMap.set(row.tally_guid, row.id);
+      }
+    }
+  }
+
+  return voucherIdMap;
+}
 
 // ── POST /api/sync — Receive all data from desktop connector ────
 
@@ -24,6 +112,19 @@ router.post("/", requireApiKey, async (req, res) => {
     return res.status(400).json({ error: "company_name required" });
   }
 
+  let company_id: string | null = null;
+  const syncedAt = new Date().toISOString();
+  const records = buildRecordCounts({
+    groups,
+    ledgers,
+    vouchers,
+    stock_items,
+    outstanding,
+    profit_loss,
+    balance_sheet,
+    trial_balance,
+  });
+
   try {
     // 1. Upsert company
     const { data: company, error: companyErr } = await supabase
@@ -31,7 +132,7 @@ router.post("/", requireApiKey, async (req, res) => {
       .upsert(
         { 
           name: company_name, 
-          last_synced_at: new Date().toISOString(),
+          last_synced_at: syncedAt,
           ...(company_info?.books_from ? { books_from: company_info.books_from } : {}),
           ...(company_info?.books_to ? { books_to: company_info.books_to } : {}),
           ...(company_info?.gstin ? { gstin: company_info.gstin } : {}),
@@ -45,155 +146,132 @@ router.post("/", requireApiKey, async (req, res) => {
     if (companyErr || !company) {
       throw new Error(`Company upsert failed: ${companyErr?.message}`);
     }
-    const company_id = company.id;
+    const companyId = company.id;
+    company_id = companyId;
 
     // 1.5 Upsert groups
-    if (groups?.length) {
-      const rows = groups.map((g: any) => ({ ...g, company_id, synced_at: new Date().toISOString() }));
-      const { error } = await supabase.from("groups").upsert(rows, { onConflict: "company_id,name" });
-      if (error) console.error("[Sync] Groups error:", error.message);
+    if (Array.isArray(groups)) {
+      const rows = groups.map((g: any) => ({ ...g, company_id: companyId, synced_at: syncedAt }));
+      await upsertInBatches("groups", rows, "company_id,name", "Groups");
     }
 
     // 2. Upsert ledgers
-    if (ledgers?.length) {
-      const rows = ledgers.map((l: any) => ({ ...l, company_id, synced_at: new Date().toISOString() }));
-      const { error } = await supabase.from("ledgers").upsert(rows, { onConflict: "company_id,name" });
-      if (error) console.error("[Sync] Ledger error:", error.message);
+    if (Array.isArray(ledgers)) {
+      const rows = ledgers.map((l: any) => ({ ...l, company_id: companyId, synced_at: syncedAt }));
+      await upsertInBatches("ledgers", rows, "company_id,name", "Ledgers");
     }
 
-    // 3. Upsert vouchers + items + ledger entries
-    if (vouchers?.length) {
-      for (const v of vouchers) {
-        // Extract related collections so they don't get sent to the 'vouchers' table insertion
-        const { items, ledger_entries, ...vData } = v;
+    // 3. Upsert vouchers + items + ledger entries in batches
+    if (Array.isArray(vouchers)) {
+      const validVouchers = vouchers.filter((v: any) => v?.tally_guid);
+      const voucherRows = validVouchers.map(({ items, ledger_entries, ...vData }: any) => ({
+        ...vData,
+        company_id: companyId,
+        synced_at: syncedAt,
+      }));
 
-        // Skip vouchers with no guid
-        if (!vData.tally_guid) continue;
+      await upsertInBatches("vouchers", voucherRows, "company_id,tally_guid", "Vouchers");
 
-        const { data: upserted, error: vErr } = await supabase
-          .from("vouchers")
-          .upsert(
-            { ...vData, company_id, synced_at: new Date().toISOString() },
-            { onConflict: "company_id,tally_guid" }
-          )
-          .select("id")
-          .single();
+      if (voucherRows.length) {
+        const voucherIdMap = await getVoucherIdMap(
+          companyId,
+          voucherRows.map((voucher: any) => voucher.tally_guid)
+        );
+        const voucherIds = [...voucherIdMap.values()];
 
-        if (vErr || !upserted) continue;
+        await deleteByIn("voucher_items", "voucher_id", voucherIds, "Voucher items");
+        await deleteByIn("voucher_ledger_entries", "voucher_id", voucherIds, "Voucher ledger entries");
 
-        if (items?.length) {
-          // Delete old items then re-insert fresh
-          await supabase.from("voucher_items").delete().eq("voucher_id", upserted.id);
-          const itemRows = items
-            .filter((i: any) => i.stock_item_name)
-            .map((i: any) => ({ ...i, voucher_id: upserted.id }));
-          if (itemRows.length) {
-            await supabase.from("voucher_items").insert(itemRows);
+        const itemRows: any[] = [];
+        const entryRows: any[] = [];
+
+        for (const voucher of validVouchers) {
+          const voucherId = voucherIdMap.get(voucher.tally_guid);
+          if (!voucherId) {
+            throw new Error(`Voucher id missing after upsert for ${voucher.tally_guid}`);
           }
-        }
 
-        if (ledger_entries?.length) {
-          // Delete old ledger entries then re-insert fresh
-          await supabase.from("voucher_ledger_entries").delete().eq("voucher_id", upserted.id);
-          const entryRows = ledger_entries
-            .filter((le: any) => le.ledger_name)
-            .map((le: any) => {
-              // Extract bill_allocations to prevent it trying to insert into the entries table directly 
-              // (can optionally be saved to another table, but we will store it as jsonb for now)
-              const { bill_allocations, ...leData } = le;
-              return { 
-                ...leData, 
-                voucher_id: upserted.id,
-                bill_allocations: bill_allocations || []
-              };
+          for (const item of voucher.items || []) {
+            if (!item?.stock_item_name) continue;
+            itemRows.push({ ...item, voucher_id: voucherId });
+          }
+
+          for (const entry of voucher.ledger_entries || []) {
+            if (!entry?.ledger_name) continue;
+            const { bill_allocations, ...entryData } = entry;
+            entryRows.push({
+              ...entryData,
+              voucher_id: voucherId,
+              bill_allocations: bill_allocations || [],
             });
-          if (entryRows.length) {
-            await supabase.from("voucher_ledger_entries").insert(entryRows);
           }
         }
+
+        await insertInBatches("voucher_items", itemRows, "Voucher items");
+        await insertInBatches("voucher_ledger_entries", entryRows, "Voucher ledger entries");
       }
     }
 
     // 4. Upsert stock items
-    if (stock_items?.length) {
-      const rows = stock_items.map((s: any) => ({ ...s, company_id, synced_at: new Date().toISOString() }));
-      const { error } = await supabase.from("stock_items").upsert(rows, { onConflict: "company_id,name" });
-      if (error) console.error("[Sync] Stock error:", error.message);
+    if (Array.isArray(stock_items)) {
+      const rows = stock_items.map((s: any) => ({ ...s, company_id: companyId, synced_at: syncedAt }));
+      await upsertInBatches("stock_items", rows, "company_id,name", "Stock items");
     }
 
-    // 5. Replace outstanding (always full refresh — delete all then insert)
-    await supabase.from("outstanding").delete().eq("company_id", company_id);
-    if (outstanding?.length) {
-      const rows = outstanding.map((o: any) => ({ ...o, company_id, synced_at: new Date().toISOString() }));
-      const { error } = await supabase.from("outstanding").insert(rows);
-      if (error) console.error("[Sync] Outstanding error:", error.message);
+    // 5. Replace outstanding only when this section was provided
+    if (Array.isArray(outstanding)) {
+      await deleteByEq("outstanding", "company_id", companyId, "Outstanding");
+      const rows = outstanding.map((o: any) => ({ ...o, company_id: companyId, synced_at: syncedAt }));
+      await insertInBatches("outstanding", rows, "Outstanding");
     }
 
-    // 6. Replace profit & loss (full refresh per sync)
-    await supabase.from("profit_loss").delete().eq("company_id", company_id);
-    if (profit_loss?.length) {
+    // 6. Replace profit & loss only when provided
+    if (Array.isArray(profit_loss)) {
+      await deleteByEq("profit_loss", "company_id", companyId, "Profit & Loss");
       const rows = profit_loss.map((p: any) => ({
         ...p,
-        company_id,
-        synced_at: new Date().toISOString(),
+        company_id: companyId,
+        synced_at: syncedAt,
       }));
-      const { error } = await supabase.from("profit_loss").insert(rows);
-      if (error) console.error("[Sync] P&L error:", error.message);
+      await insertInBatches("profit_loss", rows, "Profit & Loss");
     }
 
-    // 7. Replace balance sheet (full refresh per sync)
-    await supabase.from("balance_sheet").delete().eq("company_id", company_id);
-    if (balance_sheet?.length) {
+    // 7. Replace balance sheet only when provided
+    if (Array.isArray(balance_sheet)) {
+      await deleteByEq("balance_sheet", "company_id", companyId, "Balance Sheet");
       const rows = balance_sheet.map((b: any) => ({
         ...b,
-        company_id,
-        synced_at: new Date().toISOString(),
+        company_id: companyId,
+        synced_at: syncedAt,
       }));
-      const { error } = await supabase.from("balance_sheet").insert(rows);
-      if (error) console.error("[Sync] Balance Sheet error:", error.message);
+      await insertInBatches("balance_sheet", rows, "Balance Sheet");
     }
 
-    // 8. Replace trial balance (full refresh per sync)
-    await supabase.from("trial_balance").delete().eq("company_id", company_id);
-    if (trial_balance?.length) {
+    // 8. Replace trial balance only when provided
+    if (Array.isArray(trial_balance)) {
+      await deleteByEq("trial_balance", "company_id", companyId, "Trial Balance");
       const rows = trial_balance.map((t: any) => ({
         ...t,
-        company_id,
-        synced_at: new Date().toISOString(),
+        company_id: companyId,
+        synced_at: syncedAt,
       }));
-      const { error } = await supabase.from("trial_balance").insert(rows);
-      if (error) console.error("[Sync] Trial Balance error:", error.message);
+      await insertInBatches("trial_balance", rows, "Trial Balance");
     }
 
-    // 9. Log the sync
-    await supabase.from("sync_log").insert({
-      company_id,
+    // 9. Log the sync (best-effort only; don't fail a good data write on log issues)
+    const { error: syncLogError } = await supabase.from("sync_log").insert({
+      company_id: companyId,
       status: "success",
-      records_synced: {
-        groups: groups?.length || 0,
-        ledgers: ledgers?.length || 0,
-        vouchers: vouchers?.length || 0,
-        stock_items: stock_items?.length || 0,
-        outstanding: outstanding?.length || 0,
-        profit_loss: profit_loss?.length || 0,
-        balance_sheet: balance_sheet?.length || 0,
-        trial_balance: trial_balance?.length || 0,
-      },
+      records_synced: records,
     });
+    if (syncLogError) {
+      console.warn("[Sync] Sync log warning:", syncLogError.message);
+    }
 
     res.json({
       success: true,
       company_id,
-      records: {
-        groups: groups?.length || 0,
-        ledgers: ledgers?.length || 0,
-        vouchers: vouchers?.length || 0,
-        stock_items: stock_items?.length || 0,
-        outstanding: outstanding?.length || 0,
-        profit_loss: profit_loss?.length || 0,
-        balance_sheet: balance_sheet?.length || 0,
-        trial_balance: trial_balance?.length || 0,
-      },
+      records,
     });
   } catch (err: any) {
     console.error("[Sync] Error:", err.message);

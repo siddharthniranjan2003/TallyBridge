@@ -134,11 +134,9 @@ def parse_alter_ids(xml_text: str) -> dict:
         return {
             "alter_id":         str(safe_int(company.get("ALTERID",   0))),
             "alt_vch_id":       str(safe_int(company.get("ALTVCHID",  0))),
+            "vch_id":           str(safe_int(company.get("CMPVCHID",  0))),
             "alt_mst_id":       str(safe_int(company.get("ALTMSTID",  0))),
-            "last_voucher_date": parse_tally_date(
-                company.get("LASTVOUCHERDATE", "") if isinstance(
-                    company.get("LASTVOUCHERDATE"), str) else ""
-            ),
+            "last_voucher_date": parse_tally_date(safe_str(company.get("LASTVOUCHERDATE", ""))),
         }
     except Exception as e:
         print(f"[Parser] alter_ids error: {e}")
@@ -349,6 +347,48 @@ def parse_vouchers(xml_text: str) -> list:
 def parse_stock(xml_text: str) -> list:
     try:
         cleaned = clean_xml(xml_text)
+        try:
+            raw = xmltodict.parse(cleaned)
+            body = raw.get("ENVELOPE", {}).get("BODY", {}).get("DATA", {})
+            collection = body.get("COLLECTION", {})
+            stock_items = _ensure_list(collection.get("STOCKITEM", []))
+
+            result = []
+            for item in stock_items:
+                if not item:
+                    continue
+
+                name = safe_str(item.get("NAME") or item.get("@NAME", ""))
+                if not name:
+                    continue
+
+                qty_val = (
+                    item.get("STKCLBALANCE")
+                    or item.get("STKCLOSINGBALANCE")
+                    or item.get("CLOSINGBALANCE")
+                    or item.get("CLOSINGQTY")
+                )
+                value_val = (
+                    item.get("CLOSINGVALUE")
+                    or item.get("STKCLOSINGVALUE")
+                    or item.get("CLOSINGAMOUNT")
+                )
+                rate_val = item.get("CLOSINGRATE") or item.get("RATE")
+
+                result.append({
+                    "name":          name,
+                    "group_name":    safe_str(item.get("PARENT", "")),
+                    "unit":          safe_str(item.get("BASEUNITS", "")) or "Nos",
+                    "closing_qty":   abs(safe_float(qty_val)),
+                    "closing_value": abs(safe_float(value_val)),
+                    "rate":          safe_float(rate_val),
+                })
+
+            if result:
+                return result
+        except Exception:
+            pass
+
         names  = re.findall(r'<DSPDISPNAME>([^<]+)</DSPDISPNAME>', cleaned)
         qtys   = re.findall(r'<DSPCLQTY>([^<]*)</DSPCLQTY>', cleaned)
         rates  = re.findall(r'<DSPCLRATE>([^<]*)</DSPCLRATE>', cleaned)

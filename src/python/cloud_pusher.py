@@ -1,6 +1,6 @@
-import requests
 import os
-import json
+
+import requests
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "")
 API_KEY = os.environ.get("API_KEY", "")
@@ -21,15 +21,26 @@ def push(payload: dict) -> bool:
             timeout=60,
         )
 
-        if response.status_code == 200:
+        if response.ok:
             data = response.json()
+            if data.get("success") is False:
+                print(f"[Cloud] Push failed: {data}")
+                return False
+
             records = data.get("records", {})
             print(f"[Cloud] Sync successful!")
-            print(f"[Cloud] Groups: {records.get('groups', 0)}")
-            print(f"[Cloud] Ledgers: {records.get('ledgers', 0)}")
-            print(f"[Cloud] Vouchers: {records.get('vouchers', 0)}")
-            print(f"[Cloud] Stock: {records.get('stock_items', 0)}")
-            print(f"[Cloud] Outstanding: {records.get('outstanding', 0)}")
+            for key, label in (
+                ("groups", "Groups"),
+                ("ledgers", "Ledgers"),
+                ("vouchers", "Vouchers"),
+                ("stock_items", "Stock"),
+                ("outstanding", "Outstanding"),
+                ("profit_loss", "Profit & Loss"),
+                ("balance_sheet", "Balance Sheet"),
+                ("trial_balance", "Trial Balance"),
+            ):
+                if key in records:
+                    print(f"[Cloud] {label}: {records.get(key, 0)}")
             return True
         else:
             print(f"[Cloud] Push failed: HTTP {response.status_code}")

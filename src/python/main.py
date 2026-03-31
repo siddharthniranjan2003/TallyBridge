@@ -1,12 +1,12 @@
 import os
 import sys
 import json
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from tally_client import (
     get_company_info, get_company_alter_ids,
     get_groups,
-    get_ledgers, get_vouchers, get_stock_items,
+    get_ledgers, get_vouchers, get_stock_items, get_stock_summary_report,
     get_outstanding_receivables, get_outstanding_payables,
     get_profit_and_loss, get_balance_sheet, get_trial_balance,
 )
@@ -25,6 +25,7 @@ COMPANY = os.environ.get("TALLY_COMPANY", "")
 # full sync when nothing has changed in TallyPrime.
 
 CACHE_FILE = os.path.join(os.path.dirname(__file__), ".alter_ids_cache.json")
+VOUCHER_OVERLAP_DAYS = 7
 
 def load_cached_ids() -> dict:
     """Load previously saved alter IDs from disk."""
@@ -50,21 +51,112 @@ def save_cached_ids(ids: dict):
     except Exception as e:
         print(f"[Cache] Could not save alter IDs: {e}")
 
-def has_data_changed(current_ids: dict) -> bool:
-    """Compare current alter IDs with cached ones. Returns True if data changed."""
+def parse_iso_date(iso_str: str):
+    if not iso_str:
+        return None
+    try:
+        return datetime.strptime(iso_str, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def parse_tally_compact_date(compact_str: str):
+    if not compact_str or len(compact_str) != 8 or not compact_str.isdigit():
+        return None
+    try:
+        return date(int(compact_str[:4]), int(compact_str[4:6]), int(compact_str[6:8]))
+    except ValueError:
+        return None
+
+
+def format_tally_compact(d: date) -> str:
+    return d.strftime("%Y%m%d")
+
+
+def build_sync_plan(current_ids: dict, fy_from: str, fy_to: str) -> dict:
+    """Figure out which sections need refreshing and whether vouchers can be incremental."""
+    cached_ids = load_cached_ids()
+
     if not current_ids:
-        return True  # can't detect → assume changed
+        return {
+            "has_changes": True,
+            "master_changed": True,
+            "voucher_changed": True,
+            "need_groups": True,
+            "need_ledgers": True,
+            "need_vouchers": True,
+            "need_stock": True,
+            "need_outstanding": True,
+            "need_reports": True,
+            "voucher_from_date": fy_from,
+            "voucher_to_date": fy_to,
+            "voucher_sync_mode": "full",
+            "reason": "missing_change_markers",
+        }
 
-    cached = load_cached_ids()
-    if not cached:
-        return True  # first run → must sync
+    if not cached_ids:
+        return {
+            "has_changes": True,
+            "master_changed": True,
+            "voucher_changed": True,
+            "need_groups": True,
+            "need_ledgers": True,
+            "need_vouchers": True,
+            "need_stock": True,
+            "need_outstanding": True,
+            "need_reports": True,
+            "voucher_from_date": fy_from,
+            "voucher_to_date": fy_to,
+            "voucher_sync_mode": "full",
+            "reason": "first_successful_sync",
+        }
 
-    # Compare the key counters
-    for key in ("alter_id", "alt_vch_id", "alt_mst_id", "vch_id"):
-        if current_ids.get(key, 0) != cached.get(key, 0):
-            return True
+    company_changed = current_ids.get("alter_id", "0") != cached_ids.get("alter_id", "0")
+    voucher_changed = (
+        current_ids.get("alt_vch_id", "0") != cached_ids.get("alt_vch_id", "0")
+        or current_ids.get("vch_id", "0") != cached_ids.get("vch_id", "0")
+    )
+    master_changed = (
+        current_ids.get("alt_mst_id", "0") != cached_ids.get("alt_mst_id", "0")
+        or (company_changed and not voucher_changed)
+    )
 
-    return False
+    has_changes = company_changed or voucher_changed or master_changed
+    if not has_changes:
+        return {
+            "has_changes": False,
+            "reason": "no_changes",
+        }
+
+    voucher_from_date = fy_from
+    voucher_sync_mode = "none"
+
+    if voucher_changed:
+        voucher_sync_mode = "full"
+        fy_from_date = parse_tally_compact_date(fy_from)
+        cached_last = parse_iso_date(cached_ids.get("last_voucher_date"))
+        current_last = parse_iso_date(current_ids.get("last_voucher_date"))
+
+        if fy_from_date and cached_last and current_last and current_last > cached_last:
+            start_date = max(fy_from_date, cached_last - timedelta(days=VOUCHER_OVERLAP_DAYS))
+            voucher_from_date = format_tally_compact(start_date)
+            voucher_sync_mode = "incremental"
+
+    return {
+        "has_changes": True,
+        "master_changed": master_changed,
+        "voucher_changed": voucher_changed,
+        "need_groups": master_changed,
+        "need_ledgers": master_changed,
+        "need_vouchers": voucher_changed,
+        "need_stock": master_changed or voucher_changed,
+        "need_outstanding": voucher_changed,
+        "need_reports": voucher_changed,
+        "voucher_from_date": voucher_from_date,
+        "voucher_to_date": fy_to,
+        "voucher_sync_mode": voucher_sync_mode,
+        "reason": "changes_detected",
+    }
 
 
 # ── Financial year helpers ───────────────────────────────────────
@@ -116,26 +208,42 @@ def main():
 
     # ── Step 1: Change detection ─────────────────────────────
     current_ids = {}
+    sync_plan = {
+        "has_changes": True,
+        "master_changed": True,
+        "voucher_changed": True,
+        "need_groups": True,
+        "need_ledgers": True,
+        "need_vouchers": True,
+        "need_stock": True,
+        "need_outstanding": True,
+        "need_reports": True,
+        "voucher_from_date": from_date,
+        "voucher_to_date": to_date,
+        "voucher_sync_mode": "full",
+        "reason": "pre_change_detection",
+    }
     try:
         print("[Tally] Checking for changes...")
         raw_ids = get_company_alter_ids()
         current_ids = parse_alter_ids(raw_ids)
+        sync_plan = build_sync_plan(current_ids, from_date, to_date)
 
         if current_ids:
             print(f"[Tally] AlterID={current_ids.get('alter_id')}, "
                   f"VchID={current_ids.get('alt_vch_id')}, "
                   f"MstID={current_ids.get('alt_mst_id')}")
 
-            if not has_data_changed(current_ids):
+            if not sync_plan.get("has_changes"):
                 print("[TallyBridge] No changes detected — skipping sync.")
                 print(json.dumps({
                     "status": "skipped",
                     "reason": "no_changes",
-                    "records": {"ledgers": 0, "vouchers": 0, "stock": 0, "outstanding": 0}
+                    "records": {}
                 }))
                 sys.exit(0)
             else:
-                print("[TallyBridge] Changes detected — proceeding with full sync.")
+                print(f"[TallyBridge] Changes detected — proceeding with {sync_plan.get('voucher_sync_mode', 'full')} sync plan.")
         else:
             print("[TallyBridge] Could not read alter IDs — proceeding with sync anyway.")
     except Exception as e:
@@ -143,45 +251,81 @@ def main():
 
     # ── Step 2: Fetch all data ───────────────────────────────
     try:
-        print("[Tally] Fetching groups...")
-        groups = parse_groups(get_groups())
-        print(f"[Tally] Got {len(groups)} groups")
+        groups = None
+        ledgers = None
+        vouchers = None
+        stock = None
+        outstanding = None
+        profit_loss = None
+        balance_sheet = None
+        trial_balance = None
+        record_updates = {}
 
-        print("[Tally] Fetching ledgers...")
-        ledgers = parse_ledgers(get_ledgers())
-        print(f"[Tally] Got {len(ledgers)} ledgers")
+        if sync_plan.get("need_groups"):
+            print("[Tally] Fetching groups...")
+            groups = parse_groups(get_groups())
+            print(f"[Tally] Got {len(groups)} groups")
 
-        print("[Tally] Fetching vouchers...")
-        vouchers = parse_vouchers(get_vouchers(from_date, to_date))
-        print(f"[Tally] Got {len(vouchers)} vouchers")
+        if sync_plan.get("need_ledgers"):
+            print("[Tally] Fetching ledgers...")
+            ledgers = parse_ledgers(get_ledgers())
+            record_updates["ledgers"] = len(ledgers)
+            print(f"[Tally] Got {len(ledgers)} ledgers")
 
-        print("[Tally] Fetching stock items...")
-        stock = parse_stock(get_stock_items())
-        print(f"[Tally] Got {len(stock)} stock items")
+        if sync_plan.get("need_vouchers"):
+            voucher_from_date = sync_plan.get("voucher_from_date", from_date)
+            voucher_to_date = sync_plan.get("voucher_to_date", to_date)
+            print(f"[Tally] Fetching vouchers ({voucher_from_date} to {voucher_to_date})...")
+            vouchers = parse_vouchers(get_vouchers(voucher_from_date, voucher_to_date))
+            record_updates["vouchers"] = len(vouchers)
+            print(f"[Tally] Got {len(vouchers)} vouchers")
 
-        print("[Tally] Fetching outstanding...")
-        outstanding = (
-            parse_outstanding(get_outstanding_receivables(), "receivable") +
-            parse_outstanding(get_outstanding_payables(), "payable")
-        )
-        print(f"[Tally] Got {len(outstanding)} outstanding entries")
+        if sync_plan.get("need_stock"):
+            print("[Tally] Fetching stock items...")
+            try:
+                stock = parse_stock(get_stock_items())
+                metrics_detected = any(
+                    item.get("closing_value") or item.get("rate")
+                    for item in stock
+                )
+                if stock and metrics_detected:
+                    print(f"[Tally] Got {len(stock)} stock items via structured collection")
+                else:
+                    print("[Tally] Structured stock export was sparse — falling back to Stock Summary report")
+                    stock = parse_stock(get_stock_summary_report())
+                    print(f"[Tally] Got {len(stock)} stock items via Stock Summary report")
+            except Exception as e:
+                print(f"[Tally] Structured stock export failed ({e}) — falling back to Stock Summary report")
+                stock = parse_stock(get_stock_summary_report())
+                print(f"[Tally] Got {len(stock)} stock items via Stock Summary report")
+            record_updates["stock"] = len(stock)
 
-        # ── Financial reports ────────────────────────────────
-        print("[Tally] Fetching Profit & Loss...")
-        profit_loss = parse_profit_and_loss(get_profit_and_loss(from_date, to_date))
-        print(f"[Tally] Got {len(profit_loss)} P&L line items")
+        if sync_plan.get("need_outstanding"):
+            print("[Tally] Fetching outstanding...")
+            outstanding = (
+                parse_outstanding(get_outstanding_receivables(), "receivable") +
+                parse_outstanding(get_outstanding_payables(), "payable")
+            )
+            record_updates["outstanding"] = len(outstanding)
+            print(f"[Tally] Got {len(outstanding)} outstanding entries")
 
-        print("[Tally] Fetching Balance Sheet...")
-        balance_sheet = parse_balance_sheet(get_balance_sheet(from_date, to_date))
-        print(f"[Tally] Got {len(balance_sheet)} Balance Sheet items")
+        if sync_plan.get("need_reports"):
+            # ── Financial reports ────────────────────────────────
+            print("[Tally] Fetching Profit & Loss...")
+            profit_loss = parse_profit_and_loss(get_profit_and_loss(from_date, to_date))
+            print(f"[Tally] Got {len(profit_loss)} P&L line items")
 
-        print("[Tally] Fetching Trial Balance...")
-        trial_balance = parse_trial_balance(get_trial_balance(from_date, to_date))
-        print(f"[Tally] Got {len(trial_balance)} Trial Balance items")
+            print("[Tally] Fetching Balance Sheet...")
+            balance_sheet = parse_balance_sheet(get_balance_sheet(from_date, to_date))
+            print(f"[Tally] Got {len(balance_sheet)} Balance Sheet items")
+
+            print("[Tally] Fetching Trial Balance...")
+            trial_balance = parse_trial_balance(get_trial_balance(from_date, to_date))
+            print(f"[Tally] Got {len(trial_balance)} Trial Balance items")
 
         # ── Step 3: Push to cloud ────────────────────────────
         print("[Cloud] Pushing to backend...")
-        push({
+        payload = {
             "company_name": COMPANY,
             "company_info": company_info,
             "groups": groups,
@@ -192,7 +336,17 @@ def main():
             "profit_loss": profit_loss,
             "balance_sheet": balance_sheet,
             "trial_balance": trial_balance,
-        })
+            "sync_meta": {
+                "voucher_sync_mode": sync_plan.get("voucher_sync_mode", "full"),
+                "voucher_from_date": sync_plan.get("voucher_from_date"),
+                "voucher_to_date": sync_plan.get("voucher_to_date"),
+                "master_changed": sync_plan.get("master_changed", True),
+                "voucher_changed": sync_plan.get("voucher_changed", True),
+            },
+        }
+
+        if not push(payload):
+            raise RuntimeError("Cloud push failed")
 
         # ── Step 4: Cache alter IDs ──────────────────────────
         if current_ids:
@@ -202,16 +356,8 @@ def main():
         # Print JSON summary as last line — Electron reads this
         print(json.dumps({
             "status": "success",
-            "records": {
-                "groups": len(groups),
-                "ledgers": len(ledgers),
-                "vouchers": len(vouchers),
-                "stock": len(stock),
-                "outstanding": len(outstanding),
-                "profit_loss": len(profit_loss),
-                "balance_sheet": len(balance_sheet),
-                "trial_balance": len(trial_balance),
-            }
+            "records": record_updates,
+            "voucher_sync_mode": sync_plan.get("voucher_sync_mode", "full"),
         }))
         sys.exit(0)
 

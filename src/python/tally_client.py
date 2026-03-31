@@ -1,34 +1,70 @@
-import requests
 import os
 import re
+from xml.sax.saxutils import escape
+
+import requests
 
 TALLY_URL = os.environ.get("TALLY_URL", "http://localhost:9000")
 TALLY_COMPANY = os.environ.get("TALLY_COMPANY", "")
 HEADERS = {"Content-Type": "text/xml;charset=utf-8"}
+SESSION = requests.Session()
+
+
+def _xml_escape(value: str) -> str:
+    return escape(value or "")
+
+
+def _decode_response(response: requests.Response) -> str:
+    content_type = response.headers.get("Content-Type", "").lower()
+    content = response.content or b""
+    looks_utf16 = (
+        "utf-16" in content_type
+        or content[:2] in (b"\xff\xfe", b"\xfe\xff")
+        or b"\x00<" in content[:64]
+        or b"<\x00" in content[:64]
+    )
+
+    if looks_utf16:
+        for encoding in ("utf-16", "utf-16-le", "utf-16-be"):
+            try:
+                decoded = content.decode(encoding)
+                if "<ENVELOPE" in decoded.upper() or "<RESPONSE" in decoded.upper():
+                    return decoded
+            except UnicodeDecodeError:
+                continue
+
+    response.encoding = response.encoding or "utf-8"
+    return response.text
 
 
 def _post(xml: str) -> str:
-    response = requests.post(
+    response = SESSION.post(
         TALLY_URL,
         data=xml.strip().encode("utf-8"),
         headers=HEADERS,
         timeout=30
     )
     response.raise_for_status()
-    return response.text
+    return _decode_response(response)
 
 
 def _check_response(xml_text: str) -> str:
     """Check Tally response STATUS tag. Raises on failure (STATUS=0)."""
     # Look for <STATUS>0</STATUS> indicating failure
-    status_match = re.search(r'<STATUS>\s*(\d+)\s*</STATUS>', xml_text)
+    status_match = re.search(r'<STATUS>\s*(\d+)\s*</STATUS>', xml_text, re.IGNORECASE)
     if status_match and status_match.group(1) == "0":
         # Try to extract error description
-        err_match = re.search(r'<DATA>\s*(.*?)\s*</DATA>', xml_text, re.DOTALL)
+        err_match = re.search(r'<DATA>\s*(.*?)\s*</DATA>', xml_text, re.IGNORECASE | re.DOTALL)
         err_desc = err_match.group(1).strip() if err_match else "Unknown error"
         # Clean HTML/XML from error
         err_desc = re.sub(r'<[^>]+>', ' ', err_desc).strip()
         raise RuntimeError(f"Tally returned error: {err_desc}")
+
+    line_error = re.search(r'<LINEERROR>\s*(.*?)\s*</LINEERROR>', xml_text, re.IGNORECASE | re.DOTALL)
+    if line_error:
+        err_desc = re.sub(r'<[^>]+>', ' ', line_error.group(1)).strip()
+        raise RuntimeError(f"Tally returned error: {err_desc}")
+
     return xml_text
 
 
@@ -53,7 +89,7 @@ def get_company_info() -> str:
         <DESC>
           <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-            <SVCURRENTCOMPANY>{TALLY_COMPANY}</SVCURRENTCOMPANY>
+            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
           <TDL>
             <TDLMESSAGE>
@@ -91,7 +127,7 @@ def get_company_alter_ids() -> str:
             <SVFROMDATE TYPE="Date">01-Jan-1970</SVFROMDATE>
             <SVTODATE TYPE="Date">01-Jan-1970</SVTODATE>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-            <SVCURRENTCOMPANY>{TALLY_COMPANY}</SVCURRENTCOMPANY>
+            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
           <TDL>
             <TDLMESSAGE>
@@ -124,7 +160,7 @@ def get_groups() -> str:
         <DESC>
           <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-            <SVCURRENTCOMPANY>{TALLY_COMPANY}</SVCURRENTCOMPANY>
+            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
           <TDL>
             <TDLMESSAGE>
@@ -156,7 +192,7 @@ def get_ledgers() -> str:
         <DESC>
           <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-            <SVCURRENTCOMPANY>{TALLY_COMPANY}</SVCURRENTCOMPANY>
+            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
           <TDL>
             <TDLMESSAGE>
@@ -194,17 +230,46 @@ def get_vouchers(from_date: str, to_date: str) -> str:
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
             <SVFROMDATE>{from_date}</SVFROMDATE>
             <SVTODATE>{to_date}</SVTODATE>
-            <SVCURRENTCOMPANY>{TALLY_COMPANY}</SVCURRENTCOMPANY>
+            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
         </DESC>
       </BODY>
     </ENVELOPE>""")
 
 
-# ── Stock Items ──────────────────────────────────────────────────
+# ── Stock Items / Summary ────────────────────────────────────────
 
 def get_stock_items() -> str:
-    """Fetch stock summary report."""
+    """Fetch stock details via a structured StockItem collection when available."""
+    return _fetch(f"""
+    <ENVELOPE>
+      <HEADER>
+        <VERSION>1</VERSION>
+        <TALLYREQUEST>Export</TALLYREQUEST>
+        <TYPE>Collection</TYPE>
+        <ID>StockItemSummary</ID>
+      </HEADER>
+      <BODY>
+        <DESC>
+          <STATICVARIABLES>
+            <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
+          </STATICVARIABLES>
+          <TDL>
+            <TDLMESSAGE>
+              <COLLECTION NAME="StockItemSummary" ISMODIFY="No">
+                <TYPE>StockItem</TYPE>
+                <FETCH>NAME, PARENT, BASEUNITS, CLOSINGBALANCE, CLOSINGVALUE, CLOSINGRATE</FETCH>
+              </COLLECTION>
+            </TDLMESSAGE>
+          </TDL>
+        </DESC>
+      </BODY>
+    </ENVELOPE>""")
+
+
+def get_stock_summary_report() -> str:
+    """Fallback stock summary report export for older/stricter Tally responses."""
     return _fetch(f"""
     <ENVELOPE>
       <HEADER>
@@ -217,7 +282,7 @@ def get_stock_items() -> str:
         <DESC>
           <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-            <SVCURRENTCOMPANY>{TALLY_COMPANY}</SVCURRENTCOMPANY>
+            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
         </DESC>
       </BODY>
@@ -240,7 +305,7 @@ def get_outstanding_receivables() -> str:
         <DESC>
           <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-            <SVCURRENTCOMPANY>{TALLY_COMPANY}</SVCURRENTCOMPANY>
+            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
         </DESC>
       </BODY>
@@ -261,7 +326,7 @@ def get_outstanding_payables() -> str:
         <DESC>
           <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-            <SVCURRENTCOMPANY>{TALLY_COMPANY}</SVCURRENTCOMPANY>
+            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
         </DESC>
       </BODY>
@@ -286,7 +351,7 @@ def get_profit_and_loss(from_date: str, to_date: str) -> str:
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
             <SVFROMDATE>{from_date}</SVFROMDATE>
             <SVTODATE>{to_date}</SVTODATE>
-            <SVCURRENTCOMPANY>{TALLY_COMPANY}</SVCURRENTCOMPANY>
+            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
         </DESC>
       </BODY>
@@ -309,7 +374,7 @@ def get_balance_sheet(from_date: str, to_date: str) -> str:
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
             <SVFROMDATE>{from_date}</SVFROMDATE>
             <SVTODATE>{to_date}</SVTODATE>
-            <SVCURRENTCOMPANY>{TALLY_COMPANY}</SVCURRENTCOMPANY>
+            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
         </DESC>
       </BODY>
@@ -332,7 +397,7 @@ def get_trial_balance(from_date: str, to_date: str) -> str:
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
             <SVFROMDATE>{from_date}</SVFROMDATE>
             <SVTODATE>{to_date}</SVTODATE>
-            <SVCURRENTCOMPANY>{TALLY_COMPANY}</SVCURRENTCOMPANY>
+            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
         </DESC>
       </BODY>
