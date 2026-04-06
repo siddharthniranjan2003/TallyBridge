@@ -154,7 +154,7 @@ def get_groups() -> str:
         <VERSION>1</VERSION>
         <TALLYREQUEST>Export</TALLYREQUEST>
         <TYPE>Collection</TYPE>
-        <ID>AllGroups</ID>
+        <ID>Group</ID>
       </HEADER>
       <BODY>
         <DESC>
@@ -164,7 +164,7 @@ def get_groups() -> str:
           </STATICVARIABLES>
           <TDL>
             <TDLMESSAGE>
-              <COLLECTION NAME="AllGroups" ISMODIFY="No">
+              <COLLECTION NAME="Group" ISMODIFY="No">
                 <TYPE>Group</TYPE>
                 <FETCH>NAME, PARENT, MASTERID, ISREVENUE, ISDEEMEDPOSITIVE,
                        SORTPOSITION, AFFECTSSTOCK, ISSUBLEDGER</FETCH>
@@ -186,7 +186,7 @@ def get_ledgers() -> str:
         <VERSION>1</VERSION>
         <TALLYREQUEST>Export</TALLYREQUEST>
         <TYPE>Collection</TYPE>
-        <ID>AllLedgers</ID>
+        <ID>Ledger</ID>
       </HEADER>
       <BODY>
         <DESC>
@@ -196,7 +196,7 @@ def get_ledgers() -> str:
           </STATICVARIABLES>
           <TDL>
             <TDLMESSAGE>
-              <COLLECTION NAME="AllLedgers" ISMODIFY="No">
+              <COLLECTION NAME="Ledger" ISMODIFY="No">
                 <TYPE>Ledger</TYPE>
                 <FETCH>NAME, PARENT, OPENINGBALANCE, CLOSINGBALANCE, MASTERID,
                        EMAIL, LEDGERPHONE, LEDGERMOBILE, PINCODE,
@@ -247,7 +247,7 @@ def get_stock_items() -> str:
         <VERSION>1</VERSION>
         <TALLYREQUEST>Export</TALLYREQUEST>
         <TYPE>Collection</TYPE>
-        <ID>StockItemSummary</ID>
+        <ID>StockItem</ID>
       </HEADER>
       <BODY>
         <DESC>
@@ -257,7 +257,7 @@ def get_stock_items() -> str:
           </STATICVARIABLES>
           <TDL>
             <TDLMESSAGE>
-              <COLLECTION NAME="StockItemSummary" ISMODIFY="No">
+              <COLLECTION NAME="StockItem" ISMODIFY="No">
                 <TYPE>StockItem</TYPE>
                 <FETCH>NAME, PARENT, BASEUNITS, CLOSINGBALANCE, CLOSINGVALUE, CLOSINGRATE</FETCH>
               </COLLECTION>

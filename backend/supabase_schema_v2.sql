@@ -27,6 +27,13 @@ ALTER TABLE companies ADD COLUMN IF NOT EXISTS last_outstanding_synced_at TIMEST
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS last_profit_loss_synced_at TIMESTAMPTZ;
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS last_balance_sheet_synced_at TIMESTAMPTZ;
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS last_trial_balance_synced_at TIMESTAMPTZ;
+ALTER TABLE companies DROP CONSTRAINT IF EXISTS companies_name_key;
+DROP INDEX IF EXISTS companies_name_key;
+UPDATE companies SET guid = NULL WHERE guid = '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_guid_unique
+  ON companies(guid)
+  WHERE guid IS NOT NULL AND guid <> '';
+CREATE INDEX IF NOT EXISTS idx_companies_name ON companies(name);
 
 -- 2. Extend Ledgers Table
 ALTER TABLE ledgers ADD COLUMN IF NOT EXISTS master_id INTEGER;

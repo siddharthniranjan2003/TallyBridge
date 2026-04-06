@@ -2,7 +2,7 @@ import { spawn } from "child_process";
 import { app, BrowserWindow } from "electron";
 import path from "path";
 import isDev from "electron-is-dev";
-import { store, SyncRecordCounts, updateCompanyStatus } from "./store";
+import { Company, store, SyncRecordCounts, updateCompanyStatus } from "./store";
 
 type SyncLifecycleCallbacks = {
   onSyncStart?: () => void;
@@ -88,7 +88,7 @@ export class SyncEngine {
           id: company.id,
           status: "syncing",
         });
-        await this.syncOneCompany(company.id, company.name);
+        await this.syncOneCompany(company);
       }
     } finally {
       this.isSyncing = false;
@@ -99,13 +99,15 @@ export class SyncEngine {
     }
   }
 
-  private syncOneCompany(companyId: string, companyName: string): Promise<void> {
+  private syncOneCompany(company: Company): Promise<void> {
     return new Promise((resolve) => {
       const config = store.store;
+      const companyId = company.id;
+      const companyName = company.name;
 
       // Python path — system Python in dev, bundled exe in production
       const pythonBin = isDev
-        ? process.platform === "win32" ? "python" : "python3"
+        ? process.platform === "win32" ? "py" : "python3"
         : path.join(process.resourcesPath, "python-runtime", "tallybridge-engine.exe");
 
       const scriptPath = isDev
@@ -116,12 +118,16 @@ export class SyncEngine {
         ...process.env,
         TALLY_URL: config.tallyUrl,
         TALLY_COMPANY: companyName,
+        TALLY_COMPANY_GUID: company.tallyGuid || "",
+        TB_FORCE_FULL_SYNC: company.lastSyncedAt ? "" : "1",
         BACKEND_URL: config.backendUrl,
         API_KEY: config.apiKey,
         TB_USER_DATA_DIR: app.getPath("userData"),
       };
 
-      const args = isDev ? [scriptPath] : [];
+      const args = isDev
+        ? process.platform === "win32" ? ["-3", scriptPath] : [scriptPath]
+        : [];
       let outputLines: string[] = [];
       let errorOutput = "";
       let settled = false;

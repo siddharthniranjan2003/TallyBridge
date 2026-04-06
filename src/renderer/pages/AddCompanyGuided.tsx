@@ -1,5 +1,5 @@
-export { default } from "./AddCompanyGuided";
-/*
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 type Step = "loading" | "select" | "noTally" | "checking" | "success" | "error";
 
@@ -26,7 +26,7 @@ function getCompanySubtitle(company: TallyCompanyOption) {
   return "TallyPrime";
 }
 
-export default function AddCompany() {
+export default function AddCompanyGuided() {
   const [step, setStep] = useState<Step>("loading");
   const [companies, setCompanies] = useState<TallyCompanyOption[]>([]);
   const [selectedKey, setSelectedKey] = useState("");
@@ -34,7 +34,7 @@ export default function AddCompany() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    fetchCompanies();
+    void fetchCompanies();
   }, []);
 
   const selectedCompany = useMemo(
@@ -49,59 +49,61 @@ export default function AddCompany() {
       setCompanies(result.companies);
       setSelectedKey(getCompanyKey(result.companies[0]));
       setStep("select");
-    } else {
-      setCompanies([]);
-      setSelectedKey("");
-      setStep("noTally");
+      return;
     }
+
+    setCompanies([]);
+    setSelectedKey("");
+    setStep("noTally");
   };
 
   const handleAdd = async () => {
-    if (!selectedCompany) return;
+    if (!selectedCompany) {
+      return;
+    }
+
     setStep("checking");
     const result = await window.electronAPI.addCompany(selectedCompany);
     if (result.success) {
       setStep("success");
-    } else {
-      setErrorMsg(result.error || "Unknown error");
-      setStep("error");
+      return;
     }
+
+    setErrorMsg(result.error || "Unknown error");
+    setStep("error");
   };
 
   return (
     <div style={{ padding: 28, maxWidth: 520 }}>
-      <button onClick={() => navigate("/")} style={backBtn}>← Back</button>
+      <button onClick={() => navigate("/")} style={backBtn}>{"<-"} Back</button>
       <h1 style={{ fontSize: 20, fontWeight: 600, margin: "16px 0 6px" }}>Add Company</h1>
       <p style={{ fontSize: 13, color: "#6c757d", marginBottom: 28 }}>
         Companies currently open in TallyPrime on this PC.
       </p>
 
-      {/* Loading */}
       {step === "loading" && (
-        <CentreState icon="⏳" title="Detecting companies..." subtitle="Reading from TallyPrime..." />
+        <CentreState icon="..." title="Detecting companies..." subtitle="Reading from TallyPrime..." />
       )}
 
-      {/* Tally not running */}
       {step === "noTally" && (
         <CentreState
-          icon="⚠️"
+          icon="!"
           title="TallyPrime not detected"
           subtitle="Open TallyPrime and load your company, then try again."
           error
           action={
-            <button onClick={fetchCompanies} style={primaryBtn}>
-              ↺ Retry
+            <button onClick={() => void fetchCompanies()} style={primaryBtn}>
+              Retry
             </button>
           }
         />
       )}
 
-      {/* Company selector */}
       {step === "select" && (
         <>
           <div style={infoBox}>
             <p style={{ fontWeight: 500, marginBottom: 6, fontSize: 13 }}>
-              ✓ TallyPrime is connected
+              TallyPrime is connected
             </p>
             <p style={{ fontSize: 12, color: "#6c757d" }}>
               {companies.length} {companies.length === 1 ? "company" : "companies"} found
@@ -110,67 +112,77 @@ export default function AddCompany() {
 
           <label style={labelStyle}>Select Company</label>
 
-          {/* Company list — like BizAnalyst */}
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
-            {companies.map((name) => (
-              <div
-                key={name}
-                onClick={() => setSelected(name)}
-                style={{
-                  padding: "12px 16px",
-                  borderRadius: 10,
-                  border: `2px solid ${selected === name ? "#1a1a2e" : "#e9ecef"}`,
-                  background: selected === name ? "#f0f0f5" : "#fff",
-                  cursor: "pointer",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 12,
-                  transition: "all 0.15s",
-                }}
-              >
-                <span style={{ fontSize: 20 }}>🏢</span>
-                <div>
-                  <p style={{ fontWeight: 500, fontSize: 14, margin: 0 }}>{name}</p>
-                  <p style={{ fontSize: 11, color: "#6c757d", margin: 0 }}>TallyPrime</p>
+            {companies.map((company) => {
+              const companyKey = getCompanyKey(company);
+              const isSelected = selectedKey === companyKey;
+
+              return (
+                <div
+                  key={companyKey}
+                  onClick={() => setSelectedKey(companyKey)}
+                  style={{
+                    padding: "12px 16px",
+                    borderRadius: 10,
+                    border: `2px solid ${isSelected ? "#1a1a2e" : "#e9ecef"}`,
+                    background: isSelected ? "#f0f0f5" : "#fff",
+                    cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 12,
+                    transition: "all 0.15s",
+                  }}
+                >
+                  <span style={{ fontSize: 20 }}>[]</span>
+                  <div style={{ minWidth: 0 }}>
+                    <p style={{ fontWeight: 500, fontSize: 14, margin: 0 }}>{company.name}</p>
+                    <p style={{ fontSize: 11, color: "#6c757d", margin: 0 }}>
+                      {getCompanySubtitle(company)}
+                    </p>
+                  </div>
+                  {isSelected && (
+                    <span style={{ marginLeft: "auto", color: "#1a1a2e", fontSize: 16 }}>OK</span>
+                  )}
                 </div>
-                {selected === name && (
-                  <span style={{ marginLeft: "auto", color: "#1a1a2e", fontSize: 16 }}>✓</span>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={fetchCompanies} style={{ ...outlineBtn, flex: 1 }}>
-              ↺ Refresh
+            <button onClick={() => void fetchCompanies()} style={{ ...outlineBtn, flex: 1 }}>
+              Refresh
             </button>
             <button
-              onClick={handleAdd}
-              disabled={!selected}
-              style={{ ...primaryBtn, flex: 2, opacity: selected ? 1 : 0.5 }}
+              onClick={() => void handleAdd()}
+              disabled={!selectedCompany}
+              style={{ ...primaryBtn, flex: 2, opacity: selectedCompany ? 1 : 0.5 }}
             >
-              Add {selected ? `"${selected}"` : "Company"} →
+              Add {selectedCompany ? `"${selectedCompany.name}"` : "Company"}
             </button>
           </div>
         </>
       )}
 
       {step === "checking" && (
-        <CentreState icon="⏳" title="Adding company..." subtitle={`Verifying "${selected}" in TallyPrime...`} />
+        <CentreState
+          icon="..."
+          title="Adding company..."
+          subtitle={`Verifying "${selectedCompany?.name || ""}" in TallyPrime...`}
+        />
       )}
 
       {step === "success" && (
         <CentreState
-          icon="✅"
-          title={`${selected} added!`}
+          icon="OK"
+          title={`${selectedCompany?.name || "Company"} added!`}
           subtitle="First sync will start automatically in a few seconds."
-          action={<button onClick={() => navigate("/")} style={primaryBtn}>Go to Home →</button>}
+          action={<button onClick={() => navigate("/")} style={primaryBtn}>Go to Home</button>}
         />
       )}
 
       {step === "error" && (
         <CentreState
-          icon="❌"
+          icon="X"
           title="Could not add company"
           subtitle={errorMsg}
           error
@@ -221,4 +233,3 @@ const infoBox: React.CSSProperties = {
   padding: "12px 16px", marginBottom: 20,
   border: "1px solid #bbf7d0",
 };
-*/

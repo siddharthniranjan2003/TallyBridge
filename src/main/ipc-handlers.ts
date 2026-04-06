@@ -1,9 +1,15 @@
 import { ipcMain, BrowserWindow } from "electron";
 import axios from "axios";
-import { store, addCompany, removeCompany } from "./store";
+import { store, addCompany, removeCompany, TallyCompanySelection } from "./store";
 import { SyncEngine } from "./sync-engine";
 
 const TALLY_REQUEST_TIMEOUT_MS = 5000;
+
+type TallyCompanyOption = {
+  name: string;
+  guid?: string;
+  formalName?: string;
+};
 
 function decodeTallyResponse(data: Buffer, contentType = "") {
   const looksUtf16 = contentType.toLowerCase().includes("utf-16")
@@ -24,6 +30,83 @@ function decodeTallyResponse(data: Buffer, contentType = "") {
   }
 
   return data.toString("utf8");
+}
+
+function decodeXmlEntities(value: string) {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'");
+}
+
+function extractAttributeValue(input: string, attributeName: string) {
+  const match = new RegExp(`${attributeName}="([^"]*)"`, "i").exec(input);
+  return match?.[1] ? decodeXmlEntities(match[1].trim()) : undefined;
+}
+
+function extractTagValue(input: string, tagName: string) {
+  const match = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)</${tagName}>`, "i").exec(input);
+  return match?.[1] ? decodeXmlEntities(match[1].trim()) : undefined;
+}
+
+function getCompanyOptionKey(company: TallyCompanySelection) {
+  return company.guid?.trim() || company.name.trim().toLowerCase();
+}
+
+function parseTallyCompanies(decodedXml: string): TallyCompanyOption[] {
+  const companies: TallyCompanyOption[] = [];
+  const seen = new Set<string>();
+  const companyBlocks = decodedXml.matchAll(/<COMPANY\b([^>]*)>([\s\S]*?)<\/COMPANY>/gi);
+
+  for (const match of companyBlocks) {
+    const attributes = match[1] || "";
+    const body = match[2] || "";
+    const name = extractAttributeValue(attributes, "NAME") || extractTagValue(body, "NAME");
+    const guid = extractTagValue(body, "GUID") || extractAttributeValue(attributes, "GUID");
+    const formalName = extractTagValue(body, "BASICCOMPANYFORMALNAME") || extractTagValue(body, "FORMALNAME");
+
+    if (!name) {
+      continue;
+    }
+
+    const company: TallyCompanyOption = {
+      name,
+      guid: guid || undefined,
+      formalName: formalName || undefined,
+    };
+    const key = getCompanyOptionKey(company);
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    companies.push(company);
+  }
+
+  if (companies.length) {
+    return companies;
+  }
+
+  const fallbackNames = decodedXml.matchAll(/<NAME[^>]*>([^<]+)<\/NAME>/gi);
+  for (const match of fallbackNames) {
+    const name = decodeXmlEntities(match[1]?.trim() || "");
+    if (!name) {
+      continue;
+    }
+
+    const company = { name };
+    const key = getCompanyOptionKey(company);
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    companies.push(company);
+  }
+
+  return companies;
 }
 
 async function postTallyXml(tallyUrl: string, xml: string, responseType: "text" | "arraybuffer" = "text") {
@@ -54,12 +137,27 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
     return { success: true };
   });
 
-  ipcMain.handle("add-company", async (_, name: string) => {
+  ipcMain.handle("add-company", async (_, selection: TallyCompanySelection) => {
+    const name = typeof selection?.name === "string" ? selection.name.trim() : "";
+    const guid = typeof selection?.guid === "string" ? selection.guid.trim() : "";
+    const formalName = typeof selection?.formalName === "string" ? selection.formalName.trim() : "";
+    const normalizedName = name.toLowerCase();
+
+    if (!name) {
+      return { success: false, error: "Company name is required." };
+    }
+
     const existing = store
       .get("companies")
-      .find((c) => c.name.toLowerCase() === name.toLowerCase());
+      .find((c) => {
+        if (guid && c.tallyGuid) {
+          return c.tallyGuid === guid;
+        }
+
+        return c.name.trim().toLowerCase() === normalizedName && (!guid || !c.tallyGuid);
+      });
     if (existing) {
-      return { success: false, error: "Company already added." };
+      return { success: false, error: "This Tally company is already added." };
     }
     // Verify Tally is reachable
     try {
@@ -69,7 +167,11 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
         <REPORTNAME>List of Companies</REPORTNAME>
         </REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
       await postTallyXml(tallyUrl, testXml);
-      const company = addCompany(name);
+      const company = addCompany({
+        name,
+        guid: guid || undefined,
+        formalName: formalName || undefined,
+      });
       window.webContents.send("companies-updated", store.get("companies"));
       return { success: true, company };
     } catch {
@@ -115,26 +217,7 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
         Buffer.from(response.data),
         String(response.headers["content-type"] || ""),
       );
-      console.log("TALLY DECODED:", decoded);
-
-      // Extract company names from NAME attribute or NAME tag
-      const companies: string[] = [];
-
-      // Try NAME attribute: <COMPANY NAME="Demo Trading Co">
-      const attrMatches = decoded.matchAll(/<COMPANY[^>]+NAME="([^"]+)"/gi);
-      for (const match of attrMatches) {
-        const name = match[1]?.trim();
-        if (name) companies.push(name);
-      }
-
-      // Fallback: <NAME TYPE="String">Demo Trading Co</NAME>
-      if (companies.length === 0) {
-        const tagMatches = decoded.matchAll(/<NAME[^>]*>([^<]+)<\/NAME>/gi);
-        for (const match of tagMatches) {
-          const name = match[1]?.trim();
-          if (name) companies.push(name);
-        }
-      }
+      const companies = parseTallyCompanies(decoded);
 
       return { success: true, companies };
     } catch (e) {

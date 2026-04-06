@@ -1,8 +1,8 @@
 import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
 import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
-import Home from "./pages/Home";
-import AddCompany from "./pages/AddCompany";
+import Home from "./pages/HomeGuided";
+import AddCompany from "./pages/AddCompanyGuided";
 import Settings from "./pages/Settings";
 import SyncLog from "./pages/SyncLog";
 import About from "./pages/About";

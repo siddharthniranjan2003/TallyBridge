@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import time
 from datetime import date, datetime, timedelta
 
 from tally_client import (
@@ -16,10 +17,15 @@ from xml_parser import (
     parse_ledgers, parse_vouchers, parse_stock, parse_outstanding,
     parse_profit_and_loss, parse_balance_sheet, parse_trial_balance,
 )
-from cloud_pusher import push
+from cloud_pusher import fetch_remote_alter_ids, push
 from definition_extractor import fetch_structured_section
 
 COMPANY = os.environ.get("TALLY_COMPANY", "")
+COMPANY_GUID = os.environ.get("TALLY_COMPANY_GUID", "").strip()
+COMPANY_CACHE_KEY = COMPANY_GUID or COMPANY
+FORCE_FULL_SYNC = os.environ.get("TB_FORCE_FULL_SYNC", "").strip().lower() in {
+    "1", "true", "yes", "on"
+}
 
 # ── Change detection ─────────────────────────────────────────────
 # Store last-known alter IDs in a local file so we can skip
@@ -57,7 +63,9 @@ def load_cached_ids() -> tuple[dict, bool]:
         with open(CACHE_FILE, "r") as f:
             cache = json.load(f)
 
-        company_cache = cache.get(COMPANY)
+        company_cache = cache.get(COMPANY_CACHE_KEY)
+        if company_cache is None and COMPANY_GUID:
+            company_cache = cache.get(COMPANY)
         if company_cache is None:
             return {}, False
         if isinstance(company_cache, dict):
@@ -68,18 +76,55 @@ def load_cached_ids() -> tuple[dict, bool]:
         print(f"[Cache] Could not load alter IDs: {e}")
         return {}, True
 
-def save_cached_ids(ids: dict):
-    """Save current alter IDs to disk."""
+def save_cached_ids(ids: dict) -> bool:
+    """Save current alter IDs to disk using an atomic replace with retries."""
     try:
         cache = {}
         if os.path.exists(CACHE_FILE):
             with open(CACHE_FILE, "r") as f:
                 cache = json.load(f)
-        cache[COMPANY] = ids
-        with open(CACHE_FILE, "w") as f:
-            json.dump(cache, f)
+        cache[COMPANY_CACHE_KEY] = ids
+        temp_path = f"{CACHE_FILE}.{os.getpid()}.tmp"
+        last_error = None
+
+        for attempt in range(5):
+            try:
+                with open(temp_path, "w") as f:
+                    json.dump(cache, f)
+                os.replace(temp_path, CACHE_FILE)
+                return True
+            except PermissionError as e:
+                last_error = e
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+                time.sleep(0.2 * (attempt + 1))
+            except OSError as e:
+                last_error = e
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+                break
+
+        if last_error:
+            try:
+                with open(CACHE_FILE, "w") as f:
+                    json.dump(cache, f)
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+                return True
+            except OSError:
+                raise last_error
     except (OSError, json.JSONDecodeError, TypeError) as e:
         print(f"[Cache] Could not save alter IDs: {e}")
+    return False
 
 def parse_iso_date(iso_str: str):
     if not iso_str:
@@ -103,60 +148,39 @@ def format_tally_compact(d: date) -> str:
     return d.strftime("%Y%m%d")
 
 
-def build_sync_plan(current_ids: dict, fy_from: str, fy_to: str) -> dict:
+def build_full_sync_plan(reason: str, fy_from: str, fy_to: str) -> dict:
+    return {
+        "has_changes": True,
+        "master_changed": True,
+        "voucher_changed": True,
+        "need_groups": True,
+        "need_ledgers": True,
+        "need_vouchers": True,
+        "need_stock": True,
+        "need_outstanding": True,
+        "need_reports": True,
+        "voucher_from_date": fy_from,
+        "voucher_to_date": fy_to,
+        "voucher_sync_mode": "full",
+        "reason": reason,
+    }
+
+
+def build_sync_plan(current_ids: dict, fy_from: str, fy_to: str, force_full_sync: bool = False) -> dict:
     """Figure out which sections need refreshing and whether vouchers can be incremental."""
     cached_ids, cache_load_failed = load_cached_ids()
 
+    if force_full_sync:
+        return build_full_sync_plan("forced_full_sync", fy_from, fy_to)
+
     if not current_ids:
-        return {
-            "has_changes": True,
-            "master_changed": True,
-            "voucher_changed": True,
-            "need_groups": True,
-            "need_ledgers": True,
-            "need_vouchers": True,
-            "need_stock": True,
-            "need_outstanding": True,
-            "need_reports": True,
-            "voucher_from_date": fy_from,
-            "voucher_to_date": fy_to,
-            "voucher_sync_mode": "full",
-            "reason": "missing_change_markers",
-        }
+        return build_full_sync_plan("missing_change_markers", fy_from, fy_to)
 
     if cache_load_failed:
-        return {
-            "has_changes": True,
-            "master_changed": True,
-            "voucher_changed": True,
-            "need_groups": True,
-            "need_ledgers": True,
-            "need_vouchers": True,
-            "need_stock": True,
-            "need_outstanding": True,
-            "need_reports": True,
-            "voucher_from_date": fy_from,
-            "voucher_to_date": fy_to,
-            "voucher_sync_mode": "full",
-            "reason": "cache_load_failed",
-        }
+        return build_full_sync_plan("cache_load_failed", fy_from, fy_to)
 
     if not cached_ids:
-        return {
-            "has_changes": True,
-            "master_changed": True,
-            "voucher_changed": True,
-            "need_groups": True,
-            "need_ledgers": True,
-            "need_vouchers": True,
-            "need_stock": True,
-            "need_outstanding": True,
-            "need_reports": True,
-            "voucher_from_date": fy_from,
-            "voucher_to_date": fy_to,
-            "voucher_sync_mode": "full",
-            "reason": "first_successful_sync",
-        }
+        return build_full_sync_plan("first_successful_sync", fy_from, fy_to)
 
     company_changed = current_ids.get("alter_id", "0") != cached_ids.get("alter_id", "0")
     voucher_changed = (
@@ -251,10 +275,27 @@ def main():
         if company_info:
             books_from = company_info.get("books_from")
             books_to = company_info.get("books_to")
-            if books_from and books_to:
+            if books_from and not books_to:
+                books_from_date = parse_iso_date(books_from)
+                if books_from_date:
+                    try:
+                        derived_books_to = books_from_date.replace(year=books_from_date.year + 1) - timedelta(days=1)
+                    except ValueError:
+                        derived_books_to = None
+                    if derived_books_to:
+                        books_to = derived_books_to.isoformat()
+                        company_info["books_to"] = books_to
+            if books_from:
                 from_date = fy_date_from_iso(books_from)
-                to_date = fy_date_from_iso(books_to)
-                print(f"[Tally] Company FY: {books_from} to {books_to}")
+                effective_to = min(
+                    parse_iso_date(books_to) or date.today(),
+                    date.today(),
+                )
+                to_date = format_tally_compact(effective_to)
+                if books_to:
+                    print(f"[Tally] Company FY: {books_from} to {books_to}")
+                else:
+                    print(f"[Tally] Company FY starts {books_from}; end date not exposed by Tally, syncing through {effective_to.isoformat()}")
             else:
                 print("[Tally] Could not read FY dates — using default April-March")
             if company_info.get("gstin"):
@@ -286,7 +327,25 @@ def main():
         print("[Tally] Checking for changes...")
         raw_ids = get_company_alter_ids()
         current_ids = parse_alter_ids(raw_ids)
-        sync_plan = build_sync_plan(current_ids, from_date, to_date)
+        force_full_sync = FORCE_FULL_SYNC
+
+        if force_full_sync:
+            print("[TallyBridge] Forcing full sync because this company has not synced from this connector yet.")
+
+        remote_alter_ids, remote_lookup_status = fetch_remote_alter_ids()
+        if remote_lookup_status == "company_not_found":
+            force_full_sync = True
+            print("[Cloud] Company not found in backend — forcing full sync.")
+        elif remote_lookup_status == "ok":
+            remote_has_change_markers = any(
+                remote_alter_ids.get(key)
+                for key in ("alter_id", "alt_vch_id", "alt_mst_id")
+            ) if remote_alter_ids else False
+            if not remote_has_change_markers:
+                force_full_sync = True
+                print("[Cloud] Backend company has no alter IDs yet — forcing full sync.")
+
+        sync_plan = build_sync_plan(current_ids, from_date, to_date, force_full_sync=force_full_sync)
 
         if current_ids:
             print(f"[Tally] AlterID={current_ids.get('alter_id')}, "
@@ -324,6 +383,8 @@ def main():
             print("[Tally] Fetching groups...")
             try:
                 groups = fetch_structured_section("groups")
+                if not groups:
+                    raise ValueError("structured groups collection returned no rows")
                 print("[Tally] Groups loaded via definition-driven collection")
             except Exception as structured_error:
                 print(f"[Tally] Structured groups fetch failed ({structured_error}) — falling back to legacy parser")
@@ -335,6 +396,8 @@ def main():
             print("[Tally] Fetching ledgers...")
             try:
                 ledgers = fetch_structured_section("ledgers")
+                if not ledgers:
+                    raise ValueError("structured ledger collection returned no rows")
                 print("[Tally] Ledgers loaded via definition-driven collection")
             except Exception as structured_error:
                 print(f"[Tally] Structured ledgers fetch failed ({structured_error}) — falling back to legacy parser")
@@ -408,6 +471,8 @@ def main():
                     "from_date": from_date,
                     "to_date": to_date,
                 })
+                if not profit_loss:
+                    raise ValueError("structured profit and loss report returned no rows")
                 print("[Tally] Profit & Loss loaded via definition-driven report parsing")
             except Exception as structured_error:
                 print(f"[Tally] Structured Profit & Loss fetch failed ({structured_error}) — falling back to legacy parser")
@@ -421,6 +486,8 @@ def main():
                     "from_date": from_date,
                     "to_date": to_date,
                 })
+                if not balance_sheet:
+                    raise ValueError("structured balance sheet report returned no rows")
                 print("[Tally] Balance Sheet loaded via definition-driven report parsing")
             except Exception as structured_error:
                 print(f"[Tally] Structured Balance Sheet fetch failed ({structured_error}) — falling back to legacy parser")
@@ -434,6 +501,8 @@ def main():
                     "from_date": from_date,
                     "to_date": to_date,
                 })
+                if not trial_balance:
+                    raise ValueError("structured trial balance report returned no rows")
                 print("[Tally] Trial Balance loaded via definition-driven report parsing")
             except Exception as structured_error:
                 print(f"[Tally] Structured Trial Balance fetch failed ({structured_error}) — falling back to legacy parser")
@@ -445,6 +514,7 @@ def main():
         print("[Cloud] Pushing to backend...")
         payload = {
             "company_name": COMPANY,
+            "company_guid": COMPANY_GUID or None,
             "company_info": company_info,
             "alter_ids": current_ids,
             "groups": groups,
@@ -469,8 +539,10 @@ def main():
 
         # ── Step 4: Cache alter IDs ──────────────────────────
         if current_ids:
-            save_cached_ids(current_ids)
-            print("[TallyBridge] Cached alter IDs for next change detection.")
+            if save_cached_ids(current_ids):
+                print("[TallyBridge] Cached alter IDs for next change detection.")
+            else:
+                print("[TallyBridge] Alter ID cache could not be updated; next sync may re-fetch more data.")
 
         # Print JSON summary as last line — Electron reads this
         print(json.dumps({

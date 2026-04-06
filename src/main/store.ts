@@ -4,6 +4,8 @@ import { v4 as uuidv4 } from "uuid";
 export interface Company {
   id: string;
   name: string;
+  tallyGuid?: string;
+  formalName?: string;
   enabled: boolean;
   addedAt: string;
   lastSyncedAt?: string;
@@ -32,6 +34,12 @@ export interface AppConfig {
   companies: Company[];
 }
 
+export interface TallyCompanySelection {
+  name: string;
+  guid?: string;
+  formalName?: string;
+}
+
 // Install uuid for store IDs: npm install uuid @types/uuid
 export const store = new Store<AppConfig>({
   name: "tallybridge-config",
@@ -45,11 +53,13 @@ export const store = new Store<AppConfig>({
   },
 });
 
-export function addCompany(name: string): Company {
+export function addCompany(selection: TallyCompanySelection): Company {
   const companies = store.get("companies");
   const newCompany: Company = {
     id: uuidv4(),
-    name,
+    name: selection.name,
+    tallyGuid: selection.guid?.trim() || undefined,
+    formalName: selection.formalName?.trim() || undefined,
     enabled: true,
     addedAt: new Date().toISOString(),
     lastSyncStatus: "idle",

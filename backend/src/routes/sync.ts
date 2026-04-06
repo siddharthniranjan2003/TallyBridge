@@ -35,6 +35,10 @@ function normalizeCompactDate(value: unknown) {
   return /^\d{8}$/.test(compact) ? compact : null;
 }
 
+function normalizeTrimmedString(value: unknown) {
+  return isNonEmptyString(value) ? value.trim() : null;
+}
+
 function compactDateToIsoDate(value: string | null) {
   if (!value) {
     return null;
@@ -60,10 +64,14 @@ function normalizeSyncMeta(value: unknown): SyncMeta {
 
 function buildCompanyUpsertPayload(
   companyName: string,
+  companyGuid: string | null,
   companyInfo: unknown,
   alterIds: unknown,
 ) {
   const payload: Record<string, unknown> = { name: companyName };
+  if (companyGuid) {
+    payload.guid = companyGuid;
+  }
 
   if (companyInfo && typeof companyInfo === "object") {
     const info = companyInfo as Record<string, unknown>;
@@ -84,6 +92,9 @@ function buildCompanyUpsertPayload(
       "pan",
     ]) {
       if (key in info && info[key] !== "" && info[key] != null) {
+        if (key === "guid" && companyGuid) {
+          continue;
+        }
         payload[key] = info[key];
       }
     }
@@ -370,35 +381,23 @@ async function reconcileVoucherScope(
   await deleteVoucherGraph(staleVoucherIds);
 }
 
-async function resolveCompanyIdByName(companyName: unknown) {
-  if (typeof companyName !== "string" || !companyName.trim()) {
-    return { status: 400 as const, error: "company_name query param required" };
-  }
+const COMPANY_LOOKUP_COLUMNS = `
+  id,
+  name,
+  guid,
+  last_synced_at,
+  last_outstanding_synced_at,
+  last_profit_loss_synced_at,
+  last_balance_sheet_synced_at,
+  last_trial_balance_synced_at
+`;
 
-  const { data: company, error } = await supabase
-    .from("companies")
-    .select(`
-      id,
-      last_synced_at,
-      last_outstanding_synced_at,
-      last_profit_loss_synced_at,
-      last_balance_sheet_synced_at,
-      last_trial_balance_synced_at
-    `)
-    .eq("name", companyName.trim())
-    .single();
-
-  if (error || !company) {
-    return { status: 404 as const, error: "Company not found" };
-  }
-
-  if (!company.last_synced_at) {
-    return { status: 409 as const, error: "Company has not completed a successful sync yet" };
-  }
-
+function toResolvedCompanyLookup(company: any) {
   return {
     status: 200 as const,
     companyId: company.id,
+    companyName: company.name ?? null,
+    companyGuid: company.guid ?? null,
     lastSyncedAt: company.last_synced_at ?? null,
     lastOutstandingSyncedAt: company.last_outstanding_synced_at ?? null,
     lastProfitLossSyncedAt: company.last_profit_loss_synced_at ?? null,
@@ -407,11 +406,182 @@ async function resolveCompanyIdByName(companyName: unknown) {
   };
 }
 
+async function resolveCompanyLookup(
+  {
+    companyId,
+    companyGuid,
+    companyName,
+  }: {
+    companyId?: unknown;
+    companyGuid?: unknown;
+    companyName?: unknown;
+  },
+  options?: { requireSuccessfulSync?: boolean },
+) {
+  const requireSuccessfulSync = options?.requireSuccessfulSync !== false;
+  const normalizedCompanyId = normalizeTrimmedString(companyId);
+  const normalizedCompanyGuid = normalizeTrimmedString(companyGuid);
+  const normalizedCompanyName = normalizeTrimmedString(companyName);
+
+  if (normalizedCompanyId) {
+    const { data: company, error } = await supabase
+      .from("companies")
+      .select(COMPANY_LOOKUP_COLUMNS)
+      .eq("id", normalizedCompanyId)
+      .maybeSingle();
+
+    if (error || !company) {
+      return { status: 404 as const, error: "Company not found" };
+    }
+
+    if (requireSuccessfulSync && !company.last_synced_at) {
+      return { status: 409 as const, error: "Company has not completed a successful sync yet" };
+    }
+
+    return toResolvedCompanyLookup(company);
+  }
+
+  if (normalizedCompanyGuid) {
+    const { data: company, error } = await supabase
+      .from("companies")
+      .select(COMPANY_LOOKUP_COLUMNS)
+      .eq("guid", normalizedCompanyGuid)
+      .maybeSingle();
+
+    if (error || !company) {
+      return { status: 404 as const, error: "Company not found" };
+    }
+
+    if (requireSuccessfulSync && !company.last_synced_at) {
+      return { status: 409 as const, error: "Company has not completed a successful sync yet" };
+    }
+
+    return toResolvedCompanyLookup(company);
+  }
+
+  if (!normalizedCompanyName) {
+    return {
+      status: 400 as const,
+      error: "company_id, company_guid, or company_name query param required",
+    };
+  }
+
+  const { data: companies, error } = await supabase
+    .from("companies")
+    .select(COMPANY_LOOKUP_COLUMNS)
+    .eq("name", normalizedCompanyName)
+    .limit(2);
+
+  if (error || !companies?.length) {
+    return { status: 404 as const, error: "Company not found" };
+  }
+
+  if (companies.length > 1) {
+    return {
+      status: 409 as const,
+      error: "Multiple companies share this name. Use company_guid or company_id instead.",
+    };
+  }
+
+  const company = companies[0]!;
+  if (requireSuccessfulSync && !company.last_synced_at) {
+    return { status: 409 as const, error: "Company has not completed a successful sync yet" };
+  }
+
+  return toResolvedCompanyLookup(company);
+}
+
+async function upsertCompanyRecord(
+  companyName: string,
+  companyGuid: string | null,
+  companyInfo: unknown,
+  alterIds: unknown,
+) {
+  const payload = buildCompanyUpsertPayload(companyName, companyGuid, companyInfo, alterIds);
+
+  if (companyGuid) {
+    const { data: existingByGuid, error: guidLookupError } = await supabase
+      .from("companies")
+      .select("id")
+      .eq("guid", companyGuid)
+      .maybeSingle();
+
+    if (guidLookupError) {
+      throw new Error(`Company GUID lookup failed: ${guidLookupError.message}`);
+    }
+
+    if (existingByGuid?.id) {
+      const { data: updatedCompany, error: updateError } = await supabase
+        .from("companies")
+        .update(payload)
+        .eq("id", existingByGuid.id)
+        .select("id")
+        .single();
+
+      if (updateError || !updatedCompany) {
+        throw new Error(`Company update failed: ${updateError?.message}`);
+      }
+
+      return updatedCompany;
+    }
+  }
+
+  const { data: nameMatches, error: nameLookupError } = await supabase
+    .from("companies")
+    .select("id, guid")
+    .eq("name", companyName)
+    .limit(2);
+
+  if (nameLookupError) {
+    throw new Error(`Company name lookup failed: ${nameLookupError.message}`);
+  }
+
+  if ((nameMatches || []).length > 1) {
+    throw new Error(
+      "Multiple companies already share this name. Re-add the company so sync can use the Tally GUID."
+    );
+  }
+
+  const matchedCompany = nameMatches?.[0];
+  if (matchedCompany?.id && (!matchedCompany.guid || matchedCompany.guid === companyGuid)) {
+    const { data: updatedCompany, error: updateError } = await supabase
+      .from("companies")
+      .update(payload)
+      .eq("id", matchedCompany.id)
+      .select("id")
+      .single();
+
+    if (updateError || !updatedCompany) {
+      throw new Error(`Company update failed: ${updateError?.message}`);
+    }
+
+    return updatedCompany;
+  }
+
+  const { data: insertedCompany, error: insertError } = await supabase
+    .from("companies")
+    .insert(payload)
+    .select("id")
+    .single();
+
+  if (insertError || !insertedCompany) {
+    if (insertError?.message?.includes("companies_name_key")) {
+      throw new Error(
+        "Database still enforces unique company names. Run the latest schema update before syncing same-name companies."
+      );
+    }
+    throw new Error(`Company insert failed: ${insertError?.message}`);
+  }
+
+  return insertedCompany;
+}
+
 // ── POST /api/sync — Receive all data from desktop connector ────
 
 router.post("/", requireApiKey, async (req, res) => {
   const {
     company_name,
+    company_guid,
     company_info,
     alter_ids,
     groups,
@@ -428,6 +598,12 @@ router.post("/", requireApiKey, async (req, res) => {
   if (typeof company_name !== "string" || !company_name.trim()) {
     return res.status(400).json({ error: "company_name required" });
   }
+
+  const normalizedCompanyName = company_name.trim();
+  const normalizedCompanyGuid = normalizeTrimmedString(company_guid)
+    || (company_info && typeof company_info === "object"
+      ? normalizeTrimmedString((company_info as Record<string, unknown>).guid)
+      : null);
 
   const validationError = [
     validateSectionArray("groups", groups),
@@ -469,18 +645,12 @@ router.post("/", requireApiKey, async (req, res) => {
 
   try {
     // 1. Upsert company
-    const { data: company, error: companyErr } = await supabase
-      .from("companies")
-      .upsert(
-        buildCompanyUpsertPayload(company_name, company_info, alter_ids),
-        { onConflict: "name" }
-      )
-      .select("id")
-      .single();
-
-    if (companyErr || !company) {
-      throw new Error(`Company upsert failed: ${companyErr?.message}`);
-    }
+    const company = await upsertCompanyRecord(
+      normalizedCompanyName,
+      normalizedCompanyGuid,
+      company_info,
+      alter_ids,
+    );
     const companyId = company.id;
     company_id = companyId;
 
@@ -750,19 +920,23 @@ router.post("/", requireApiKey, async (req, res) => {
 
 // ── GET /api/sync/party-ledger — Individual customer/party history ──
 // Derives party transaction history from already-synced vouchers.
-// Query params: company_name (required), party_name (required)
+// Query params: company_id or company_guid or company_name, plus party_name
 
 router.get("/party-ledger", requireApiKey, async (req, res) => {
-  const { company_name, party_name } = req.query;
+  const { company_id, company_guid, company_name, party_name } = req.query;
 
-  if (!company_name || !party_name) {
+  if (!party_name) {
     return res.status(400).json({
-      error: "company_name and party_name query params required",
+      error: "party_name query param required",
     });
   }
 
   try {
-    const companyLookup = await resolveCompanyIdByName(company_name);
+    const companyLookup = await resolveCompanyLookup({
+      companyId: company_id,
+      companyGuid: company_guid,
+      companyName: company_name,
+    });
     if (companyLookup.status !== 200) {
       return res.status(companyLookup.status).json({ error: companyLookup.error });
     }
@@ -834,7 +1008,8 @@ router.get("/party-ledger", requireApiKey, async (req, res) => {
 
     res.json({
       party_name,
-      company_name,
+      company_name: companyLookup.companyName,
+      company_guid: companyLookup.companyGuid,
       ledger: ledger || null,
       outstanding_summary: {
         total_outstanding: outstanding?.reduce(
@@ -855,7 +1030,11 @@ router.get("/party-ledger", requireApiKey, async (req, res) => {
 // ── GET routes for web dashboard ─────────────────────────────────
 
 router.get("/vouchers", requireApiKey, async (req, res) => {
-  const companyLookup = await resolveCompanyIdByName(req.query.company_name);
+  const companyLookup = await resolveCompanyLookup({
+    companyId: req.query.company_id,
+    companyGuid: req.query.company_guid,
+    companyName: req.query.company_name,
+  });
   if (companyLookup.status !== 200) {
     return res.status(companyLookup.status).json({ error: companyLookup.error });
   }
@@ -867,7 +1046,11 @@ router.get("/vouchers", requireApiKey, async (req, res) => {
 });
 
 router.get("/outstanding", requireApiKey, async (req, res) => {
-  const companyLookup = await resolveCompanyIdByName(req.query.company_name);
+  const companyLookup = await resolveCompanyLookup({
+    companyId: req.query.company_id,
+    companyGuid: req.query.company_guid,
+    companyName: req.query.company_name,
+  });
   if (companyLookup.status !== 200) {
     return res.status(companyLookup.status).json({ error: companyLookup.error });
   }
@@ -883,7 +1066,11 @@ router.get("/outstanding", requireApiKey, async (req, res) => {
 });
 
 router.get("/stock", requireApiKey, async (req, res) => {
-  const companyLookup = await resolveCompanyIdByName(req.query.company_name);
+  const companyLookup = await resolveCompanyLookup({
+    companyId: req.query.company_id,
+    companyGuid: req.query.company_guid,
+    companyName: req.query.company_name,
+  });
   if (companyLookup.status !== 200) {
     return res.status(companyLookup.status).json({ error: companyLookup.error });
   }
@@ -893,7 +1080,11 @@ router.get("/stock", requireApiKey, async (req, res) => {
 });
 
 router.get("/pnl", requireApiKey, async (req, res) => {
-  const companyLookup = await resolveCompanyIdByName(req.query.company_name);
+  const companyLookup = await resolveCompanyLookup({
+    companyId: req.query.company_id,
+    companyGuid: req.query.company_guid,
+    companyName: req.query.company_name,
+  });
   if (companyLookup.status !== 200) {
     return res.status(companyLookup.status).json({ error: companyLookup.error });
   }
@@ -909,7 +1100,11 @@ router.get("/pnl", requireApiKey, async (req, res) => {
 });
 
 router.get("/balance-sheet", requireApiKey, async (req, res) => {
-  const companyLookup = await resolveCompanyIdByName(req.query.company_name);
+  const companyLookup = await resolveCompanyLookup({
+    companyId: req.query.company_id,
+    companyGuid: req.query.company_guid,
+    companyName: req.query.company_name,
+  });
   if (companyLookup.status !== 200) {
     return res.status(companyLookup.status).json({ error: companyLookup.error });
   }
@@ -926,13 +1121,19 @@ router.get("/balance-sheet", requireApiKey, async (req, res) => {
 
 
 router.get("/alter-ids", requireApiKey, async (req, res) => {
-  if (typeof req.query.company_name !== "string" || !req.query.company_name.trim()) {
-    return res.status(400).json({ error: "company_name query param required" });
+  const companyLookup = await resolveCompanyLookup({
+    companyId: req.query.company_id,
+    companyGuid: req.query.company_guid,
+    companyName: req.query.company_name,
+  }, { requireSuccessfulSync: false });
+  if (companyLookup.status !== 200) {
+    return res.status(companyLookup.status).json({ error: companyLookup.error });
   }
+
   const { data } = await supabase
     .from("companies")
     .select("alter_id, alt_vch_id, alt_mst_id")
-    .eq("name", req.query.company_name.trim())
+    .eq("id", companyLookup.companyId)
     .single();
   res.json(data || {});
 });
@@ -942,14 +1143,12 @@ router.get("/alter-ids", requireApiKey, async (req, res) => {
 // Returns all unique party names from vouchers with summary stats.
 
 router.get("/parties", requireApiKey, async (req, res) => {
-  const { company_name } = req.query;
-
-  if (!company_name) {
-    return res.status(400).json({ error: "company_name query param required" });
-  }
-
   try {
-    const companyLookup = await resolveCompanyIdByName(company_name);
+    const companyLookup = await resolveCompanyLookup({
+      companyId: req.query.company_id,
+      companyGuid: req.query.company_guid,
+      companyName: req.query.company_name,
+    });
     if (companyLookup.status !== 200) {
       return res.status(companyLookup.status).json({ error: companyLookup.error });
     }

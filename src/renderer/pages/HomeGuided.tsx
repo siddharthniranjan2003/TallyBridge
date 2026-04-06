@@ -1,9 +1,9 @@
-export { default } from "./HomeGuided";
-/*
-import CompanyCard from "../components/CompanyCardGuided";
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Company } from "../../main/store";
+import CompanyCardStable from "../components/CompanyCardStable";
 
-export default function Home() {
+export default function HomeGuided() {
   const [companies, setCompanies] = useState<Company[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
   const navigate = useNavigate();
@@ -14,10 +14,9 @@ export default function Home() {
   };
 
   useEffect(() => {
-    loadCompanies();
+    void loadCompanies();
 
-    // Live updates from sync engine
-    const onUpdated = (_: any, updated: Company[]) => setCompanies(updated);
+    const onUpdated = (_: unknown, updated: Company[]) => setCompanies(updated);
     const onSyncStart = () => setIsSyncing(true);
     const onSyncComplete = () => setIsSyncing(false);
 
@@ -49,17 +48,16 @@ export default function Home() {
 
   return (
     <div style={{ padding: 28 }}>
-      {/* Header */}
-      <div style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        marginBottom: 24,
-      }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginBottom: 24,
+        }}
+      >
         <div>
-          <h1 style={{ fontSize: 20, fontWeight: 600, marginBottom: 2 }}>
-            My Companies
-          </h1>
+          <h1 style={{ fontSize: 20, fontWeight: 600, marginBottom: 2 }}>My Companies</h1>
           <p style={{ fontSize: 13, color: "#6c757d" }}>
             {companies.length} {companies.length === 1 ? "company" : "companies"} connected
           </p>
@@ -73,22 +71,21 @@ export default function Home() {
             disabled={isSyncing}
             style={{ ...primaryBtn, opacity: isSyncing ? 0.7 : 1 }}
           >
-            {isSyncing ? "⏳ Syncing..." : "↻ Sync All Now"}
+            {isSyncing ? "Syncing..." : "Sync All Now"}
           </button>
         </div>
       </div>
 
-      {/* Company list or empty state */}
       {companies.length === 0 ? (
         <EmptyState onAdd={() => navigate("/add-company")} />
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {companies.map((c) => (
-            <CompanyCard
-              key={c.id}
-              company={c}
+          {companies.map((company) => (
+            <CompanyCardStable
+              key={company.id}
+              company={company}
               onRemove={handleRemove}
-              showIdentityHint={(duplicateNameCounts[c.name.trim().toLowerCase()] || 0) > 1}
+              showIdentityHint={(duplicateNameCounts[company.name.trim().toLowerCase()] || 0) > 1}
             />
           ))}
         </div>
@@ -99,12 +96,14 @@ export default function Home() {
 
 function EmptyState({ onAdd }: { onAdd: () => void }) {
   return (
-    <div style={{
-      textAlign: "center",
-      padding: "80px 20px",
-      color: "#adb5bd",
-    }}>
-      <div style={{ fontSize: 52, marginBottom: 16 }}>🏢</div>
+    <div
+      style={{
+        textAlign: "center",
+        padding: "80px 20px",
+        color: "#adb5bd",
+      }}
+    >
+      <div style={{ fontSize: 52, marginBottom: 16 }}>[]</div>
       <p style={{ fontSize: 16, fontWeight: 500, color: "#6c757d", marginBottom: 6 }}>
         No companies added yet
       </p>
@@ -119,13 +118,22 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
 }
 
 const primaryBtn: React.CSSProperties = {
-  background: "#1a1a2e", color: "#fff", border: "none",
-  borderRadius: 8, padding: "9px 18px", cursor: "pointer",
-  fontSize: 13, fontWeight: 500,
+  background: "#1a1a2e",
+  color: "#fff",
+  border: "none",
+  borderRadius: 8,
+  padding: "9px 18px",
+  cursor: "pointer",
+  fontSize: 13,
+  fontWeight: 500,
 };
+
 const outlineBtn: React.CSSProperties = {
-  background: "transparent", color: "#1a1a2e",
-  border: "1px solid #1a1a2e", borderRadius: 8,
-  padding: "9px 18px", cursor: "pointer", fontSize: 13,
+  background: "transparent",
+  color: "#1a1a2e",
+  border: "1px solid #1a1a2e",
+  borderRadius: 8,
+  padding: "9px 18px",
+  cursor: "pointer",
+  fontSize: 13,
 };
-*/

@@ -2,7 +2,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE IF NOT EXISTS companies (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
   books_from DATE,
   books_to DATE,
   books_from_raw TEXT,
@@ -173,6 +173,10 @@ CREATE TABLE IF NOT EXISTS sync_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_groups_company ON groups(company_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_guid_unique
+  ON companies(guid)
+  WHERE guid IS NOT NULL AND guid <> '';
+CREATE INDEX IF NOT EXISTS idx_companies_name ON companies(name);
 CREATE INDEX IF NOT EXISTS idx_ledgers_company ON ledgers(company_id);
 CREATE INDEX IF NOT EXISTS idx_ledgers_company_group ON ledgers(company_id, group_name);
 CREATE INDEX IF NOT EXISTS idx_vouchers_company_guid ON vouchers(company_id, tally_guid);

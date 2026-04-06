@@ -1,6 +1,6 @@
 import re
 import xmltodict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 # ── helpers ──────────────────────────────────────────────────────
 
@@ -22,8 +22,17 @@ def safe_float(val) -> float:
         return float(val)
     try:
         s = str(val).strip()
-        s = s.split("/")[0].strip()   # "500.00/Nos" → "500.00"
-        s = s.split()[0].strip()      # " 10 Nos" → "10"
+        if not s:
+            return 0.0
+        s = s.split("/")[0].strip()
+        if not s:
+            return 0.0
+        parts = s.split()
+        if not parts:
+            return 0.0
+        s = parts[0].strip()
+        if not s:
+            return 0.0
         s = s.replace(",", "")
         return float(s)
     except (TypeError, ValueError, AttributeError):
@@ -62,6 +71,21 @@ def parse_tally_date(val: str):
             continue
     return None
 
+
+def derive_fiscal_year_end(from_date_iso: str):
+    if not from_date_iso:
+        return None
+
+    try:
+        fy_start = datetime.strptime(from_date_iso, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+    try:
+        return fy_start.replace(year=fy_start.year + 1) - timedelta(days=1)
+    except ValueError:
+        return None
+
 def get_messages(raw: dict) -> list:
     body = raw.get("ENVELOPE", {}).get("BODY", {})
     p = body.get("IMPORTDATA", {}).get("REQUESTDATA", {}).get("TALLYMESSAGE")
@@ -95,11 +119,17 @@ def parse_company_info(xml_text: str) -> dict:
 
         books_from = safe_str(company.get("BOOKSFROM", ""))
         books_to = safe_str(company.get("BOOKSTO", ""))
+        books_from_iso = parse_tally_date(books_from)
+        books_to_iso = parse_tally_date(books_to)
+
+        if not books_to_iso and books_from_iso:
+            derived_books_to = derive_fiscal_year_end(books_from_iso)
+            books_to_iso = derived_books_to.isoformat() if derived_books_to else None
 
         return {
             "name":        safe_str(company.get("NAME")),
-            "books_from":  parse_tally_date(books_from),
-            "books_to":    parse_tally_date(books_to),
+            "books_from":  books_from_iso,
+            "books_to":    books_to_iso,
             "books_from_raw": books_from,
             "books_to_raw":   books_to,
             "guid":        safe_str(company.get("GUID")),

@@ -136,8 +136,8 @@
   },
   "groups": {
     "request": {
-      "id": "AllGroups",
-      "collection_name": "AllGroups",
+      "id": "Group",
+      "collection_name": "Group",
       "object_type": "Group",
       "fetch": [
         "NAME",
@@ -200,8 +200,8 @@
   },
   "ledgers": {
     "request": {
-      "id": "AllLedgers",
-      "collection_name": "AllLedgers",
+      "id": "Ledger",
+      "collection_name": "Ledger",
       "object_type": "Ledger",
       "fetch": [
         "NAME",
@@ -861,8 +861,8 @@
   },
   "stock_items": {
     "request": {
-      "id": "StockItemSummary",
-      "collection_name": "StockItemSummary",
+      "id": "StockItem",
+      "collection_name": "StockItem",
       "object_type": "StockItem",
       "fetch": [
         "NAME",
