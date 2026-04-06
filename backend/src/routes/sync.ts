@@ -4,6 +4,106 @@ import { requireApiKey } from "../middleware/auth.js";
 
 const router = Router();
 const BATCH_SIZE = 250;
+const MAX_SECTION_ROWS = 100_000;
+const SNAPSHOT_TIMESTAMP_COLUMNS = {
+  outstanding: "last_outstanding_synced_at",
+  profit_loss: "last_profit_loss_synced_at",
+  balance_sheet: "last_balance_sheet_synced_at",
+  trial_balance: "last_trial_balance_synced_at",
+} as const;
+
+type VoucherSyncMode = "full" | "incremental" | "none";
+
+type SyncMeta = {
+  voucher_sync_mode: VoucherSyncMode;
+  voucher_from_date: string | null;
+  voucher_to_date: string | null;
+  master_changed: boolean;
+  voucher_changed: boolean;
+};
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function normalizeCompactDate(value: unknown) {
+  if (!isNonEmptyString(value)) {
+    return null;
+  }
+
+  const compact = value.trim();
+  return /^\d{8}$/.test(compact) ? compact : null;
+}
+
+function compactDateToIsoDate(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+}
+
+function normalizeSyncMeta(value: unknown): SyncMeta {
+  const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const rawMode = raw.voucher_sync_mode;
+  const voucher_sync_mode: VoucherSyncMode =
+    rawMode === "incremental" || rawMode === "none" ? rawMode : "full";
+
+  return {
+    voucher_sync_mode,
+    voucher_from_date: normalizeCompactDate(raw.voucher_from_date),
+    voucher_to_date: normalizeCompactDate(raw.voucher_to_date),
+    master_changed: raw.master_changed !== false,
+    voucher_changed: raw.voucher_changed !== false,
+  };
+}
+
+function buildCompanyUpsertPayload(
+  companyName: string,
+  companyInfo: unknown,
+  alterIds: unknown,
+) {
+  const payload: Record<string, unknown> = { name: companyName };
+
+  if (companyInfo && typeof companyInfo === "object") {
+    const info = companyInfo as Record<string, unknown>;
+    for (const key of [
+      "books_from",
+      "books_to",
+      "books_from_raw",
+      "books_to_raw",
+      "gstin",
+      "address",
+      "guid",
+      "state",
+      "country",
+      "pincode",
+      "email",
+      "phone",
+      "gst_type",
+      "pan",
+    ]) {
+      if (key in info && info[key] !== "" && info[key] != null) {
+        payload[key] = info[key];
+      }
+    }
+
+    if (typeof info.master_id === "number" && Number.isFinite(info.master_id)) {
+      payload.master_id = info.master_id;
+    }
+  }
+
+  if (alterIds && typeof alterIds === "object") {
+    const ids = alterIds as Record<string, unknown>;
+    for (const key of ["alter_id", "alt_vch_id", "alt_mst_id", "last_voucher_date"]) {
+      if (key in ids && ids[key] !== "" && ids[key] != null) {
+        payload[key] = ids[key];
+      }
+    }
+  }
+
+  return payload;
+}
 
 function chunkArray<T>(items: T[], size = BATCH_SIZE): T[][] {
   const chunks: T[][] = [];
@@ -14,13 +114,36 @@ function chunkArray<T>(items: T[], size = BATCH_SIZE): T[][] {
 }
 
 function buildRecordCounts(sections: Record<string, unknown>) {
-  const records: Record<string, number> = {};
-  for (const [key, value] of Object.entries(sections)) {
-    if (Array.isArray(value)) {
-      records[key] = value.length;
-    }
+  const counts: Record<string, unknown> = {
+    groups: Array.isArray(sections.groups) ? sections.groups.length : undefined,
+    ledgers: Array.isArray(sections.ledgers) ? sections.ledgers.length : undefined,
+    vouchers: Array.isArray(sections.vouchers) ? sections.vouchers.length : undefined,
+    stock: Array.isArray(sections.stock_items) ? sections.stock_items.length : undefined,
+    outstanding: Array.isArray(sections.outstanding) ? sections.outstanding.length : undefined,
+    profit_loss: Array.isArray(sections.profit_loss) ? sections.profit_loss.length : undefined,
+    balance_sheet: Array.isArray(sections.balance_sheet) ? sections.balance_sheet.length : undefined,
+    trial_balance: Array.isArray(sections.trial_balance) ? sections.trial_balance.length : undefined,
+  };
+
+  return Object.fromEntries(
+    Object.entries(counts).filter(([, value]) => typeof value === "number")
+  ) as Record<string, number>;
+}
+
+function validateSectionArray(label: string, value: unknown) {
+  if (value == null) {
+    return null;
   }
-  return records;
+
+  if (!Array.isArray(value)) {
+    return `${label} must be an array when provided`;
+  }
+
+  if (value.length > MAX_SECTION_ROWS) {
+    return `${label} exceeds the maximum allowed size of ${MAX_SECTION_ROWS} rows`;
+  }
+
+  return null;
 }
 
 async function upsertInBatches(
@@ -54,6 +177,104 @@ async function deleteByEq(table: string, column: string, value: string, label: s
   const { error } = await supabase.from(table).delete().eq(column, value);
   if (error) {
     throw new Error(`${label} delete failed: ${error.message}`);
+  }
+}
+
+async function insertReturningIdsInBatches(table: string, rows: any[], label: string) {
+  const insertedIds: string[] = [];
+  if (!rows.length) {
+    return { insertedIds, error: null as Error | null };
+  }
+
+  for (const chunk of chunkArray(rows)) {
+    const { data, error } = await supabase.from(table).insert(chunk).select("id");
+    if (error) {
+      return {
+        insertedIds,
+        error: new Error(`${label} insert failed: ${error.message}`),
+      };
+    }
+
+    if (!Array.isArray(data) || data.length !== chunk.length) {
+      return {
+        insertedIds,
+        error: new Error(`${label} insert did not return all row ids`),
+      };
+    }
+
+    for (const row of data) {
+      if (typeof row.id !== "string") {
+        return {
+          insertedIds,
+          error: new Error(`${label} insert returned a row without an id`),
+        };
+      }
+      insertedIds.push(row.id);
+    }
+  }
+
+  return { insertedIds, error: null as Error | null };
+}
+
+async function deleteCompanyRowsExceptSync(
+  table: string,
+  companyId: string,
+  syncedAt: string,
+  label: string,
+) {
+  const { error } = await supabase
+    .from(table)
+    .delete()
+    .eq("company_id", companyId)
+    .neq("synced_at", syncedAt);
+
+  if (error) {
+    throw new Error(`${label} cleanup failed: ${error.message}`);
+  }
+}
+
+async function selectRowsByIn(table: string, column: string, values: string[], label: string) {
+  const rows: any[] = [];
+  if (!values.length) return rows;
+
+  for (const chunk of chunkArray(values)) {
+    const { data, error } = await supabase.from(table).select("*").in(column, chunk);
+    if (error) {
+      throw new Error(`${label} lookup failed: ${error.message}`);
+    }
+
+    rows.push(...(data || []));
+  }
+
+  return rows;
+}
+
+async function rollbackInsertedRows(table: string, insertedIds: string[], label: string) {
+  if (!insertedIds.length) return;
+
+  try {
+    await deleteByIn(table, "id", insertedIds, `${label} rollback`);
+  } catch (error: any) {
+    console.error(`[Sync] ${label} rollback warning: ${error.message}`);
+  }
+}
+
+async function restoreRows(table: string, rows: any[], label: string) {
+  if (!rows.length) return;
+
+  const restorableRows = rows.map(({ id, ...row }) => row);
+  try {
+    await insertInBatches(table, restorableRows, `${label} restore`);
+  } catch (error: any) {
+    console.error(`[Sync] ${label} restore warning: ${error.message}`);
+  }
+}
+
+async function cleanupSnapshotRows(table: string, companyId: string, syncedAt: string, label: string) {
+  try {
+    await deleteCompanyRowsExceptSync(table, companyId, syncedAt, label);
+  } catch (error: any) {
+    console.warn(`[Sync] ${label} cleanup warning: ${error.message}`);
   }
 }
 
@@ -92,12 +313,107 @@ async function getVoucherIdMap(companyId: string, tallyGuids: string[]) {
   return voucherIdMap;
 }
 
+async function deleteVoucherGraph(voucherIds: string[]) {
+  if (!voucherIds.length) return;
+
+  await deleteByIn("voucher_items", "voucher_id", voucherIds, "Voucher items stale rows");
+  await deleteByIn(
+    "voucher_ledger_entries",
+    "voucher_id",
+    voucherIds,
+    "Voucher ledger entries stale rows"
+  );
+  await deleteByIn("vouchers", "id", voucherIds, "Stale vouchers");
+}
+
+async function selectVouchersForReconciliation(companyId: string, syncMeta: SyncMeta) {
+  let query = supabase
+    .from("vouchers")
+    .select("id, tally_guid")
+    .eq("company_id", companyId);
+
+  if (syncMeta.voucher_sync_mode === "incremental") {
+    const fromIso = compactDateToIsoDate(syncMeta.voucher_from_date);
+    const toIso = compactDateToIsoDate(syncMeta.voucher_to_date);
+
+    if (!fromIso || !toIso) {
+      return [];
+    }
+
+    query = query.gte("date", fromIso).lte("date", toIso);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    throw new Error(`Voucher reconciliation lookup failed: ${error.message}`);
+  }
+
+  return data || [];
+}
+
+async function reconcileVoucherScope(
+  companyId: string,
+  incomingTallyGuids: string[],
+  syncMeta: SyncMeta,
+) {
+  if (syncMeta.voucher_sync_mode === "none") {
+    return;
+  }
+
+  const existingRows = await selectVouchersForReconciliation(companyId, syncMeta);
+  const incomingGuidSet = new Set(incomingTallyGuids);
+  const staleVoucherIds = existingRows
+    .filter((row: any) => !incomingGuidSet.has(row.tally_guid))
+    .map((row: any) => row.id)
+    .filter((id: unknown): id is string => typeof id === "string");
+
+  await deleteVoucherGraph(staleVoucherIds);
+}
+
+async function resolveCompanyIdByName(companyName: unknown) {
+  if (typeof companyName !== "string" || !companyName.trim()) {
+    return { status: 400 as const, error: "company_name query param required" };
+  }
+
+  const { data: company, error } = await supabase
+    .from("companies")
+    .select(`
+      id,
+      last_synced_at,
+      last_outstanding_synced_at,
+      last_profit_loss_synced_at,
+      last_balance_sheet_synced_at,
+      last_trial_balance_synced_at
+    `)
+    .eq("name", companyName.trim())
+    .single();
+
+  if (error || !company) {
+    return { status: 404 as const, error: "Company not found" };
+  }
+
+  if (!company.last_synced_at) {
+    return { status: 409 as const, error: "Company has not completed a successful sync yet" };
+  }
+
+  return {
+    status: 200 as const,
+    companyId: company.id,
+    lastSyncedAt: company.last_synced_at ?? null,
+    lastOutstandingSyncedAt: company.last_outstanding_synced_at ?? null,
+    lastProfitLossSyncedAt: company.last_profit_loss_synced_at ?? null,
+    lastBalanceSheetSyncedAt: company.last_balance_sheet_synced_at ?? null,
+    lastTrialBalanceSyncedAt: company.last_trial_balance_synced_at ?? null,
+  };
+}
+
 // ── POST /api/sync — Receive all data from desktop connector ────
 
 router.post("/", requireApiKey, async (req, res) => {
   const {
     company_name,
     company_info,
+    alter_ids,
     groups,
     ledgers,
     vouchers,
@@ -106,14 +422,31 @@ router.post("/", requireApiKey, async (req, res) => {
     profit_loss,
     balance_sheet,
     trial_balance,
+    sync_meta,
   } = req.body;
 
-  if (!company_name) {
+  if (typeof company_name !== "string" || !company_name.trim()) {
     return res.status(400).json({ error: "company_name required" });
+  }
+
+  const validationError = [
+    validateSectionArray("groups", groups),
+    validateSectionArray("ledgers", ledgers),
+    validateSectionArray("vouchers", vouchers),
+    validateSectionArray("stock_items", stock_items),
+    validateSectionArray("outstanding", outstanding),
+    validateSectionArray("profit_loss", profit_loss),
+    validateSectionArray("balance_sheet", balance_sheet),
+    validateSectionArray("trial_balance", trial_balance),
+  ].find(Boolean);
+
+  if (validationError) {
+    return res.status(400).json({ error: validationError });
   }
 
   let company_id: string | null = null;
   const syncedAt = new Date().toISOString();
+  const normalizedSyncMeta = normalizeSyncMeta(sync_meta);
   const records = buildRecordCounts({
     groups,
     ledgers,
@@ -124,20 +457,22 @@ router.post("/", requireApiKey, async (req, res) => {
     balance_sheet,
     trial_balance,
   });
+  const companySyncState: Record<string, string> = {
+    last_synced_at: syncedAt,
+  };
+  const snapshotCleanupTasks: Array<{
+    table: keyof typeof SNAPSHOT_TIMESTAMP_COLUMNS;
+    label: string;
+    column: (typeof SNAPSHOT_TIMESTAMP_COLUMNS)[keyof typeof SNAPSHOT_TIMESTAMP_COLUMNS];
+  }> = [];
+  const snapshotInsertedRows: Array<{ table: string; label: string; insertedIds: string[] }> = [];
 
   try {
     // 1. Upsert company
     const { data: company, error: companyErr } = await supabase
       .from("companies")
       .upsert(
-        { 
-          name: company_name, 
-          last_synced_at: syncedAt,
-          ...(company_info?.books_from ? { books_from: company_info.books_from } : {}),
-          ...(company_info?.books_to ? { books_to: company_info.books_to } : {}),
-          ...(company_info?.gstin ? { gstin: company_info.gstin } : {}),
-          ...(company_info?.address ? { address: company_info.address } : {}),
-        },
+        buildCompanyUpsertPayload(company_name, company_info, alter_ids),
         { onConflict: "name" }
       )
       .select("id")
@@ -178,9 +513,24 @@ router.post("/", requireApiKey, async (req, res) => {
           voucherRows.map((voucher: any) => voucher.tally_guid)
         );
         const voucherIds = [...voucherIdMap.values()];
-
-        await deleteByIn("voucher_items", "voucher_id", voucherIds, "Voucher items");
-        await deleteByIn("voucher_ledger_entries", "voucher_id", voucherIds, "Voucher ledger entries");
+        const existingItemRows = await selectRowsByIn(
+          "voucher_items",
+          "voucher_id",
+          voucherIds,
+          "Voucher items"
+        );
+        const existingEntryRows = await selectRowsByIn(
+          "voucher_ledger_entries",
+          "voucher_id",
+          voucherIds,
+          "Voucher ledger entries"
+        );
+        const existingItemIds = existingItemRows
+          .map((row: any) => row.id)
+          .filter((id: unknown): id is string => typeof id === "string");
+        const existingEntryIds = existingEntryRows
+          .map((row: any) => row.id)
+          .filter((id: unknown): id is string => typeof id === "string");
 
         const itemRows: any[] = [];
         const entryRows: any[] = [];
@@ -207,9 +557,45 @@ router.post("/", requireApiKey, async (req, res) => {
           }
         }
 
-        await insertInBatches("voucher_items", itemRows, "Voucher items");
-        await insertInBatches("voucher_ledger_entries", entryRows, "Voucher ledger entries");
+        const itemInsert = await insertReturningIdsInBatches("voucher_items", itemRows, "Voucher items");
+        if (itemInsert.error) {
+          await rollbackInsertedRows("voucher_items", itemInsert.insertedIds, "Voucher items");
+          throw itemInsert.error;
+        }
+
+        const entryInsert = await insertReturningIdsInBatches(
+          "voucher_ledger_entries",
+          entryRows,
+          "Voucher ledger entries"
+        );
+        if (entryInsert.error) {
+          await rollbackInsertedRows("voucher_ledger_entries", entryInsert.insertedIds, "Voucher ledger entries");
+          await rollbackInsertedRows("voucher_items", itemInsert.insertedIds, "Voucher items");
+          throw entryInsert.error;
+        }
+
+        try {
+          await deleteByIn("voucher_items", "id", existingItemIds, "Voucher items previous rows");
+          await deleteByIn(
+            "voucher_ledger_entries",
+            "id",
+            existingEntryIds,
+            "Voucher ledger entries previous rows"
+          );
+        } catch (error: any) {
+          await rollbackInsertedRows("voucher_ledger_entries", entryInsert.insertedIds, "Voucher ledger entries");
+          await rollbackInsertedRows("voucher_items", itemInsert.insertedIds, "Voucher items");
+          await restoreRows("voucher_items", existingItemRows, "Voucher items");
+          await restoreRows("voucher_ledger_entries", existingEntryRows, "Voucher ledger entries");
+          throw error;
+        }
       }
+
+      await reconcileVoucherScope(
+        companyId,
+        validVouchers.map((voucher: any) => voucher.tally_guid),
+        normalizedSyncMeta,
+      );
     }
 
     // 4. Upsert stock items
@@ -220,42 +606,124 @@ router.post("/", requireApiKey, async (req, res) => {
 
     // 5. Replace outstanding only when this section was provided
     if (Array.isArray(outstanding)) {
-      await deleteByEq("outstanding", "company_id", companyId, "Outstanding");
       const rows = outstanding.map((o: any) => ({ ...o, company_id: companyId, synced_at: syncedAt }));
-      await insertInBatches("outstanding", rows, "Outstanding");
+      const insertResult = await insertReturningIdsInBatches("outstanding", rows, "Outstanding");
+      if (insertResult.error) {
+        await rollbackInsertedRows("outstanding", insertResult.insertedIds, "Outstanding");
+        throw insertResult.error;
+      }
+      companySyncState[SNAPSHOT_TIMESTAMP_COLUMNS.outstanding] = syncedAt;
+      snapshotInsertedRows.push({
+        table: "outstanding",
+        label: "Outstanding",
+        insertedIds: insertResult.insertedIds,
+      });
+      snapshotCleanupTasks.push({
+        table: "outstanding",
+        label: "Outstanding",
+        column: SNAPSHOT_TIMESTAMP_COLUMNS.outstanding,
+      });
     }
 
     // 6. Replace profit & loss only when provided
     if (Array.isArray(profit_loss)) {
-      await deleteByEq("profit_loss", "company_id", companyId, "Profit & Loss");
       const rows = profit_loss.map((p: any) => ({
         ...p,
         company_id: companyId,
         synced_at: syncedAt,
       }));
-      await insertInBatches("profit_loss", rows, "Profit & Loss");
+      const insertResult = await insertReturningIdsInBatches("profit_loss", rows, "Profit & Loss");
+      if (insertResult.error) {
+        await rollbackInsertedRows("profit_loss", insertResult.insertedIds, "Profit & Loss");
+        throw insertResult.error;
+      }
+      companySyncState[SNAPSHOT_TIMESTAMP_COLUMNS.profit_loss] = syncedAt;
+      snapshotInsertedRows.push({
+        table: "profit_loss",
+        label: "Profit & Loss",
+        insertedIds: insertResult.insertedIds,
+      });
+      snapshotCleanupTasks.push({
+        table: "profit_loss",
+        label: "Profit & Loss",
+        column: SNAPSHOT_TIMESTAMP_COLUMNS.profit_loss,
+      });
     }
 
     // 7. Replace balance sheet only when provided
     if (Array.isArray(balance_sheet)) {
-      await deleteByEq("balance_sheet", "company_id", companyId, "Balance Sheet");
       const rows = balance_sheet.map((b: any) => ({
         ...b,
         company_id: companyId,
         synced_at: syncedAt,
       }));
-      await insertInBatches("balance_sheet", rows, "Balance Sheet");
+      const insertResult = await insertReturningIdsInBatches("balance_sheet", rows, "Balance Sheet");
+      if (insertResult.error) {
+        await rollbackInsertedRows("balance_sheet", insertResult.insertedIds, "Balance Sheet");
+        throw insertResult.error;
+      }
+      companySyncState[SNAPSHOT_TIMESTAMP_COLUMNS.balance_sheet] = syncedAt;
+      snapshotInsertedRows.push({
+        table: "balance_sheet",
+        label: "Balance Sheet",
+        insertedIds: insertResult.insertedIds,
+      });
+      snapshotCleanupTasks.push({
+        table: "balance_sheet",
+        label: "Balance Sheet",
+        column: SNAPSHOT_TIMESTAMP_COLUMNS.balance_sheet,
+      });
     }
 
     // 8. Replace trial balance only when provided
     if (Array.isArray(trial_balance)) {
-      await deleteByEq("trial_balance", "company_id", companyId, "Trial Balance");
       const rows = trial_balance.map((t: any) => ({
         ...t,
         company_id: companyId,
         synced_at: syncedAt,
       }));
-      await insertInBatches("trial_balance", rows, "Trial Balance");
+      const insertResult = await insertReturningIdsInBatches("trial_balance", rows, "Trial Balance");
+      if (insertResult.error) {
+        await rollbackInsertedRows("trial_balance", insertResult.insertedIds, "Trial Balance");
+        throw insertResult.error;
+      }
+      companySyncState[SNAPSHOT_TIMESTAMP_COLUMNS.trial_balance] = syncedAt;
+      snapshotInsertedRows.push({
+        table: "trial_balance",
+        label: "Trial Balance",
+        insertedIds: insertResult.insertedIds,
+      });
+      snapshotCleanupTasks.push({
+        table: "trial_balance",
+        label: "Trial Balance",
+        column: SNAPSHOT_TIMESTAMP_COLUMNS.trial_balance,
+      });
+    }
+
+    const { data: updatedCompany, error: companySyncStateError } = await supabase
+      .from("companies")
+      .update(companySyncState)
+      .eq("id", companyId)
+      .select(`
+        last_outstanding_synced_at,
+        last_profit_loss_synced_at,
+        last_balance_sheet_synced_at,
+        last_trial_balance_synced_at
+      `)
+      .single();
+
+    if (companySyncStateError) {
+      for (const snapshot of snapshotInsertedRows) {
+        await rollbackInsertedRows(snapshot.table, snapshot.insertedIds, snapshot.label);
+      }
+      throw new Error(`Company sync state update failed: ${companySyncStateError.message}`);
+    }
+
+    for (const snapshot of snapshotCleanupTasks) {
+      const activeSyncedAt = updatedCompany?.[snapshot.column];
+      if (typeof activeSyncedAt === "string" && activeSyncedAt) {
+        await cleanupSnapshotRows(snapshot.table, companyId, activeSyncedAt, snapshot.label);
+      }
     }
 
     // 9. Log the sync (best-effort only; don't fail a good data write on log issues)
@@ -294,22 +762,16 @@ router.get("/party-ledger", requireApiKey, async (req, res) => {
   }
 
   try {
-    // 1. Find company
-    const { data: company, error: companyErr } = await supabase
-      .from("companies")
-      .select("id")
-      .eq("name", company_name)
-      .single();
-
-    if (companyErr || !company) {
-      return res.status(404).json({ error: "Company not found" });
+    const companyLookup = await resolveCompanyIdByName(company_name);
+    if (companyLookup.status !== 200) {
+      return res.status(companyLookup.status).json({ error: companyLookup.error });
     }
 
     // 2. Get all vouchers for this party
     const { data: vouchers, error: vErr } = await supabase
       .from("vouchers")
-      .select("*, voucher_items(*)")
-      .eq("company_id", company.id)
+      .select("*, voucher_items(*), voucher_ledger_entries(*)")
+      .eq("company_id", companyLookup.companyId)
       .eq("party_name", party_name)
       .order("date", { ascending: true });
 
@@ -318,30 +780,46 @@ router.get("/party-ledger", requireApiKey, async (req, res) => {
     }
 
     // 3. Get outstanding for this party
-    const { data: outstanding, error: oErr } = await supabase
-      .from("outstanding")
-      .select("*")
-      .eq("company_id", company.id)
-      .eq("party_name", party_name);
+    let outstanding: any[] = [];
+    if (companyLookup.lastOutstandingSyncedAt) {
+      const { data, error: oErr } = await supabase
+        .from("outstanding")
+        .select("*")
+        .eq("company_id", companyLookup.companyId)
+        .eq("synced_at", companyLookup.lastOutstandingSyncedAt)
+        .eq("party_name", party_name);
 
-    if (oErr) {
-      throw new Error(`Outstanding query failed: ${oErr.message}`);
+      if (oErr) {
+        throw new Error(`Outstanding query failed: ${oErr.message}`);
+      }
+
+      outstanding = data || [];
     }
 
     // 4. Get ledger info for this party
     const { data: ledger, error: lErr } = await supabase
       .from("ledgers")
       .select("*")
-      .eq("company_id", company.id)
+      .eq("company_id", companyLookup.companyId)
       .eq("name", party_name)
       .single();
 
     // 5. Build running balance
     let runningBalance = 0;
     const transactions = (vouchers || []).map((v: any) => {
-      const isDebit = ["Sales", "Receipt", "Debit Note"].includes(v.voucher_type);
-      const amount = Math.abs(v.amount || 0);
-      runningBalance += isDebit ? amount : -amount;
+      const partyEntry = (v.voucher_ledger_entries || []).find((entry: any) => entry.is_party_ledger);
+      let signedAmount = 0;
+
+      if (partyEntry) {
+        const amount = Math.abs(partyEntry.amount || 0);
+        signedAmount = partyEntry.is_deemed_positive ? amount : -amount;
+      } else {
+        const amount = Math.abs(v.amount || 0);
+        const isDebit = ["Sales", "Receipt", "Debit Note"].includes(v.voucher_type);
+        signedAmount = isDebit ? amount : -amount;
+      }
+
+      runningBalance += signedAmount;
 
       return {
         date: v.date,
@@ -377,66 +855,84 @@ router.get("/party-ledger", requireApiKey, async (req, res) => {
 // ── GET routes for web dashboard ─────────────────────────────────
 
 router.get("/vouchers", requireApiKey, async (req, res) => {
-  const { company_name } = req.query;
-  const { data: company } = await supabase
-    .from("companies").select("id").eq("name", company_name).single();
-  if (!company) return res.status(404).json({ error: "Company not found" });
+  const companyLookup = await resolveCompanyIdByName(req.query.company_name);
+  if (companyLookup.status !== 200) {
+    return res.status(companyLookup.status).json({ error: companyLookup.error });
+  }
   const { data } = await supabase
     .from("vouchers").select("*, voucher_items(*)")
-    .eq("company_id", company.id)
+    .eq("company_id", companyLookup.companyId)
     .order("date", { ascending: false });
   res.json({ vouchers: data || [] });
 });
 
 router.get("/outstanding", requireApiKey, async (req, res) => {
-  const { company_name } = req.query;
-  const { data: company } = await supabase
-    .from("companies").select("id").eq("name", company_name).single();
-  if (!company) return res.status(404).json({ error: "Company not found" });
+  const companyLookup = await resolveCompanyIdByName(req.query.company_name);
+  if (companyLookup.status !== 200) {
+    return res.status(companyLookup.status).json({ error: companyLookup.error });
+  }
+  if (!companyLookup.lastOutstandingSyncedAt) {
+    return res.json({ outstanding: [] });
+  }
   const { data } = await supabase
     .from("outstanding").select("*")
-    .eq("company_id", company.id)
+    .eq("company_id", companyLookup.companyId)
+    .eq("synced_at", companyLookup.lastOutstandingSyncedAt)
     .order("days_overdue", { ascending: false });
   res.json({ outstanding: data || [] });
 });
 
 router.get("/stock", requireApiKey, async (req, res) => {
-  const { company_name } = req.query;
-  const { data: company } = await supabase
-    .from("companies").select("id").eq("name", company_name).single();
-  if (!company) return res.status(404).json({ error: "Company not found" });
+  const companyLookup = await resolveCompanyIdByName(req.query.company_name);
+  if (companyLookup.status !== 200) {
+    return res.status(companyLookup.status).json({ error: companyLookup.error });
+  }
   const { data } = await supabase
-    .from("stock_items").select("*").eq("company_id", company.id);
+    .from("stock_items").select("*").eq("company_id", companyLookup.companyId);
   res.json({ stock_items: data || [] });
 });
 
 router.get("/pnl", requireApiKey, async (req, res) => {
-  const { company_name } = req.query;
-  const { data: company } = await supabase
-    .from("companies").select("id").eq("name", company_name).single();
-  if (!company) return res.status(404).json({ error: "Company not found" });
+  const companyLookup = await resolveCompanyIdByName(req.query.company_name);
+  if (companyLookup.status !== 200) {
+    return res.status(companyLookup.status).json({ error: companyLookup.error });
+  }
+  if (!companyLookup.lastProfitLossSyncedAt) {
+    return res.json({ profit_loss: [] });
+  }
   const { data } = await supabase
-    .from("profit_loss").select("*").eq("company_id", company.id);
+    .from("profit_loss")
+    .select("*")
+    .eq("company_id", companyLookup.companyId)
+    .eq("synced_at", companyLookup.lastProfitLossSyncedAt);
   res.json({ profit_loss: data || [] });
 });
 
 router.get("/balance-sheet", requireApiKey, async (req, res) => {
-  const { company_name } = req.query;
-  const { data: company } = await supabase
-    .from("companies").select("id").eq("name", company_name).single();
-  if (!company) return res.status(404).json({ error: "Company not found" });
+  const companyLookup = await resolveCompanyIdByName(req.query.company_name);
+  if (companyLookup.status !== 200) {
+    return res.status(companyLookup.status).json({ error: companyLookup.error });
+  }
+  if (!companyLookup.lastBalanceSheetSyncedAt) {
+    return res.json({ balance_sheet: [] });
+  }
   const { data } = await supabase
-    .from("balance_sheet").select("*").eq("company_id", company.id);
+    .from("balance_sheet")
+    .select("*")
+    .eq("company_id", companyLookup.companyId)
+    .eq("synced_at", companyLookup.lastBalanceSheetSyncedAt);
   res.json({ balance_sheet: data || [] });
 });
 
 
 router.get("/alter-ids", requireApiKey, async (req, res) => {
-  const { company_name } = req.query;
+  if (typeof req.query.company_name !== "string" || !req.query.company_name.trim()) {
+    return res.status(400).json({ error: "company_name query param required" });
+  }
   const { data } = await supabase
     .from("companies")
     .select("alter_id, alt_vch_id, alt_mst_id")
-    .eq("name", company_name)
+    .eq("name", req.query.company_name.trim())
     .single();
   res.json(data || {});
 });
@@ -453,21 +949,16 @@ router.get("/parties", requireApiKey, async (req, res) => {
   }
 
   try {
-    const { data: company, error: companyErr } = await supabase
-      .from("companies")
-      .select("id")
-      .eq("name", company_name)
-      .single();
-
-    if (companyErr || !company) {
-      return res.status(404).json({ error: "Company not found" });
+    const companyLookup = await resolveCompanyIdByName(company_name);
+    if (companyLookup.status !== 200) {
+      return res.status(companyLookup.status).json({ error: companyLookup.error });
     }
 
     // Get all parties from ledgers (Sundry Debtors + Sundry Creditors)
     const { data: parties, error: pErr } = await supabase
       .from("ledgers")
       .select("name, group_name, opening_balance, closing_balance")
-      .eq("company_id", company.id)
+      .eq("company_id", companyLookup.companyId)
       .in("group_name", ["Sundry Debtors", "Sundry Creditors"]);
 
     if (pErr) {
@@ -475,10 +966,20 @@ router.get("/parties", requireApiKey, async (req, res) => {
     }
 
     // Get outstanding totals per party
-    const { data: outstandingList, error: oErr } = await supabase
-      .from("outstanding")
-      .select("party_name, type, pending_amount")
-      .eq("company_id", company.id);
+    let outstandingList: any[] = [];
+    if (companyLookup.lastOutstandingSyncedAt) {
+      const { data, error: oErr } = await supabase
+        .from("outstanding")
+        .select("party_name, type, pending_amount")
+        .eq("company_id", companyLookup.companyId)
+        .eq("synced_at", companyLookup.lastOutstandingSyncedAt);
+
+      if (oErr) {
+        throw new Error(`Outstanding query failed: ${oErr.message}`);
+      }
+
+      outstandingList = data || [];
+    }
 
     // Build party summary
     const outstandingMap: Record<string, number> = {};

@@ -4,7 +4,7 @@ import isDev from "electron-is-dev";
 
 let tray: Tray | null = null;
 
-export function setupTray(mainWindow: BrowserWindow) {
+export function setupTray(mainWindow: BrowserWindow, onSyncNow: () => void) {
   const iconPath = isDev
     ? path.join(__dirname, "../../assets/tray-icon.png")
     : path.join(process.resourcesPath, "assets", "tray-icon.png");
@@ -36,7 +36,7 @@ export function setupTray(mainWindow: BrowserWindow) {
       },
       {
         label: "Sync Now",
-        click: () => mainWindow.webContents.send("trigger-sync"),
+        click: () => onSyncNow(),
       },
       { type: "separator" },
       {

@@ -8,13 +8,19 @@ export interface Company {
   addedAt: string;
   lastSyncedAt?: string;
   lastSyncStatus?: "success" | "error" | "syncing" | "idle";
-  lastSyncRecords?: {
-    ledgers: number;
-    vouchers: number;
-    stock: number;
-    outstanding: number;
-  };
+  lastSyncRecords?: SyncRecordCounts;
   lastSyncError?: string;
+}
+
+export interface SyncRecordCounts {
+  groups: number;
+  ledgers: number;
+  vouchers: number;
+  stock: number;
+  outstanding: number;
+  profit_loss: number;
+  balance_sheet: number;
+  trial_balance: number;
 }
 
 export interface AppConfig {

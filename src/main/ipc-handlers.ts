@@ -3,6 +3,42 @@ import axios from "axios";
 import { store, addCompany, removeCompany } from "./store";
 import { SyncEngine } from "./sync-engine";
 
+const TALLY_REQUEST_TIMEOUT_MS = 5000;
+
+function decodeTallyResponse(data: Buffer, contentType = "") {
+  const looksUtf16 = contentType.toLowerCase().includes("utf-16")
+    || data.subarray(0, 2).equals(Buffer.from([0xff, 0xfe]))
+    || data.subarray(0, 2).equals(Buffer.from([0xfe, 0xff]))
+    || data.subarray(0, 64).includes(Buffer.from([0x00, 0x3c]))
+    || data.subarray(0, 64).includes(Buffer.from([0x3c, 0x00]));
+
+  if (looksUtf16) {
+    try {
+      const decoded = data.toString("utf16le");
+      if (decoded.toUpperCase().includes("<ENVELOPE") || decoded.toUpperCase().includes("<RESPONSE")) {
+        return decoded;
+      }
+    } catch {
+      // Fall through to UTF-8 below.
+    }
+  }
+
+  return data.toString("utf8");
+}
+
+async function postTallyXml(tallyUrl: string, xml: string, responseType: "text" | "arraybuffer" = "text") {
+  const xmlBuf = Buffer.from(xml, "utf8");
+  return axios.post(tallyUrl, xmlBuf, {
+    headers: {
+      "Content-Type": "text/xml;charset=utf-8",
+      "Content-Length": xmlBuf.length.toString(),
+    },
+    timeout: TALLY_REQUEST_TIMEOUT_MS,
+    responseType,
+    transformResponse: response => response,
+  });
+}
+
 export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
   ipcMain.handle("get-config", () => store.store);
 
@@ -14,6 +50,7 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
     store.set("backendUrl", s.backendUrl);
     store.set("apiKey", s.apiKey);
     store.set("accountEmail", s.accountEmail);
+    engine.reschedule();
     return { success: true };
   });
 
@@ -31,10 +68,7 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
         <BODY><EXPORTDATA><REQUESTDESC>
         <REPORTNAME>List of Companies</REPORTNAME>
         </REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
-      await axios.post(tallyUrl, testXml, {
-        headers: { "Content-Type": "text/xml" },
-        timeout: 5000,
-      });
+      await postTallyXml(tallyUrl, testXml);
       const company = addCompany(name);
       window.webContents.send("companies-updated", store.get("companies"));
       return { success: true, company };
@@ -65,15 +99,7 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
       <BODY><EXPORTDATA><REQUESTDESC>
       <REPORTNAME>List of Companies</REPORTNAME>
       </REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
-      await axios.post(tallyUrl, Buffer.from(testXml, "utf16le"), {
-        headers: {
-          "Content-Type": "text/xml;charset=utf-16",
-          "Content-Length": Buffer.byteLength(
-            Buffer.from(testXml, "utf16le"),
-          ).toString(),
-        },
-        timeout: 5000,
-      });
+      await postTallyXml(tallyUrl, testXml);
       return { connected: true };
     } catch {
       return { connected: false };
@@ -82,20 +108,13 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
   ipcMain.handle("get-tally-companies", async () => {
     try {
       const tallyUrl = store.get("tallyUrl");
-      const xml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>Collection of Ledgers</ID></HEADER><BODY><DESC><STATICVARIABLES><SVFROMDATE TYPE="Date">01-Jan-1970</SVFROMDATE><SVTODATE TYPE="Date">01-Jan-1970</SVTODATE><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="Collection of Ledgers" ISMODIFY="No"><TYPE>Company</TYPE><FETCH>NAME,GUID,BASICCOMPANYFORMALNAME</FETCH><FILTERS>GroupFilter</FILTERS></COLLECTION><SYSTEM TYPE="FORMULAE" NAME="GroupFilter">$isaggregate = "No"</SYSTEM></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+      const xml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>CompanyList</ID></HEADER><BODY><DESC><STATICVARIABLES><SVFROMDATE TYPE="Date">01-Jan-1970</SVFROMDATE><SVTODATE TYPE="Date">01-Jan-1970</SVTODATE><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="CompanyList" ISMODIFY="No"><TYPE>Company</TYPE><FETCH>NAME,GUID,BASICCOMPANYFORMALNAME</FETCH><FILTERS>GroupFilter</FILTERS></COLLECTION><SYSTEM TYPE="FORMULAE" NAME="GroupFilter">$isaggregate = "No"</SYSTEM></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
 
-      const xmlBuf = Buffer.from(xml, "utf16le");
-      const response = await axios.post(tallyUrl, xmlBuf, {
-        headers: {
-          "Content-Type": "text/xml;charset=utf-16",
-          "Content-Length": xmlBuf.length.toString(),
-        },
-        timeout: 5000,
-        responseType: "arraybuffer",
-      });
-
-      // Decode UTF-16 response
-      const decoded = Buffer.from(response.data).toString("utf16le");
+      const response = await postTallyXml(tallyUrl, xml, "arraybuffer");
+      const decoded = decodeTallyResponse(
+        Buffer.from(response.data),
+        String(response.headers["content-type"] || ""),
+      );
       console.log("TALLY DECODED:", decoded);
 
       // Extract company names from NAME attribute or NAME tag

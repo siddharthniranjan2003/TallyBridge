@@ -46,16 +46,16 @@ function createWindow() {
 app.whenReady().then(() => {
   createWindow();
 
-  const trayController = setupTray(mainWindow!);
   const syncEngine = new SyncEngine(mainWindow!);
-  setupIpcHandlers(syncEngine, mainWindow!);
-
-  // Update tray icon based on sync events
-  mainWindow!.webContents.on("ipc-message", (_, channel) => {
-    if (channel === "sync-start") trayController.setStatus("syncing");
-    if (channel === "sync-complete") trayController.setStatus("idle");
-    if (channel === "company-error") trayController.setStatus("error");
+  const trayController = setupTray(mainWindow!, () => {
+    void syncEngine.syncNow();
   });
+  syncEngine.setLifecycleCallbacks({
+    onSyncStart: () => trayController.setStatus("syncing"),
+    onSyncComplete: (hadErrors) => trayController.setStatus(hadErrors ? "error" : "idle"),
+    onCompanyError: () => trayController.setStatus("error"),
+  });
+  setupIpcHandlers(syncEngine, mainWindow!);
 
   syncEngine.start();
 });

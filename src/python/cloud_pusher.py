@@ -5,6 +5,13 @@ import requests
 BACKEND_URL = os.environ.get("BACKEND_URL", "")
 API_KEY = os.environ.get("API_KEY", "")
 
+
+def get_backend_timeout_seconds() -> int:
+    try:
+        return max(60, int(os.environ.get("BACKEND_TIMEOUT_SECONDS", "120")))
+    except ValueError:
+        return 120
+
 def push(payload: dict) -> bool:
     if not BACKEND_URL:
         print("[Cloud] No backend URL configured — skipping push")
@@ -18,7 +25,7 @@ def push(payload: dict) -> bool:
                 "Content-Type": "application/json",
                 "x-api-key": API_KEY,
             },
-            timeout=60,
+            timeout=get_backend_timeout_seconds(),
         )
 
         if response.ok:
@@ -33,7 +40,7 @@ def push(payload: dict) -> bool:
                 ("groups", "Groups"),
                 ("ledgers", "Ledgers"),
                 ("vouchers", "Vouchers"),
-                ("stock_items", "Stock"),
+                ("stock", "Stock"),
                 ("outstanding", "Outstanding"),
                 ("profit_loss", "Profit & Loss"),
                 ("balance_sheet", "Balance Sheet"),

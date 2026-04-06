@@ -11,8 +11,8 @@ export default function ProfitLoss() {
       .finally(() => setLoading(false));
   }, []);
 
-  const income = data.filter(d => d.side === "credit").reduce((s, d) => s + (d.amount || 0), 0);
-  const expenses = data.filter(d => d.side === "debit").reduce((s, d) => s + (d.amount || 0), 0);
+  const income = data.filter(d => d.is_debit === false).reduce((s, d) => s + (d.amount || 0), 0);
+  const expenses = data.filter(d => d.is_debit === true).reduce((s, d) => s + (d.amount || 0), 0);
   const profit = income - expenses;
 
   return (
@@ -41,8 +41,8 @@ export default function ProfitLoss() {
       {loading ? <p style={{ color: "#aaa" }}>Loading...</p> : (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
           {[
-            { title: "Income", items: data.filter(d => d.side === "credit"), color: "#16a34a" },
-            { title: "Expenses", items: data.filter(d => d.side === "debit"), color: "#dc2626" },
+            { title: "Income", items: data.filter(d => d.is_debit === false), color: "#16a34a" },
+            { title: "Expenses", items: data.filter(d => d.is_debit === true), color: "#dc2626" },
           ].map(section => (
             <div key={section.title} style={{ background: "#fff", borderRadius: 12, border: "1px solid #f0f0f0" }}>
               <div style={{
@@ -57,7 +57,7 @@ export default function ProfitLoss() {
                   padding: "10px 20px", borderBottom: "1px solid #fafafa",
                   fontSize: 13
                 }}>
-                  <span style={{ color: "#555" }}>{d.account_name}</span>
+                  <span style={{ color: "#555" }}>{d.particulars}</span>
                   <span style={{ fontWeight: 500 }}>{fmt(d.amount)}</span>
                 </div>
               ))}

@@ -13,8 +13,8 @@ CREATE TABLE IF NOT EXISTS profit_loss (
   synced_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_profit_loss_company
-  ON profit_loss(company_id);
+CREATE INDEX IF NOT EXISTS idx_profit_loss_company_synced_at
+  ON profit_loss(company_id, synced_at DESC);
 
 
 -- 2. Balance Sheet
@@ -27,8 +27,8 @@ CREATE TABLE IF NOT EXISTS balance_sheet (
   synced_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_balance_sheet_company
-  ON balance_sheet(company_id);
+CREATE INDEX IF NOT EXISTS idx_balance_sheet_company_synced_at
+  ON balance_sheet(company_id, synced_at DESC);
 
 
 -- 3. Trial Balance
@@ -41,8 +41,8 @@ CREATE TABLE IF NOT EXISTS trial_balance (
   synced_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_trial_balance_company
-  ON trial_balance(company_id);
+CREATE INDEX IF NOT EXISTS idx_trial_balance_company_synced_at
+  ON trial_balance(company_id, synced_at DESC);
 
 
 -- ============================================================

@@ -11,8 +11,8 @@ export default function BalanceSheet() {
       .finally(() => setLoading(false));
   }, []);
 
-  const assets = data.filter(d => d.side === "assets");
-  const liabilities = data.filter(d => d.side === "liabilities");
+  const assets = data.filter(d => d.side === "asset");
+  const liabilities = data.filter(d => d.side === "liability");
   const totalAssets = assets.reduce((s, d) => s + (d.amount || 0), 0);
   const totalLiab = liabilities.reduce((s, d) => s + (d.amount || 0), 0);
 
@@ -42,7 +42,7 @@ export default function BalanceSheet() {
                   padding: "10px 20px", borderBottom: "1px solid #fafafa",
                   fontSize: 13
                 }}>
-                  <span style={{ color: "#555" }}>{d.account_name}</span>
+                  <span style={{ color: "#555" }}>{d.particulars}</span>
                   <span style={{ fontWeight: 500 }}>{fmt(d.amount)}</span>
                 </div>
               ))}

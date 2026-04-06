@@ -26,7 +26,7 @@ def safe_float(val) -> float:
         s = s.split()[0].strip()      # " 10 Nos" → "10"
         s = s.replace(",", "")
         return float(s)
-    except:
+    except (TypeError, ValueError, AttributeError):
         return 0.0
 
 def safe_int(val) -> int:
@@ -35,7 +35,7 @@ def safe_int(val) -> int:
         val = val.get("#text") or val.get("@amount") or "0"
     try:
         return int(str(val).strip().split()[0])
-    except:
+    except (TypeError, ValueError, AttributeError):
         return 0
 
 def safe_str(val) -> str:
@@ -53,12 +53,12 @@ def parse_tally_date(val: str):
     if len(val) == 8 and val.isdigit():
         try:
             return date(int(val[:4]), int(val[4:6]), int(val[6:8])).isoformat()
-        except:
+        except ValueError:
             return None
     for fmt in ("%d-%b-%y", "%d-%b-%Y", "%d-%m-%Y"):
         try:
             return datetime.strptime(val, fmt).date().isoformat()
-        except:
+        except ValueError:
             continue
     return None
 
@@ -244,6 +244,11 @@ def parse_vouchers(xml_text: str) -> list:
             if not v:
                 continue
 
+            if safe_str(v.get("ISCANCELLED", "No")) == "Yes":
+                continue
+            if safe_str(v.get("ISOPTIONAL", "No")) == "Yes":
+                continue
+
             vtype  = v.get("@VCHTYPE") or v.get("VOUCHERTYPENAME", "")
             guid   = v.get("@REMOTEID") or v.get("GUID", "")
             vnum   = v.get("VOUCHERNUMBER", "")
@@ -330,7 +335,7 @@ def parse_vouchers(xml_text: str) -> list:
                 "party_name":      party,
                 "amount":          abs(amount),
                 "narration":       v.get("NARRATION", ""),
-                "is_cancelled":    v.get("ISCANCELLED", "No") == "Yes",
+                "is_cancelled":    False,
                 "reference":       reference,
                 "is_invoice":      is_invoice == "Yes",
                 "view":            persisted_view,
@@ -340,7 +345,7 @@ def parse_vouchers(xml_text: str) -> list:
         return result
     except Exception as e:
         print(f"[Parser] voucher error: {e}")
-        return []
+        raise
 
 # ── stock summary ─────────────────────────────────────────────────
 

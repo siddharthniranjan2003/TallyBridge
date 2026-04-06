@@ -25,19 +25,48 @@ COMPANY = os.environ.get("TALLY_COMPANY", "")
 # Store last-known alter IDs in a local file so we can skip
 # full sync when nothing has changed in TallyPrime.
 
-CACHE_FILE = os.path.join(os.path.dirname(__file__), ".alter_ids_cache.json")
-VOUCHER_OVERLAP_DAYS = 7
+def resolve_cache_file() -> str:
+    user_data_dir = os.environ.get("TB_USER_DATA_DIR")
+    if user_data_dir:
+        cache_dir = user_data_dir
+    elif os.name == "nt" and os.environ.get("APPDATA"):
+        cache_dir = os.path.join(os.environ["APPDATA"], "TallyBridge")
+    else:
+        cache_dir = os.path.dirname(__file__)
 
-def load_cached_ids() -> dict:
-    """Load previously saved alter IDs from disk."""
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, ".alter_ids_cache.json")
+
+
+CACHE_FILE = resolve_cache_file()
+VOUCHER_OVERLAP_DAYS = 7
+ENABLE_INCREMENTAL_VOUCHER_SYNC = os.environ.get("TB_ENABLE_INCREMENTAL_VOUCHER_SYNC", "").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+
+def load_cached_ids() -> tuple[dict, bool]:
+    """Load previously saved alter IDs from disk.
+
+    Returns:
+        (cached_ids, had_load_error)
+    """
+    if not os.path.exists(CACHE_FILE):
+        return {}, False
+
     try:
-        if os.path.exists(CACHE_FILE):
-            with open(CACHE_FILE, "r") as f:
-                cache = json.load(f)
-                return cache.get(COMPANY, {})
-    except:
-        pass
-    return {}
+        with open(CACHE_FILE, "r") as f:
+            cache = json.load(f)
+
+        company_cache = cache.get(COMPANY)
+        if company_cache is None:
+            return {}, False
+        if isinstance(company_cache, dict):
+            return company_cache, False
+
+        raise TypeError("company cache entry must be an object")
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as e:
+        print(f"[Cache] Could not load alter IDs: {e}")
+        return {}, True
 
 def save_cached_ids(ids: dict):
     """Save current alter IDs to disk."""
@@ -49,7 +78,7 @@ def save_cached_ids(ids: dict):
         cache[COMPANY] = ids
         with open(CACHE_FILE, "w") as f:
             json.dump(cache, f)
-    except Exception as e:
+    except (OSError, json.JSONDecodeError, TypeError) as e:
         print(f"[Cache] Could not save alter IDs: {e}")
 
 def parse_iso_date(iso_str: str):
@@ -76,7 +105,7 @@ def format_tally_compact(d: date) -> str:
 
 def build_sync_plan(current_ids: dict, fy_from: str, fy_to: str) -> dict:
     """Figure out which sections need refreshing and whether vouchers can be incremental."""
-    cached_ids = load_cached_ids()
+    cached_ids, cache_load_failed = load_cached_ids()
 
     if not current_ids:
         return {
@@ -93,6 +122,23 @@ def build_sync_plan(current_ids: dict, fy_from: str, fy_to: str) -> dict:
             "voucher_to_date": fy_to,
             "voucher_sync_mode": "full",
             "reason": "missing_change_markers",
+        }
+
+    if cache_load_failed:
+        return {
+            "has_changes": True,
+            "master_changed": True,
+            "voucher_changed": True,
+            "need_groups": True,
+            "need_ledgers": True,
+            "need_vouchers": True,
+            "need_stock": True,
+            "need_outstanding": True,
+            "need_reports": True,
+            "voucher_from_date": fy_from,
+            "voucher_to_date": fy_to,
+            "voucher_sync_mode": "full",
+            "reason": "cache_load_failed",
         }
 
     if not cached_ids:
@@ -138,7 +184,13 @@ def build_sync_plan(current_ids: dict, fy_from: str, fy_to: str) -> dict:
         cached_last = parse_iso_date(cached_ids.get("last_voucher_date"))
         current_last = parse_iso_date(current_ids.get("last_voucher_date"))
 
-        if fy_from_date and cached_last and current_last and current_last > cached_last:
+        if (
+            ENABLE_INCREMENTAL_VOUCHER_SYNC
+            and fy_from_date
+            and cached_last
+            and current_last
+            and current_last > cached_last
+        ):
             start_date = max(fy_from_date, cached_last - timedelta(days=VOUCHER_OVERLAP_DAYS))
             voucher_from_date = format_tally_compact(start_date)
             voucher_sync_mode = "incremental"
@@ -185,6 +237,7 @@ def main():
     # ── Step 0: Fetch company info (FY dates) ────────────────
     from_date, to_date = get_fy_dates_fallback()
     company_info = {}
+    current_ids = {}
     try:
         print("[Tally] Fetching company info...")
         try:
@@ -214,7 +267,6 @@ def main():
     print(f"[Tally] Date range: {from_date} to {to_date}")
 
     # ── Step 1: Change detection ─────────────────────────────
-    current_ids = {}
     sync_plan = {
         "has_changes": True,
         "master_changed": True,
@@ -276,6 +328,7 @@ def main():
             except Exception as structured_error:
                 print(f"[Tally] Structured groups fetch failed ({structured_error}) — falling back to legacy parser")
                 groups = parse_groups(get_groups())
+            record_updates["groups"] = len(groups)
             print(f"[Tally] Got {len(groups)} groups")
 
         if sync_plan.get("need_ledgers"):
@@ -360,6 +413,7 @@ def main():
                 print(f"[Tally] Structured Profit & Loss fetch failed ({structured_error}) — falling back to legacy parser")
                 profit_loss = parse_profit_and_loss(get_profit_and_loss(from_date, to_date))
             print(f"[Tally] Got {len(profit_loss)} P&L line items")
+            record_updates["profit_loss"] = len(profit_loss)
 
             print("[Tally] Fetching Balance Sheet...")
             try:
@@ -372,6 +426,7 @@ def main():
                 print(f"[Tally] Structured Balance Sheet fetch failed ({structured_error}) — falling back to legacy parser")
                 balance_sheet = parse_balance_sheet(get_balance_sheet(from_date, to_date))
             print(f"[Tally] Got {len(balance_sheet)} Balance Sheet items")
+            record_updates["balance_sheet"] = len(balance_sheet)
 
             print("[Tally] Fetching Trial Balance...")
             try:
@@ -384,12 +439,14 @@ def main():
                 print(f"[Tally] Structured Trial Balance fetch failed ({structured_error}) — falling back to legacy parser")
                 trial_balance = parse_trial_balance(get_trial_balance(from_date, to_date))
             print(f"[Tally] Got {len(trial_balance)} Trial Balance items")
+            record_updates["trial_balance"] = len(trial_balance)
 
         # ── Step 3: Push to cloud ────────────────────────────
         print("[Cloud] Pushing to backend...")
         payload = {
             "company_name": COMPANY,
             "company_info": company_info,
+            "alter_ids": current_ids,
             "groups": groups,
             "ledgers": ledgers,
             "vouchers": vouchers,

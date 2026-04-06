@@ -8,3 +8,5 @@ src/python/__pycache__/
 src/python/dist/
 src/python/build/
 *.spec
+git_status*.txt
+out*.txt

@@ -1,20 +1,21 @@
 import { spawn } from "child_process";
-import { BrowserWindow } from "electron";
+import { app, BrowserWindow } from "electron";
 import path from "path";
 import isDev from "electron-is-dev";
-import { store, updateCompanyStatus } from "./store";
+import { store, SyncRecordCounts, updateCompanyStatus } from "./store";
 
-type SyncRecordCounts = {
-  ledgers: number;
-  vouchers: number;
-  stock: number;
-  outstanding: number;
+type SyncLifecycleCallbacks = {
+  onSyncStart?: () => void;
+  onSyncComplete?: (hadErrors: boolean) => void;
+  onCompanyError?: () => void;
 };
 
 export class SyncEngine {
   private timer: NodeJS.Timeout | null = null;
   private mainWindow: BrowserWindow;
   private isSyncing = false;
+  private hadCompanyError = false;
+  private lifecycleCallbacks: SyncLifecycleCallbacks = {};
 
   constructor(window: BrowserWindow) {
     this.mainWindow = window;
@@ -34,6 +35,15 @@ export class SyncEngine {
     }
   }
 
+  reschedule() {
+    this.stop();
+    this.scheduleNext();
+  }
+
+  setLifecycleCallbacks(callbacks: SyncLifecycleCallbacks) {
+    this.lifecycleCallbacks = callbacks;
+  }
+
   async syncNow() {
     if (this.isSyncing) {
       this.emit("sync-log", { company: "System", line: "Sync already in progress..." });
@@ -44,6 +54,9 @@ export class SyncEngine {
 
   private scheduleNext() {
     const minutes = store.get("syncIntervalMinutes", 5);
+    if (this.timer) {
+      clearInterval(this.timer);
+    }
     this.timer = setInterval(
       () => this.runAllCompanies(),
       minutes * 60 * 1000
@@ -52,6 +65,11 @@ export class SyncEngine {
   }
 
   private async runAllCompanies() {
+    if (this.isSyncing) {
+      this.emit("sync-log", { company: "System", line: "Sync already in progress..." });
+      return;
+    }
+
     const companies = store.get("companies").filter((c) => c.enabled);
     if (!companies.length) {
       this.emit("sync-log", { company: "System", line: "No companies to sync. Add a company first." });
@@ -59,21 +77,26 @@ export class SyncEngine {
     }
 
     this.isSyncing = true;
+    this.hadCompanyError = false;
+    this.lifecycleCallbacks.onSyncStart?.();
     this.emit("sync-start", { companies: companies.map((c) => c.name) });
 
-    for (const company of companies) {
-      updateCompanyStatus(company.id, { lastSyncStatus: "syncing" });
-      this.emit("company-status-change", {
-        id: company.id,
-        status: "syncing",
-      });
-      await this.syncOneCompany(company.id, company.name);
+    try {
+      for (const company of companies) {
+        updateCompanyStatus(company.id, { lastSyncStatus: "syncing" });
+        this.emit("company-status-change", {
+          id: company.id,
+          status: "syncing",
+        });
+        await this.syncOneCompany(company.id, company.name);
+      }
+    } finally {
+      this.isSyncing = false;
+      this.lifecycleCallbacks.onSyncComplete?.(this.hadCompanyError);
+      this.emit("sync-complete", { at: new Date().toISOString() });
+      // Refresh company list in UI
+      this.emit("companies-updated", store.get("companies"));
     }
-
-    this.isSyncing = false;
-    this.emit("sync-complete", { at: new Date().toISOString() });
-    // Refresh company list in UI
-    this.emit("companies-updated", store.get("companies"));
   }
 
   private syncOneCompany(companyId: string, companyName: string): Promise<void> {
@@ -95,13 +118,97 @@ export class SyncEngine {
         TALLY_COMPANY: companyName,
         BACKEND_URL: config.backendUrl,
         API_KEY: config.apiKey,
+        TB_USER_DATA_DIR: app.getPath("userData"),
       };
 
       const args = isDev ? [scriptPath] : [];
-      const proc = spawn(pythonBin, args, { env });
-
       let outputLines: string[] = [];
       let errorOutput = "";
+      let settled = false;
+      let didTimeout = false;
+      const parsedTimeoutMs = Number(process.env.TB_SYNC_PROCESS_TIMEOUT_MS);
+      const maxDurationMs = Number.isFinite(parsedTimeoutMs) && parsedTimeoutMs > 0
+        ? parsedTimeoutMs
+        : 5 * 60 * 1000;
+      let processTimeout: NodeJS.Timeout | null = null;
+
+      const finalize = (code: number | null, overrideError?: string) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (processTimeout) {
+          clearTimeout(processTimeout);
+        }
+
+        if (code === 0 && !overrideError) {
+          const existing = store.get("companies").find((c) => c.id === companyId);
+          let records = this.normalizeRecordCounts(existing?.lastSyncRecords);
+          let status = "success";
+          try {
+            // Find the last line that starts with "{" (tally/python logs might have trailing empty lines or junk)
+            const validJsonLine = [...outputLines].reverse().find(line => line.trim().startsWith("{"));
+            if (validJsonLine) {
+              const parsed = JSON.parse(validJsonLine.trim());
+              records = this.mergeRecordCounts(records, parsed.records);
+              status = parsed.status || "success";
+            }
+          } catch (e) {
+            console.error("JSON parse error from python output:", e);
+          }
+
+          // If sync was skipped (no changes), keep previous record counts
+          if (status === "skipped") {
+            records = this.normalizeRecordCounts(existing?.lastSyncRecords || records);
+          }
+
+          updateCompanyStatus(companyId, {
+            lastSyncStatus: "success",
+            lastSyncedAt: new Date().toISOString(),
+            lastSyncRecords: records,
+            lastSyncError: undefined,
+          });
+          this.emit("company-synced", { id: companyId, name: companyName, records });
+        } else {
+          const errMsg = overrideError?.trim()
+            || errorOutput.trim()
+            || (didTimeout ? `Sync timed out after ${Math.round(maxDurationMs / 1000)}s` : "")
+            || "Unknown error (database insert failed or python crashed)";
+          this.hadCompanyError = true;
+          updateCompanyStatus(companyId, {
+            lastSyncStatus: "error",
+            lastSyncError: errMsg,
+          });
+          this.lifecycleCallbacks.onCompanyError?.();
+          this.emit("company-error", { id: companyId, name: companyName, error: errMsg });
+        }
+
+        this.emit("companies-updated", store.get("companies"));
+        resolve();
+      };
+
+      let proc: ReturnType<typeof spawn> | null = null;
+      try {
+        proc = spawn(pythonBin, args, { env });
+      } catch (error) {
+        finalize(1, error instanceof Error ? error.message : "Failed to start sync process");
+        return;
+      }
+
+      processTimeout = setTimeout(() => {
+        didTimeout = true;
+        const timeoutMessage = `Sync timed out after ${Math.round(maxDurationMs / 1000)}s`;
+        errorOutput = `${errorOutput}\n${timeoutMessage}`.trim();
+        this.emit("sync-log", {
+          company: companyName,
+          line: `[ERR] ${timeoutMessage}`,
+        });
+        proc?.kill();
+
+        setTimeout(() => {
+          finalize(1, timeoutMessage);
+        }, 1000);
+      }, maxDurationMs);
 
       proc.stdout?.on("data", (data: Buffer) => {
         const lines = data.toString().split("\n").filter(Boolean);
@@ -119,51 +226,18 @@ export class SyncEngine {
         });
       });
 
+      proc.on("error", (error: Error) => {
+        const processError = `Sync process error: ${error.message}`;
+        errorOutput = `${errorOutput}\n${processError}`.trim();
+        this.emit("sync-log", {
+          company: companyName,
+          line: `[ERR] ${processError}`,
+        });
+        finalize(1, processError);
+      });
+
       proc.on("close", (code) => {
-        if (code === 0) {
-          const existing = store.get("companies").find((c) => c.id === companyId);
-          let records: SyncRecordCounts = existing?.lastSyncRecords || {
-            ledgers: 0,
-            vouchers: 0,
-            stock: 0,
-            outstanding: 0,
-          };
-          let status = "success";
-          try {
-            // Find the last line that starts with "{" (tally/python logs might have trailing empty lines or junk)
-            const validJsonLine = [...outputLines].reverse().find(line => line.trim().startsWith("{"));
-            if (validJsonLine) {
-              const parsed = JSON.parse(validJsonLine.trim());
-              records = this.mergeRecordCounts(records, parsed.records);
-              status = parsed.status || "success";
-            }
-          } catch (e) {
-             console.error("JSON parse error from python output:", e);
-          }
-
-          // If sync was skipped (no changes), keep previous record counts
-          if (status === "skipped") {
-            records = existing?.lastSyncRecords || records;
-          }
-
-          updateCompanyStatus(companyId, {
-            lastSyncStatus: "success",
-            lastSyncedAt: new Date().toISOString(),
-            lastSyncRecords: records,
-            lastSyncError: undefined,
-          });
-          this.emit("company-synced", { id: companyId, name: companyName, records });
-        } else {
-          const errMsg = errorOutput.trim() || "Unknown error (database insert failed or python crashed)";
-          updateCompanyStatus(companyId, {
-            lastSyncStatus: "error",
-            lastSyncError: errMsg,
-          });
-          this.emit("company-error", { id: companyId, name: companyName, error: errMsg });
-        }
-
-        this.emit("companies-updated", store.get("companies"));
-        resolve();
+        finalize(code);
       });
     });
   }
@@ -174,15 +248,35 @@ export class SyncEngine {
     }
   }
 
+  private normalizeRecordCounts(
+    value?: Partial<Record<keyof SyncRecordCounts, number>>,
+  ): SyncRecordCounts {
+    return {
+      groups: typeof value?.groups === "number" ? value.groups : 0,
+      ledgers: typeof value?.ledgers === "number" ? value.ledgers : 0,
+      vouchers: typeof value?.vouchers === "number" ? value.vouchers : 0,
+      stock: typeof value?.stock === "number" ? value.stock : 0,
+      outstanding: typeof value?.outstanding === "number" ? value.outstanding : 0,
+      profit_loss: typeof value?.profit_loss === "number" ? value.profit_loss : 0,
+      balance_sheet: typeof value?.balance_sheet === "number" ? value.balance_sheet : 0,
+      trial_balance: typeof value?.trial_balance === "number" ? value.trial_balance : 0,
+    };
+  }
+
   private mergeRecordCounts(
     base: SyncRecordCounts,
     updates: Partial<Record<keyof SyncRecordCounts, number>> | undefined,
   ): SyncRecordCounts {
+    const normalizedBase = this.normalizeRecordCounts(base);
     return {
-      ledgers: typeof updates?.ledgers === "number" ? updates.ledgers : base.ledgers,
-      vouchers: typeof updates?.vouchers === "number" ? updates.vouchers : base.vouchers,
-      stock: typeof updates?.stock === "number" ? updates.stock : base.stock,
-      outstanding: typeof updates?.outstanding === "number" ? updates.outstanding : base.outstanding,
+      groups: typeof updates?.groups === "number" ? updates.groups : normalizedBase.groups,
+      ledgers: typeof updates?.ledgers === "number" ? updates.ledgers : normalizedBase.ledgers,
+      vouchers: typeof updates?.vouchers === "number" ? updates.vouchers : normalizedBase.vouchers,
+      stock: typeof updates?.stock === "number" ? updates.stock : normalizedBase.stock,
+      outstanding: typeof updates?.outstanding === "number" ? updates.outstanding : normalizedBase.outstanding,
+      profit_loss: typeof updates?.profit_loss === "number" ? updates.profit_loss : normalizedBase.profit_loss,
+      balance_sheet: typeof updates?.balance_sheet === "number" ? updates.balance_sheet : normalizedBase.balance_sheet,
+      trial_balance: typeof updates?.trial_balance === "number" ? updates.trial_balance : normalizedBase.trial_balance,
     };
   }
 }

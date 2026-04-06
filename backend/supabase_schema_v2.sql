@@ -6,8 +6,27 @@
 -- 1. Extend Companies Table
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS books_from DATE;
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS books_to DATE;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS books_from_raw TEXT;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS books_to_raw TEXT;
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS gstin TEXT;
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS address TEXT;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS guid TEXT;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS master_id INTEGER;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS state TEXT;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS country TEXT;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS pincode TEXT;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS phone TEXT;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS gst_type TEXT;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS pan TEXT;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS alter_id TEXT;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS alt_vch_id TEXT;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS alt_mst_id TEXT;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS last_voucher_date DATE;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS last_outstanding_synced_at TIMESTAMPTZ;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS last_profit_loss_synced_at TIMESTAMPTZ;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS last_balance_sheet_synced_at TIMESTAMPTZ;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS last_trial_balance_synced_at TIMESTAMPTZ;
 
 -- 2. Extend Ledgers Table
 ALTER TABLE ledgers ADD COLUMN IF NOT EXISTS master_id INTEGER;
@@ -58,6 +77,7 @@ CREATE TABLE IF NOT EXISTS voucher_ledger_entries (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_voucher_ledger_entries_vid ON voucher_ledger_entries(voucher_id);
+CREATE INDEX IF NOT EXISTS idx_outstanding_company_synced_at ON outstanding(company_id, synced_at DESC);
 
 -- Enable RLS for new tables
 ALTER TABLE groups ENABLE ROW LEVEL SECURITY;

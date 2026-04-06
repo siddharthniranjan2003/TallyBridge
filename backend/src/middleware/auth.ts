@@ -1,8 +1,19 @@
+import { timingSafeEqual } from "crypto";
 import type { Request, Response, NextFunction } from "express";
 
 export function requireApiKey(req: Request, res: Response, next: NextFunction) {
-  const key = req.headers["x-api-key"];
-  if (!key || key !== process.env.API_KEY) {
+  const headerValue = req.headers["x-api-key"];
+  const key = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  const expectedKey = process.env.API_KEY;
+
+  if (!key || !expectedKey) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const provided = Buffer.from(key);
+  const expected = Buffer.from(expectedKey);
+
+  if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
     return res.status(401).json({ error: "Unauthorized" });
   }
   next();

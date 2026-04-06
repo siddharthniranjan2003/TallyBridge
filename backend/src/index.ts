@@ -5,9 +5,14 @@ dotenv.config();
 
 import syncRouter from "./routes/sync.js";
 
+function resolveJsonBodyLimit() {
+  const configured = process.env.TB_JSON_BODY_LIMIT?.trim();
+  return configured || "100mb";
+}
+
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({ limit: resolveJsonBodyLimit() }));
 
 app.use("/api/sync", syncRouter);
 
