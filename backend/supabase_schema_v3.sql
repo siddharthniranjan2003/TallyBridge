@@ -1,0 +1,2 @@
+ALTER TABLE sync_log
+ADD COLUMN IF NOT EXISTS sync_meta JSONB;

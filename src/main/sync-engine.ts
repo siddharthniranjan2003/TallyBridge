@@ -111,8 +111,11 @@ export class SyncEngine {
         : path.join(process.resourcesPath, "python-runtime", "tallybridge-engine.exe");
 
       const scriptPath = isDev
-        ? path.join(__dirname, "../../src/python/main.py")
-        : path.join(process.resourcesPath, "python", "main.py");
+        ? path.join(__dirname, "../../src/python/sync_main.py")
+        : path.join(process.resourcesPath, "python", "sync_main.py");
+
+      const configuredReadMode = process.env.TB_READ_MODE || config.readMode || "auto";
+      const odbcDsnOverride = config.odbcDsnOverride || process.env.TB_ODBC_DSN_OVERRIDE || "";
 
       const env = {
         ...process.env,
@@ -120,6 +123,8 @@ export class SyncEngine {
         TALLY_COMPANY: companyName,
         TALLY_COMPANY_GUID: company.tallyGuid || "",
         TB_FORCE_FULL_SYNC: company.lastSyncedAt ? "" : "1",
+        TB_READ_MODE: configuredReadMode,
+        TB_ODBC_DSN_OVERRIDE: odbcDsnOverride,
         BACKEND_URL: config.backendUrl,
         API_KEY: config.apiKey,
         TB_USER_DATA_DIR: app.getPath("userData"),
@@ -131,20 +136,29 @@ export class SyncEngine {
       let outputLines: string[] = [];
       let errorOutput = "";
       let settled = false;
-      let didTimeout = false;
-      const parsedTimeoutMs = Number(process.env.TB_SYNC_PROCESS_TIMEOUT_MS);
-      const maxDurationMs = Number.isFinite(parsedTimeoutMs) && parsedTimeoutMs > 0
-        ? parsedTimeoutMs
-        : 5 * 60 * 1000;
-      let processTimeout: NodeJS.Timeout | null = null;
+      let timeoutReason = "";
+      const parsedIdleTimeoutMs = Number(process.env.TB_SYNC_PROCESS_IDLE_TIMEOUT_MS);
+      const parsedHardTimeoutMs = Number(process.env.TB_SYNC_PROCESS_HARD_TIMEOUT_MS);
+      const idleTimeoutMs = Number.isFinite(parsedIdleTimeoutMs) && parsedIdleTimeoutMs > 0
+        ? parsedIdleTimeoutMs
+        : 2 * 60 * 1000;
+      const hardTimeoutMs = Number.isFinite(parsedHardTimeoutMs) && parsedHardTimeoutMs > 0
+        ? parsedHardTimeoutMs
+        : 45 * 60 * 1000;
+      let idleInterval: NodeJS.Timeout | null = null;
+      let hardTimeout: NodeJS.Timeout | null = null;
+      let lastActivityAt = Date.now();
 
       const finalize = (code: number | null, overrideError?: string) => {
         if (settled) {
           return;
         }
         settled = true;
-        if (processTimeout) {
-          clearTimeout(processTimeout);
+        if (idleInterval) {
+          clearInterval(idleInterval);
+        }
+        if (hardTimeout) {
+          clearTimeout(hardTimeout);
         }
 
         if (code === 0 && !overrideError) {
@@ -178,7 +192,7 @@ export class SyncEngine {
         } else {
           const errMsg = overrideError?.trim()
             || errorOutput.trim()
-            || (didTimeout ? `Sync timed out after ${Math.round(maxDurationMs / 1000)}s` : "")
+            || timeoutReason
             || "Unknown error (database insert failed or python crashed)";
           this.hadCompanyError = true;
           updateCompanyStatus(companyId, {
@@ -201,22 +215,40 @@ export class SyncEngine {
         return;
       }
 
-      processTimeout = setTimeout(() => {
-        didTimeout = true;
-        const timeoutMessage = `Sync timed out after ${Math.round(maxDurationMs / 1000)}s`;
-        errorOutput = `${errorOutput}\n${timeoutMessage}`.trim();
+      const touchActivity = () => {
+        lastActivityAt = Date.now();
+      };
+
+      idleInterval = setInterval(() => {
+        if (settled) {
+          return;
+        }
+
+        if (Date.now() - lastActivityAt > idleTimeoutMs) {
+          timeoutReason = `Sync became idle for ${Math.round(idleTimeoutMs / 1000)}s and was stopped`;
+          errorOutput = `${errorOutput}\n${timeoutReason}`.trim();
+          this.emit("sync-log", {
+            company: companyName,
+            line: `[ERR] ${timeoutReason}`,
+          });
+          proc?.kill();
+          setTimeout(() => finalize(1, timeoutReason), 1000);
+        }
+      }, 5000);
+
+      hardTimeout = setTimeout(() => {
+        timeoutReason = `Sync exceeded the hard limit of ${Math.round(hardTimeoutMs / 1000)}s`;
+        errorOutput = `${errorOutput}\n${timeoutReason}`.trim();
         this.emit("sync-log", {
           company: companyName,
-          line: `[ERR] ${timeoutMessage}`,
+          line: `[ERR] ${timeoutReason}`,
         });
         proc?.kill();
-
-        setTimeout(() => {
-          finalize(1, timeoutMessage);
-        }, 1000);
-      }, maxDurationMs);
+        setTimeout(() => finalize(1, timeoutReason), 1000);
+      }, hardTimeoutMs);
 
       proc.stdout?.on("data", (data: Buffer) => {
+        touchActivity();
         const lines = data.toString().split("\n").filter(Boolean);
         lines.forEach((line) => {
           outputLines.push(line);
@@ -225,6 +257,7 @@ export class SyncEngine {
       });
 
       proc.stderr?.on("data", (data: Buffer) => {
+        touchActivity();
         errorOutput += data.toString();
         this.emit("sync-log", {
           company: companyName,

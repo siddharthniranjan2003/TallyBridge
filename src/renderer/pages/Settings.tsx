@@ -7,9 +7,12 @@ export default function Settings() {
     backendUrl: "",
     apiKey: "",
     accountEmail: "",
+    readMode: "auto",
+    odbcDsnOverride: "",
   });
   const [saved, setSaved] = useState(false);
   const [tallyOk, setTallyOk] = useState<boolean | null>(null);
+  const [capabilities, setCapabilities] = useState<any | null>(null);
 
   useEffect(() => {
     window.electronAPI.getConfig().then((cfg: any) => {
@@ -19,6 +22,8 @@ export default function Settings() {
         backendUrl: cfg.backendUrl || "",
         apiKey: cfg.apiKey || "",
         accountEmail: cfg.accountEmail || "",
+        readMode: cfg.readMode || "auto",
+        odbcDsnOverride: cfg.odbcDsnOverride || "",
       });
     });
   }, []);
@@ -35,6 +40,11 @@ export default function Settings() {
     setTallyOk(null);
     const r = await window.electronAPI.checkTally();
     setTallyOk(r.connected);
+  };
+
+  const checkCapabilities = async () => {
+    const result = await window.electronAPI.checkTallyCapabilities();
+    setCapabilities(result);
   };
 
   return (
@@ -62,6 +72,49 @@ export default function Settings() {
             ))}
           </select>
         </Field>
+        <Field label="Read Mode" hint="Auto prefers ODBC for supported ERP 9 master reads and falls back to XML">
+          <select
+            value={form.readMode}
+            onChange={(e) => set("readMode", e.target.value)}
+            style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: "1px solid #dee2e6", background: "#fff" }}
+          >
+            <option value="auto">Auto</option>
+            <option value="xml-only">XML only</option>
+            <option value="hybrid">Hybrid</option>
+          </select>
+        </Field>
+
+        <Field label="ODBC DSN Override" hint="Optional. Leave blank unless you know the exact Tally ODBC DSN name.">
+          <input
+            value={form.odbcDsnOverride}
+            onChange={(e) => set("odbcDsnOverride", e.target.value)}
+            placeholder="TallyODBC_9000"
+          />
+        </Field>
+
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button onClick={checkCapabilities} style={testBtn}>Check Capabilities</button>
+          {capabilities && (
+            <span style={{ fontSize: 12, color: "#6b7280" }}>
+              XML: {capabilities.xml?.connected ? "OK" : "Down"} | ODBC: {capabilities.odbc?.state || "unknown"}
+            </span>
+          )}
+        </div>
+        {capabilities && (
+          <div style={{
+            border: "1px solid #e5e7eb",
+            borderRadius: 8,
+            padding: 12,
+            background: "#fff",
+            fontSize: 12,
+            color: "#374151",
+          }}>
+            <div>Transport plan: vouchers and reports use XML; masters use {capabilities.odbc?.state === "ok" ? "ODBC first" : "XML"}.</div>
+            {capabilities.odbc?.dsn && <div>ODBC DSN: {capabilities.odbc.dsn}</div>}
+            {capabilities.odbc?.message && <div>ODBC: {capabilities.odbc.message}</div>}
+            {capabilities.xml?.error && <div>XML: {capabilities.xml.error}</div>}
+          </div>
+        )}
       </Section>
 
       <Section title="Cloud Account">

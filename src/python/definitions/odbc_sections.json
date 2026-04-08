@@ -1,0 +1,270 @@
+{
+  "groups": {
+    "query": "Select $Name, $Parent, $MasterID, $IsRevenue, $AffectsStock, $IsSubLedger from Groups",
+    "required_field": "name",
+    "fields": {
+      "name": {
+        "sources": [
+          "$Name",
+          "NAME",
+          "Name"
+        ],
+        "transform": "string"
+      },
+      "parent": {
+        "sources": [
+          "$Parent",
+          "PARENT",
+          "Parent"
+        ],
+        "transform": "string"
+      },
+      "master_id": {
+        "sources": [
+          "$MasterID",
+          "MASTERID",
+          "MasterID"
+        ],
+        "transform": "int"
+      },
+      "is_revenue": {
+        "sources": [
+          "$IsRevenue",
+          "ISREVENUE",
+          "IsRevenue"
+        ],
+        "transform": "string",
+        "default": "No"
+      },
+      "affects_stock": {
+        "sources": [
+          "$AffectsStock",
+          "AFFECTSSTOCK",
+          "AffectsStock"
+        ],
+        "transform": "string",
+        "default": "No"
+      },
+      "is_subledger": {
+        "sources": [
+          "$IsSubLedger",
+          "ISSUBLEDGER",
+          "IsSubLedger"
+        ],
+        "transform": "string",
+        "default": "No"
+      }
+    }
+  },
+  "ledgers": {
+    "query": "Select $Name, $Parent, $OpeningBalance, $ClosingBalance, $MasterID, $Email, $LedgerPhone, $LedgerMobile, $Pincode, $PartyGSTIN, $LedStateName, $CountryName, $CreditPeriod, $CreditLimit, $BankAccount, $IFSCCode, $IncomeTaxNumber, $MailingName, $GUID from Ledger",
+    "required_field": "name",
+    "fields": {
+      "name": {
+        "sources": [
+          "$Name",
+          "NAME",
+          "Name"
+        ],
+        "transform": "string"
+      },
+      "group_name": {
+        "sources": [
+          "$Parent",
+          "PARENT",
+          "Parent"
+        ],
+        "transform": "string"
+      },
+      "opening_balance": {
+        "sources": [
+          "$OpeningBalance",
+          "OPENINGBALANCE",
+          "OpeningBalance"
+        ],
+        "transform": "float"
+      },
+      "closing_balance": {
+        "sources": [
+          "$ClosingBalance",
+          "CLOSINGBALANCE",
+          "ClosingBalance"
+        ],
+        "transform": "float"
+      },
+      "master_id": {
+        "sources": [
+          "$MasterID",
+          "MASTERID",
+          "MasterID"
+        ],
+        "transform": "int"
+      },
+      "email": {
+        "sources": [
+          "$Email",
+          "EMAIL",
+          "Email"
+        ],
+        "transform": "string"
+      },
+      "phone": {
+        "sources": [
+          "$LedgerPhone",
+          "LEDGERPHONE",
+          "LedgerPhone"
+        ],
+        "transform": "string"
+      },
+      "mobile": {
+        "sources": [
+          "$LedgerMobile",
+          "LEDGERMOBILE",
+          "LedgerMobile"
+        ],
+        "transform": "string"
+      },
+      "pincode": {
+        "sources": [
+          "$Pincode",
+          "PINCODE",
+          "Pincode"
+        ],
+        "transform": "string"
+      },
+      "gstin": {
+        "sources": [
+          "$PartyGSTIN",
+          "PARTYGSTIN",
+          "PartyGSTIN"
+        ],
+        "transform": "string"
+      },
+      "state": {
+        "sources": [
+          "$LedStateName",
+          "LEDSTATENAME",
+          "LedStateName"
+        ],
+        "transform": "string"
+      },
+      "country": {
+        "sources": [
+          "$CountryName",
+          "COUNTRYNAME",
+          "CountryName"
+        ],
+        "transform": "string"
+      },
+      "credit_period": {
+        "sources": [
+          "$CreditPeriod",
+          "CREDITPERIOD",
+          "CreditPeriod"
+        ],
+        "transform": "string"
+      },
+      "credit_limit": {
+        "sources": [
+          "$CreditLimit",
+          "CREDITLIMIT",
+          "CreditLimit"
+        ],
+        "transform": "float"
+      },
+      "bank_account": {
+        "sources": [
+          "$BankAccount",
+          "BANKACCOUNT",
+          "BankAccount"
+        ],
+        "transform": "string"
+      },
+      "ifsc_code": {
+        "sources": [
+          "$IFSCCode",
+          "IFSCODE",
+          "IFSCCode"
+        ],
+        "transform": "string"
+      },
+      "pan": {
+        "sources": [
+          "$IncomeTaxNumber",
+          "INCOMETAXNUMBER",
+          "IncomeTaxNumber"
+        ],
+        "transform": "string"
+      },
+      "mailing_name": {
+        "sources": [
+          "$MailingName",
+          "MAILINGNAME",
+          "MailingName"
+        ],
+        "transform": "string"
+      },
+      "guid": {
+        "sources": [
+          "$GUID",
+          "GUID"
+        ],
+        "transform": "string"
+      }
+    }
+  },
+  "stock_items": {
+    "query": "Select $Name, $Parent, $BaseUnits, $ClosingBalance, $ClosingValue, $ClosingRate from StockItem",
+    "required_field": "name",
+    "fields": {
+      "name": {
+        "sources": [
+          "$Name",
+          "NAME",
+          "Name"
+        ],
+        "transform": "string"
+      },
+      "group_name": {
+        "sources": [
+          "$Parent",
+          "PARENT",
+          "Parent"
+        ],
+        "transform": "string"
+      },
+      "unit": {
+        "sources": [
+          "$BaseUnits",
+          "BASEUNITS",
+          "BaseUnits"
+        ],
+        "transform": "string"
+      },
+      "closing_qty": {
+        "sources": [
+          "$ClosingBalance",
+          "CLOSINGBALANCE",
+          "ClosingBalance"
+        ],
+        "transform": "quantity_value_abs"
+      },
+      "closing_value": {
+        "sources": [
+          "$ClosingValue",
+          "CLOSINGVALUE",
+          "ClosingValue"
+        ],
+        "transform": "abs_float"
+      },
+      "rate": {
+        "sources": [
+          "$ClosingRate",
+          "CLOSINGRATE",
+          "ClosingRate"
+        ],
+        "transform": "float"
+      }
+    }
+  }
+}

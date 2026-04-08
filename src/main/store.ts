@@ -31,6 +31,8 @@ export interface AppConfig {
   backendUrl: string;
   apiKey: string;
   accountEmail: string;
+  readMode: "auto" | "xml-only" | "hybrid";
+  odbcDsnOverride: string;
   companies: Company[];
 }
 
@@ -49,6 +51,8 @@ export const store = new Store<AppConfig>({
     backendUrl: "",
     apiKey: "",
     accountEmail: "",
+    readMode: "auto",
+    odbcDsnOverride: "",
     companies: [],
   },
 });

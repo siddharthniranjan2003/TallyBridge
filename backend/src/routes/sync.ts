@@ -20,6 +20,10 @@ type SyncMeta = {
   voucher_to_date: string | null;
   master_changed: boolean;
   voucher_changed: boolean;
+  section_sources: Record<string, string>;
+  product_name: string | null;
+  product_version: string | null;
+  odbc_status: Record<string, unknown> | null;
 };
 
 function isNonEmptyString(value: unknown): value is string {
@@ -59,6 +63,20 @@ function normalizeSyncMeta(value: unknown): SyncMeta {
     voucher_to_date: normalizeCompactDate(raw.voucher_to_date),
     master_changed: raw.master_changed !== false,
     voucher_changed: raw.voucher_changed !== false,
+    section_sources:
+      raw.section_sources && typeof raw.section_sources === "object"
+        ? Object.fromEntries(
+            Object.entries(raw.section_sources as Record<string, unknown>).filter(
+              ([, value]) => typeof value === "string"
+            )
+          ) as Record<string, string>
+        : {},
+    product_name: normalizeTrimmedString(raw.product_name),
+    product_version: normalizeTrimmedString(raw.product_version),
+    odbc_status:
+      raw.odbc_status && typeof raw.odbc_status === "object"
+        ? (raw.odbc_status as Record<string, unknown>)
+        : null,
   };
 }
 
@@ -129,6 +147,7 @@ function buildRecordCounts(sections: Record<string, unknown>) {
     groups: Array.isArray(sections.groups) ? sections.groups.length : undefined,
     ledgers: Array.isArray(sections.ledgers) ? sections.ledgers.length : undefined,
     vouchers: Array.isArray(sections.vouchers) ? sections.vouchers.length : undefined,
+    purchases: Array.isArray(sections.purchases) ? sections.purchases.length : undefined,
     stock: Array.isArray(sections.stock_items) ? sections.stock_items.length : undefined,
     outstanding: Array.isArray(sections.outstanding) ? sections.outstanding.length : undefined,
     profit_loss: Array.isArray(sections.profit_loss) ? sections.profit_loss.length : undefined,
@@ -381,6 +400,71 @@ async function reconcileVoucherScope(
   await deleteVoucherGraph(staleVoucherIds);
 }
 
+const PURCHASE_VOUCHER_TYPES = new Set([
+  "purchase",
+  "local purchase",
+  "import purchase",
+]);
+
+function isPurchaseVoucherType(value: unknown) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const normalised = value.trim().toLowerCase();
+  // Exact match first
+  if (PURCHASE_VOUCHER_TYPES.has(normalised)) {
+    return true;
+  }
+  // Accept custom types that contain "purchase" but exclude orders
+  return normalised.includes("purchase") && !normalised.includes("order");
+}
+
+async function selectPurchasesForReconciliation(companyId: string, syncMeta: SyncMeta) {
+  let fromIso: string | null = null;
+  let toIso: string | null = null;
+
+  if (syncMeta.voucher_sync_mode === "incremental") {
+    fromIso = compactDateToIsoDate(syncMeta.voucher_from_date);
+    toIso = compactDateToIsoDate(syncMeta.voucher_to_date);
+    if (!fromIso || !toIso) {
+      return [];
+    }
+  }
+
+  return fetchAllPages("Purchase reconciliation", (from, to) => {
+    let query = supabase
+      .from("purchases")
+      .select("id, tally_guid")
+      .eq("company_id", companyId)
+      .order("date", { ascending: false })
+      .order("id", { ascending: false })
+      .range(from, to);
+    if (fromIso && toIso) {
+      query = query.gte("date", fromIso).lte("date", toIso);
+    }
+    return query;
+  });
+}
+
+async function reconcilePurchaseScope(
+  companyId: string,
+  incomingTallyGuids: string[],
+  syncMeta: SyncMeta,
+) {
+  if (syncMeta.voucher_sync_mode === "none") {
+    return;
+  }
+
+  const existingRows = await selectPurchasesForReconciliation(companyId, syncMeta);
+  const incomingGuidSet = new Set(incomingTallyGuids);
+  const stalePurchaseIds = existingRows
+    .filter((row: any) => !incomingGuidSet.has(row.tally_guid))
+    .map((row: any) => row.id)
+    .filter((id: unknown): id is string => typeof id === "string");
+
+  await deleteByIn("purchases", "id", stalePurchaseIds, "Stale purchases");
+}
+
 const COMPANY_LOOKUP_COLUMNS = `
   id,
   name,
@@ -627,6 +711,7 @@ router.post("/", requireApiKey, async (req, res) => {
     groups,
     ledgers,
     vouchers,
+    purchases: [],
     stock_items,
     outstanding,
     profit_loss,
@@ -677,6 +762,10 @@ router.post("/", requireApiKey, async (req, res) => {
 
       await upsertInBatches("vouchers", voucherRows, "company_id,tally_guid", "Vouchers");
 
+      const purchaseVouchers = validVouchers.filter(
+        (voucher: any) => isPurchaseVoucherType(voucher.voucher_type)
+      );
+      let purchaseRows: any[] = [];
       if (voucherRows.length) {
         const voucherIdMap = await getVoucherIdMap(
           companyId,
@@ -727,6 +816,24 @@ router.post("/", requireApiKey, async (req, res) => {
           }
         }
 
+        purchaseRows = purchaseVouchers
+          .map((voucher: any) => ({
+            company_id: companyId,
+            voucher_id: voucherIdMap.get(voucher.tally_guid),
+            tally_guid: voucher.tally_guid,
+            voucher_number: voucher.voucher_number ?? null,
+            voucher_type: voucher.voucher_type ?? null,
+            date: voucher.date ?? null,
+            party_name: voucher.party_name ?? null,
+            amount: voucher.amount ?? 0,
+            narration: voucher.narration ?? null,
+            reference: voucher.reference ?? null,
+            is_cancelled: voucher.is_cancelled ?? false,
+            is_invoice: voucher.is_invoice ?? false,
+            synced_at: syncedAt,
+          }))
+          .filter((purchase: any) => typeof purchase.voucher_id === "string");
+
         const itemInsert = await insertReturningIdsInBatches("voucher_items", itemRows, "Voucher items");
         if (itemInsert.error) {
           await rollbackInsertedRows("voucher_items", itemInsert.insertedIds, "Voucher items");
@@ -759,6 +866,10 @@ router.post("/", requireApiKey, async (req, res) => {
           await restoreRows("voucher_ledger_entries", existingEntryRows, "Voucher ledger entries");
           throw error;
         }
+
+        if (purchaseRows.length) {
+          await upsertInBatches("purchases", purchaseRows, "company_id,tally_guid", "Purchases");
+        }
       }
 
       await reconcileVoucherScope(
@@ -766,6 +877,12 @@ router.post("/", requireApiKey, async (req, res) => {
         validVouchers.map((voucher: any) => voucher.tally_guid),
         normalizedSyncMeta,
       );
+      await reconcilePurchaseScope(
+        companyId,
+        purchaseVouchers.map((voucher: any) => voucher.tally_guid),
+        normalizedSyncMeta,
+      );
+      records.purchases = purchaseVouchers.length;
     }
 
     // 4. Upsert stock items
@@ -897,11 +1014,24 @@ router.post("/", requireApiKey, async (req, res) => {
     }
 
     // 9. Log the sync (best-effort only; don't fail a good data write on log issues)
-    const { error: syncLogError } = await supabase.from("sync_log").insert({
+    let syncLogError: { message: string } | null = null;
+    const syncLogWithMeta = await supabase.from("sync_log").insert({
       company_id: companyId,
       status: "success",
       records_synced: records,
+      sync_meta: normalizedSyncMeta,
     });
+    syncLogError = syncLogWithMeta.error;
+
+    if (syncLogError?.message?.toLowerCase().includes("sync_meta")) {
+      const fallbackSyncLog = await supabase.from("sync_log").insert({
+        company_id: companyId,
+        status: "success",
+        records_synced: records,
+      });
+      syncLogError = fallbackSyncLog.error;
+    }
+
     if (syncLogError) {
       console.warn("[Sync] Sync log warning:", syncLogError.message);
     }
@@ -917,6 +1047,31 @@ router.post("/", requireApiKey, async (req, res) => {
   }
 });
 
+
+// ── Pagination helper ────────────────────────────────────────────
+// Supabase defaults to 1000 rows per query. This helper auto-paginates
+// until all rows are retrieved.
+async function fetchAllPages<T = any>(
+  label: string,
+  buildQuery: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: any }>
+): Promise<T[]> {
+  const PAGE_SIZE = 1000;
+  const result: T[] = [];
+  let offset = 0;
+  while (true) {
+    const { data, error } = await buildQuery(offset, offset + PAGE_SIZE - 1);
+    if (error) {
+      throw new Error(
+        `${label} query failed for rows ${offset}-${offset + PAGE_SIZE - 1}: ${error.message}`
+      );
+    }
+    if (!data || data.length === 0) break;
+    result.push(...data);
+    if (data.length < PAGE_SIZE) break;
+    offset += PAGE_SIZE;
+  }
+  return result;
+}
 
 // ── GET /api/sync/party-ledger — Individual customer/party history ──
 // Derives party transaction history from already-synced vouchers.
@@ -1038,11 +1193,14 @@ router.get("/vouchers", requireApiKey, async (req, res) => {
   if (companyLookup.status !== 200) {
     return res.status(companyLookup.status).json({ error: companyLookup.error });
   }
-  const { data } = await supabase
-    .from("vouchers").select("*, voucher_items(*)")
-    .eq("company_id", companyLookup.companyId)
-    .order("date", { ascending: false });
-  res.json({ vouchers: data || [] });
+  const data = await fetchAllPages("Vouchers", (from, to) =>
+    supabase.from("vouchers").select("*, voucher_items(*)")
+      .eq("company_id", companyLookup.companyId)
+      .order("date", { ascending: false })
+      .order("id", { ascending: false })
+      .range(from, to)
+  );
+  res.json({ vouchers: data });
 });
 
 router.get("/outstanding", requireApiKey, async (req, res) => {
@@ -1057,12 +1215,15 @@ router.get("/outstanding", requireApiKey, async (req, res) => {
   if (!companyLookup.lastOutstandingSyncedAt) {
     return res.json({ outstanding: [] });
   }
-  const { data } = await supabase
-    .from("outstanding").select("*")
-    .eq("company_id", companyLookup.companyId)
-    .eq("synced_at", companyLookup.lastOutstandingSyncedAt)
-    .order("days_overdue", { ascending: false });
-  res.json({ outstanding: data || [] });
+  const data = await fetchAllPages("Outstanding", (from, to) =>
+    supabase.from("outstanding").select("*")
+      .eq("company_id", companyLookup.companyId)
+      .eq("synced_at", companyLookup.lastOutstandingSyncedAt)
+      .order("days_overdue", { ascending: false })
+      .order("id", { ascending: true })
+      .range(from, to)
+  );
+  res.json({ outstanding: data });
 });
 
 router.get("/stock", requireApiKey, async (req, res) => {
@@ -1074,9 +1235,32 @@ router.get("/stock", requireApiKey, async (req, res) => {
   if (companyLookup.status !== 200) {
     return res.status(companyLookup.status).json({ error: companyLookup.error });
   }
-  const { data } = await supabase
-    .from("stock_items").select("*").eq("company_id", companyLookup.companyId);
-  res.json({ stock_items: data || [] });
+  const data = await fetchAllPages("Stock items", (from, to) =>
+    supabase.from("stock_items").select("*")
+      .eq("company_id", companyLookup.companyId)
+      .order("id", { ascending: true })
+      .range(from, to)
+  );
+  res.json({ stock_items: data });
+});
+
+router.get("/purchases", requireApiKey, async (req, res) => {
+  const companyLookup = await resolveCompanyLookup({
+    companyId: req.query.company_id,
+    companyGuid: req.query.company_guid,
+    companyName: req.query.company_name,
+  });
+  if (companyLookup.status !== 200) {
+    return res.status(companyLookup.status).json({ error: companyLookup.error });
+  }
+  const data = await fetchAllPages("Purchases", (from, to) =>
+    supabase.from("purchases").select("*")
+      .eq("company_id", companyLookup.companyId)
+      .order("date", { ascending: false })
+      .order("id", { ascending: false })
+      .range(from, to)
+  );
+  res.json({ purchases: data });
 });
 
 router.get("/pnl", requireApiKey, async (req, res) => {
@@ -1167,17 +1351,15 @@ router.get("/parties", requireApiKey, async (req, res) => {
     // Get outstanding totals per party
     let outstandingList: any[] = [];
     if (companyLookup.lastOutstandingSyncedAt) {
-      const { data, error: oErr } = await supabase
-        .from("outstanding")
-        .select("party_name, type, pending_amount")
-        .eq("company_id", companyLookup.companyId)
-        .eq("synced_at", companyLookup.lastOutstandingSyncedAt);
-
-      if (oErr) {
-        throw new Error(`Outstanding query failed: ${oErr.message}`);
-      }
-
-      outstandingList = data || [];
+      outstandingList = await fetchAllPages("Outstanding party totals", (from, to) =>
+        supabase.from("outstanding")
+          .select("party_name, type, pending_amount")
+          .eq("company_id", companyLookup.companyId)
+          .eq("synced_at", companyLookup.lastOutstandingSyncedAt)
+          .order("party_name", { ascending: true })
+          .order("id", { ascending: true })
+          .range(from, to)
+      );
     }
 
     // Build party summary

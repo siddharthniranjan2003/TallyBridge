@@ -1,5 +1,8 @@
 import { ipcMain, BrowserWindow } from "electron";
+import { spawn } from "child_process";
 import axios from "axios";
+import isDev from "electron-is-dev";
+import path from "path";
 import { store, addCompany, removeCompany, TallyCompanySelection } from "./store";
 import { SyncEngine } from "./sync-engine";
 
@@ -39,6 +42,104 @@ function decodeXmlEntities(value: string) {
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, "\"")
     .replace(/&apos;/g, "'");
+}
+
+function parseTallyPort(tallyUrl: string) {
+  try {
+    const parsed = new URL(tallyUrl);
+    return Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+  } catch {
+    return 9000;
+  }
+}
+
+async function probeOdbcCapabilities(tallyUrl: string, odbcDsnOverride = "") {
+  if (process.platform !== "win32") {
+    return {
+      state: "not_configured",
+      dsn: null,
+      supported_sections: [],
+      message: "ODBC helper is only available on Windows.",
+    };
+  }
+
+  const helperPath = isDev
+    ? path.join(__dirname, "../../src/python/tally_odbc_helper.ps1")
+    : path.join(process.resourcesPath, "python", "tally_odbc_helper.ps1");
+  const powerShellPath = path.join(
+    process.env.SystemRoot || "C:\\Windows",
+    "SysWOW64",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe",
+  );
+
+  return await new Promise<Record<string, unknown>>((resolve) => {
+    const proc = spawn(
+      powerShellPath,
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", helperPath],
+      {
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    proc.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    proc.on("error", (error) => {
+      resolve({
+        state: "error",
+        dsn: null,
+        supported_sections: [],
+        message: error.message,
+      });
+    });
+    proc.on("close", () => {
+      const line = stdout
+        .split(/\r?\n/)
+        .map((value) => value.trim())
+        .find(Boolean);
+      if (!line) {
+        resolve({
+          state: "error",
+          dsn: null,
+          supported_sections: [],
+          message: stderr.trim() || "ODBC helper did not return a response.",
+        });
+        return;
+      }
+
+      try {
+        resolve(JSON.parse(line));
+      } catch {
+        resolve({
+          state: "error",
+          dsn: null,
+          supported_sections: [],
+          message: `Unexpected ODBC helper response: ${line}`,
+        });
+      }
+    });
+
+    proc.stdin.write(`${JSON.stringify({
+      cmd: "probe",
+      dsn_override: odbcDsnOverride,
+      port: parseTallyPort(tallyUrl),
+      sections: ["groups", "ledgers", "stock_items"],
+      queries: {
+        groups: "Select $Name, $Parent, $MasterID, $IsRevenue, $AffectsStock, $IsSubLedger from Group",
+        ledgers: "Select $Name, $Parent, $OpeningBalance, $ClosingBalance, $MasterID from Ledger",
+        stock_items: "Select $Name, $Parent, $BaseUnits, $ClosingBalance, $ClosingValue, $ClosingRate from StockItem",
+      },
+      timeout_seconds: 8,
+    })}\n`);
+    proc.stdin.end();
+  });
 }
 
 function extractAttributeValue(input: string, attributeName: string) {
@@ -133,6 +234,8 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
     store.set("backendUrl", s.backendUrl);
     store.set("apiKey", s.apiKey);
     store.set("accountEmail", s.accountEmail);
+    store.set("readMode", s.readMode || "auto");
+    store.set("odbcDsnOverride", s.odbcDsnOverride || "");
     engine.reschedule();
     return { success: true };
   });
@@ -206,6 +309,52 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
     } catch {
       return { connected: false };
     }
+  });
+  ipcMain.handle("check-tally-capabilities", async () => {
+    const tallyUrl = store.get("tallyUrl");
+    const readMode = store.get("readMode", "auto");
+    const odbcDsnOverride = store.get("odbcDsnOverride", "");
+
+    let xmlConnected = false;
+    let xmlError: string | null = null;
+    try {
+      const testXml = `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+      <BODY><EXPORTDATA><REQUESTDESC>
+      <REPORTNAME>List of Companies</REPORTNAME>
+      </REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
+      await postTallyXml(tallyUrl, testXml);
+      xmlConnected = true;
+    } catch (error: any) {
+      xmlError = error?.message || "Could not connect to Tally XML";
+    }
+
+    const odbc = readMode === "xml-only"
+      ? {
+          state: "disabled",
+          dsn: null,
+          supported_sections: [],
+          message: "Read mode is XML only.",
+        }
+      : await probeOdbcCapabilities(tallyUrl, odbcDsnOverride);
+
+    return {
+      xml: {
+        connected: xmlConnected,
+        error: xmlError,
+      },
+      odbc,
+      readMode,
+      transportPlan: {
+        groups: odbc.state === "ok" ? "odbc-first" : "xml",
+        ledgers: odbc.state === "ok" ? "odbc-first" : "xml",
+        stock_items: odbc.state === "ok" ? "odbc-first" : "xml",
+        vouchers: "xml",
+        outstanding: "xml",
+        profit_loss: "xml",
+        balance_sheet: "xml",
+        trial_balance: "xml",
+      },
+    };
   });
   ipcMain.handle("get-tally-companies", async () => {
     try {

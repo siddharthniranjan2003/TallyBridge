@@ -10,6 +10,32 @@ HEADERS = {"Content-Type": "text/xml;charset=utf-8"}
 SESSION = requests.Session()
 
 
+class TallyError(RuntimeError):
+    """Base error for Tally transport failures."""
+
+
+class TallyTimeoutError(TallyError):
+    """Raised when Tally does not respond within the configured timeout."""
+
+
+class TallyConnectionError(TallyError):
+    """Raised when Tally is unreachable or closes the connection."""
+
+
+def get_connect_timeout_seconds() -> int:
+    try:
+        return max(3, int(os.environ.get("TB_TALLY_CONNECT_TIMEOUT_SECONDS", "5")))
+    except ValueError:
+        return 5
+
+
+def get_read_timeout_seconds() -> int:
+    try:
+        return max(10, int(os.environ.get("TB_TALLY_READ_TIMEOUT_SECONDS", "45")))
+    except ValueError:
+        return 45
+
+
 def _xml_escape(value: str) -> str:
     return escape(value or "")
 
@@ -37,15 +63,30 @@ def _decode_response(response: requests.Response) -> str:
     return response.text
 
 
-def _post(xml: str) -> str:
-    response = SESSION.post(
-        TALLY_URL,
-        data=xml.strip().encode("utf-8"),
-        headers=HEADERS,
-        timeout=30
-    )
-    response.raise_for_status()
-    return _decode_response(response)
+def _post(xml: str, *, connect_timeout: int | None = None, read_timeout: int | None = None) -> str:
+    try:
+        response = SESSION.post(
+            TALLY_URL,
+            data=xml.strip().encode("utf-8"),
+            headers=HEADERS,
+            timeout=(
+                connect_timeout or get_connect_timeout_seconds(),
+                read_timeout or get_read_timeout_seconds(),
+            ),
+        )
+        response.raise_for_status()
+        return _decode_response(response)
+    except requests.exceptions.Timeout as exc:
+        raise TallyTimeoutError(
+            "Timed out waiting for Tally XML response. "
+            "This often happens on large ERP 9 exports; retry with a smaller date window."
+        ) from exc
+    except requests.exceptions.ConnectionError as exc:
+        raise TallyConnectionError(
+            "Could not reach the Tally XML server. Verify Tally is open and listening on the configured port."
+        ) from exc
+    except requests.exceptions.RequestException as exc:
+        raise TallyError(f"Tally request failed: {exc}") from exc
 
 
 def _check_response(xml_text: str) -> str:
@@ -68,9 +109,58 @@ def _check_response(xml_text: str) -> str:
     return xml_text
 
 
-def _fetch(xml: str) -> str:
+def _fetch(
+    xml: str,
+    *,
+    connect_timeout: int | None = None,
+    read_timeout: int | None = None,
+) -> str:
     """Post XML to Tally and validate the response."""
-    return _check_response(_post(xml))
+    return _check_response(
+        _post(
+            xml,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+        )
+    )
+
+
+def detect_tally_product() -> dict:
+    """Best-effort server identity probe using the plain HTTP endpoint."""
+    try:
+        response = SESSION.get(
+            TALLY_URL,
+            timeout=(get_connect_timeout_seconds(), min(get_read_timeout_seconds(), 10)),
+        )
+        response.raise_for_status()
+        body = _decode_response(response)
+        product_name = None
+        product_version = None
+
+        if "Tally.ERP 9" in body:
+            product_name = "Tally.ERP 9"
+        elif "TallyPrime" in body:
+            product_name = "TallyPrime"
+
+        version_match = re.search(
+            r"(?:Release|Version)\s+([0-9]+(?:\.[0-9]+)*)",
+            body,
+            re.IGNORECASE,
+        )
+        if version_match:
+            product_version = version_match.group(1)
+
+        return {
+            "product_name": product_name,
+            "product_version": product_version,
+            "raw": body.strip()[:200],
+        }
+    except Exception:
+        return {
+            "product_name": None,
+            "product_version": None,
+            "raw": None,
+        }
 
 
 # ── Company Info ─────────────────────────────────────────────────

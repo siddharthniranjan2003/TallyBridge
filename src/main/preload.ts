@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Sync
   syncNow: () => ipcRenderer.invoke("sync-now"),
   checkTally: () => ipcRenderer.invoke("check-tally"),
+  checkTallyCapabilities: () => ipcRenderer.invoke("check-tally-capabilities"),
   getTallyCompanies: () => ipcRenderer.invoke("get-tally-companies"),
 
   // Events from main → renderer

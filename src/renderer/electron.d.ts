@@ -16,6 +16,7 @@ declare global {
       getCompanies: () => Promise<any[]>;
       syncNow: () => Promise<any>;
       checkTally: () => Promise<{ connected: boolean }>;
+      checkTallyCapabilities: () => Promise<any>;
       getTallyCompanies: () => Promise<{ success: boolean; companies: TallyCompanySelection[] }>;
       on: (channel: string, cb: (...args: any[]) => void) => void;
       off: (channel: string, cb: (...args: any[]) => void) => void;
