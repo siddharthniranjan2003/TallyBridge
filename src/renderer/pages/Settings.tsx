@@ -1,4 +1,54 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+
+type CompanyRef = {
+  name: string;
+  tallyGuid?: string;
+};
+
+type TallyCompanyDateRange = {
+  name: string;
+  guid?: string;
+  booksFrom: string | null;
+  booksTo: string | null;
+  availableFromDates: string[];
+};
+
+function getRangeKey(range: Pick<TallyCompanyDateRange, "name" | "guid">) {
+  return range.guid?.trim() || range.name.trim().toLowerCase();
+}
+
+function clampIsoDate(value: string, min?: string | null, max?: string | null) {
+  if (!value) {
+    return value;
+  }
+
+  let next = value;
+  if (min && next < min) {
+    next = min;
+  }
+  if (max && next > max) {
+    next = max;
+  }
+  return next;
+}
+
+function pickPreferredRangeKey(
+  ranges: TallyCompanyDateRange[],
+  configuredCompanies: CompanyRef[],
+) {
+  const preferredKeys = configuredCompanies
+    .map((company) => company.tallyGuid?.trim() || company.name.trim().toLowerCase())
+    .filter(Boolean);
+
+  for (const key of preferredKeys) {
+    const match = ranges.find((range) => getRangeKey(range) === key);
+    if (match) {
+      return getRangeKey(match);
+    }
+  }
+
+  return "";
+}
 
 export default function Settings() {
   const [form, setForm] = useState({
@@ -15,9 +65,81 @@ export default function Settings() {
   const [saved, setSaved] = useState(false);
   const [tallyOk, setTallyOk] = useState<boolean | null>(null);
   const [capabilities, setCapabilities] = useState<any | null>(null);
+  const [configuredCompanies, setConfiguredCompanies] = useState<CompanyRef[]>([]);
+  const [companyRanges, setCompanyRanges] = useState<TallyCompanyDateRange[]>([]);
+  const [selectedRangeKey, setSelectedRangeKey] = useState("");
+  const [loadingRanges, setLoadingRanges] = useState(false);
+  const [rangeError, setRangeError] = useState<string | null>(null);
+
+  const selectedCompanyRange = useMemo(
+    () => companyRanges.find((range) => getRangeKey(range) === selectedRangeKey) || null,
+    [companyRanges, selectedRangeKey],
+  );
+  const syncFromOptions = selectedCompanyRange?.availableFromDates || [];
+  const syncToMin = form.syncFromDate || selectedCompanyRange?.booksFrom || "";
+  const syncToMax = selectedCompanyRange?.booksTo || "";
+
+  const set = (key: string, val: any) => setForm((f) => ({ ...f, [key]: val }));
+
+  const loadCompanyDateRanges = async (preferredCompanies: CompanyRef[] = []) => {
+    setLoadingRanges(true);
+    setRangeError(null);
+    const response = await window.electronAPI.getTallyCompanyDateRanges();
+    setLoadingRanges(false);
+
+    if (!response.success) {
+      setCompanyRanges([]);
+      setSelectedRangeKey("");
+      setRangeError(response.error || "Could not read company date ranges from ERP 9.");
+      return;
+    }
+
+    if (!response.companies?.length) {
+      setCompanyRanges([]);
+      setSelectedRangeKey("");
+      setRangeError("No company range was returned by ERP 9.");
+      return;
+    }
+
+    setCompanyRanges(response.companies);
+    const preferredKey = pickPreferredRangeKey(response.companies, preferredCompanies);
+    const nextKey = response.companies.some((range) => getRangeKey(range) === selectedRangeKey)
+      ? selectedRangeKey
+      : (preferredKey || getRangeKey(response.companies[0]));
+    setSelectedRangeKey(nextKey);
+
+    const selected = response.companies.find((range) => getRangeKey(range) === nextKey);
+    if (!selected) {
+      return;
+    }
+
+    setForm((current) => {
+      const nextFrom = selected.availableFromDates.includes(current.syncFromDate)
+        ? current.syncFromDate
+        : (selected.availableFromDates[0] || selected.booksFrom || current.syncFromDate || "");
+      const nextTo = clampIsoDate(
+        current.syncToDate || selected.booksTo || "",
+        nextFrom || selected.booksFrom,
+        selected.booksTo,
+      );
+      return {
+        ...current,
+        syncFromDate: nextFrom,
+        syncToDate: nextTo,
+      };
+    });
+  };
 
   useEffect(() => {
-    window.electronAPI.getConfig().then((cfg: any) => {
+    let active = true;
+    (async () => {
+      const cfg = await window.electronAPI.getConfig();
+      if (!active) {
+        return;
+      }
+
+      const companies = (cfg.companies || []) as CompanyRef[];
+      setConfiguredCompanies(companies);
       setForm({
         tallyUrl: cfg.tallyUrl || "http://localhost:9000",
         syncIntervalMinutes: cfg.syncIntervalMinutes || 5,
@@ -29,10 +151,14 @@ export default function Settings() {
         syncFromDate: cfg.syncFromDate || "",
         syncToDate: cfg.syncToDate || "",
       });
-    });
-  }, []);
 
-  const set = (key: string, val: any) => setForm((f) => ({ ...f, [key]: val }));
+      await loadCompanyDateRanges(companies);
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const handleSave = async () => {
     await window.electronAPI.saveSettings(form);
@@ -49,6 +175,61 @@ export default function Settings() {
   const checkCapabilities = async () => {
     const result = await window.electronAPI.checkTallyCapabilities();
     setCapabilities(result);
+  };
+
+  const onSelectRangeCompany = (nextKey: string) => {
+    setSelectedRangeKey(nextKey);
+    const selected = companyRanges.find((range) => getRangeKey(range) === nextKey);
+    if (!selected) {
+      return;
+    }
+
+    setForm((current) => {
+      const nextFrom = selected.availableFromDates.includes(current.syncFromDate)
+        ? current.syncFromDate
+        : (selected.availableFromDates[0] || selected.booksFrom || "");
+      const nextTo = clampIsoDate(
+        current.syncToDate || selected.booksTo || "",
+        nextFrom || selected.booksFrom,
+        selected.booksTo,
+      );
+      return {
+        ...current,
+        syncFromDate: nextFrom,
+        syncToDate: nextTo,
+      };
+    });
+  };
+
+  const onSyncFromDateChange = (value: string) => {
+    setForm((current) => ({
+      ...current,
+      syncFromDate: value,
+      syncToDate: clampIsoDate(
+        current.syncToDate,
+        value || selectedCompanyRange?.booksFrom,
+        selectedCompanyRange?.booksTo,
+      ),
+    }));
+  };
+
+  const useCompanyFullRange = () => {
+    if (!selectedCompanyRange) {
+      return;
+    }
+
+    const nextFrom = selectedCompanyRange.availableFromDates[0] || selectedCompanyRange.booksFrom || "";
+    const nextTo = clampIsoDate(
+      selectedCompanyRange.booksTo || "",
+      nextFrom || selectedCompanyRange.booksFrom,
+      selectedCompanyRange.booksTo,
+    );
+
+    setForm((current) => ({
+      ...current,
+      syncFromDate: nextFrom,
+      syncToDate: nextTo,
+    }));
   };
 
   return (
@@ -96,18 +277,64 @@ export default function Settings() {
           />
         </Field>
 
-        <Field label="Sync From Date" hint="Optional. Overrides auto FY start for backfill (YYYY-MM-DD).">
-          <input
-            type="date"
-            value={form.syncFromDate}
-            onChange={(e) => set("syncFromDate", e.target.value)}
-          />
+        <Field label="ERP 9 Company Date Range" hint="Fetches books range from the ERP 9 company.">
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <select
+              value={selectedRangeKey}
+              onChange={(e) => onSelectRangeCompany(e.target.value)}
+              style={{ width: "100%", minWidth: 220, flex: 1, padding: "9px 12px", borderRadius: 8, border: "1px solid #dee2e6", background: "#fff" }}
+              disabled={!companyRanges.length}
+            >
+              {!companyRanges.length && <option value="">No company range loaded</option>}
+              {companyRanges.map((range) => (
+                <option key={getRangeKey(range)} value={getRangeKey(range)}>
+                  {range.name}
+                </option>
+              ))}
+            </select>
+            <button onClick={() => loadCompanyDateRanges(configuredCompanies)} style={testBtn} disabled={loadingRanges}>
+              {loadingRanges ? "Loading..." : "Refresh Ranges"}
+            </button>
+            <button onClick={useCompanyFullRange} style={testBtn} disabled={!selectedCompanyRange}>
+              Use Full Range
+            </button>
+          </div>
+          {selectedCompanyRange && (
+            <p style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
+              Available in ERP 9: {selectedCompanyRange.booksFrom || "unknown"} to {selectedCompanyRange.booksTo || "today"}
+            </p>
+          )}
+          {rangeError && (
+            <p style={{ fontSize: 12, color: "#ef4444", marginTop: 6 }}>{rangeError}</p>
+          )}
         </Field>
 
-        <Field label="Sync To Date" hint="Optional. Overrides auto FY end for backfill (YYYY-MM-DD).">
+        <Field label="Sync From Date" hint={syncFromOptions.length ? "Choose a date available in ERP 9 company data." : "Optional. Overrides auto FY start for backfill."}>
+          {syncFromOptions.length ? (
+            <select
+              value={form.syncFromDate}
+              onChange={(e) => onSyncFromDateChange(e.target.value)}
+              style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: "1px solid #dee2e6", background: "#fff" }}
+            >
+              {syncFromOptions.map((dateValue) => (
+                <option key={dateValue} value={dateValue}>{dateValue}</option>
+              ))}
+            </select>
+          ) : (
+            <input
+              type="date"
+              value={form.syncFromDate}
+              onChange={(e) => onSyncFromDateChange(e.target.value)}
+            />
+          )}
+        </Field>
+
+        <Field label="Sync To Date" hint="Bounded to selected company date range when available.">
           <input
             type="date"
             value={form.syncToDate}
+            min={syncToMin || undefined}
+            max={syncToMax || undefined}
             onChange={(e) => set("syncToDate", e.target.value)}
           />
         </Field>

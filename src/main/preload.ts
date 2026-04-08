@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   checkTally: () => ipcRenderer.invoke("check-tally"),
   checkTallyCapabilities: () => ipcRenderer.invoke("check-tally-capabilities"),
   getTallyCompanies: () => ipcRenderer.invoke("get-tally-companies"),
+  getTallyCompanyDateRanges: () => ipcRenderer.invoke("get-tally-company-date-ranges"),
 
   // Events from main → renderer
   on: (channel: string, callback: (...args: any[]) => void) => {

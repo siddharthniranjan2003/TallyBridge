@@ -6,6 +6,14 @@ type TallyCompanySelection = {
   formalName?: string;
 };
 
+type TallyCompanyDateRange = {
+  name: string;
+  guid?: string;
+  booksFrom: string | null;
+  booksTo: string | null;
+  availableFromDates: string[];
+};
+
 declare global {
   interface Window {
     electronAPI: {
@@ -18,6 +26,11 @@ declare global {
       checkTally: () => Promise<{ connected: boolean }>;
       checkTallyCapabilities: () => Promise<any>;
       getTallyCompanies: () => Promise<{ success: boolean; companies: TallyCompanySelection[] }>;
+      getTallyCompanyDateRanges: () => Promise<{
+        success: boolean;
+        companies: TallyCompanyDateRange[];
+        error?: string;
+      }>;
       on: (channel: string, cb: (...args: any[]) => void) => void;
       off: (channel: string, cb: (...args: any[]) => void) => void;
     };

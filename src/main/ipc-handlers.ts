@@ -14,6 +14,14 @@ type TallyCompanyOption = {
   formalName?: string;
 };
 
+type TallyCompanyDateRange = {
+  name: string;
+  guid?: string;
+  booksFrom: string | null;
+  booksTo: string | null;
+  availableFromDates: string[];
+};
+
 function decodeTallyResponse(data: Buffer, contentType = "") {
   const looksUtf16 = contentType.toLowerCase().includes("utf-16")
     || data.subarray(0, 2).equals(Buffer.from([0xff, 0xfe]))
@@ -68,6 +76,128 @@ function normalizeOptionalIsoDate(value: unknown) {
   }
 
   return "";
+}
+
+function toIsoDate(year: number, month: number, day: number) {
+  if (
+    !Number.isInteger(year)
+    || !Number.isInteger(month)
+    || !Number.isInteger(day)
+    || month < 1
+    || month > 12
+    || day < 1
+    || day > 31
+  ) {
+    return null;
+  }
+
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (
+    probe.getUTCFullYear() !== year
+    || probe.getUTCMonth() !== month - 1
+    || probe.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function parseTallyDateToIso(value: string | undefined) {
+  const raw = value ? decodeXmlEntities(value).trim() : "";
+  if (!raw) {
+    return null;
+  }
+
+  const compactMatch = /^(\d{4})(\d{2})(\d{2})$/.exec(raw);
+  if (compactMatch) {
+    const iso = toIsoDate(
+      Number(compactMatch[1]),
+      Number(compactMatch[2]),
+      Number(compactMatch[3]),
+    );
+    return iso;
+  }
+
+  const monthLookup: Record<string, number> = {
+    jan: 1,
+    feb: 2,
+    mar: 3,
+    apr: 4,
+    may: 5,
+    jun: 6,
+    jul: 7,
+    aug: 8,
+    sep: 9,
+    oct: 10,
+    nov: 11,
+    dec: 12,
+  };
+
+  const alphaDateMatch = /^(\d{1,2})-([A-Za-z]{3})-(\d{2}|\d{4})$/.exec(raw);
+  if (alphaDateMatch) {
+    const day = Number(alphaDateMatch[1]);
+    const month = monthLookup[alphaDateMatch[2].toLowerCase()];
+    const yearRaw = alphaDateMatch[3];
+    const year = yearRaw.length === 2
+      ? (Number(yearRaw) >= 70 ? 1900 + Number(yearRaw) : 2000 + Number(yearRaw))
+      : Number(yearRaw);
+    if (!month) {
+      return null;
+    }
+    return toIsoDate(year, month, day);
+  }
+
+  const numericDateMatch = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(raw);
+  if (numericDateMatch) {
+    return toIsoDate(
+      Number(numericDateMatch[3]),
+      Number(numericDateMatch[2]),
+      Number(numericDateMatch[1]),
+    );
+  }
+
+  return null;
+}
+
+function buildAvailableFromDates(booksFrom: string | null, booksTo: string | null) {
+  if (!booksFrom) {
+    return [];
+  }
+
+  const [startYearRaw, startMonthRaw, startDayRaw] = booksFrom.split("-");
+  const startYear = Number(startYearRaw);
+  const startMonth = Number(startMonthRaw);
+  const startDay = Number(startDayRaw);
+  if (!startYear || !startMonth || !startDay) {
+    return [booksFrom];
+  }
+
+  const upperBound = booksTo || new Date().toISOString().slice(0, 10);
+  const endYear = Number(upperBound.slice(0, 4));
+  const options: string[] = [];
+  for (let year = startYear; year <= endYear + 1; year += 1) {
+    const candidate = toIsoDate(year, startMonth, startDay);
+    if (!candidate) {
+      continue;
+    }
+    if (candidate < booksFrom) {
+      continue;
+    }
+    if (candidate > upperBound) {
+      break;
+    }
+    options.push(candidate);
+    if (options.length >= 200) {
+      break;
+    }
+  }
+
+  if (!options.length) {
+    return [booksFrom];
+  }
+
+  return options;
 }
 
 async function probeOdbcCapabilities(tallyUrl: string, odbcDsnOverride = "") {
@@ -215,6 +345,44 @@ function parseTallyCompanies(decodedXml: string): TallyCompanyOption[] {
     }
 
     const company = { name };
+    const key = getCompanyOptionKey(company);
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    companies.push(company);
+  }
+
+  return companies;
+}
+
+function parseTallyCompanyDateRanges(decodedXml: string): TallyCompanyDateRange[] {
+  const companies: TallyCompanyDateRange[] = [];
+  const seen = new Set<string>();
+  const companyBlocks = decodedXml.matchAll(/<COMPANY\b([^>]*)>([\s\S]*?)<\/COMPANY>/gi);
+
+  for (const match of companyBlocks) {
+    const attributes = match[1] || "";
+    const body = match[2] || "";
+    const name = extractAttributeValue(attributes, "NAME") || extractTagValue(body, "NAME");
+    const guid = extractTagValue(body, "GUID") || extractAttributeValue(attributes, "GUID");
+    const booksFromRaw = extractTagValue(body, "BOOKSFROM");
+    const booksToRaw = extractTagValue(body, "BOOKSTO");
+    const booksFrom = parseTallyDateToIso(booksFromRaw);
+    const booksTo = parseTallyDateToIso(booksToRaw);
+
+    if (!name) {
+      continue;
+    }
+
+    const company: TallyCompanyDateRange = {
+      name,
+      guid: guid || undefined,
+      booksFrom,
+      booksTo,
+      availableFromDates: buildAvailableFromDates(booksFrom, booksTo),
+    };
     const key = getCompanyOptionKey(company);
     if (seen.has(key)) {
       continue;
@@ -391,6 +559,29 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
     } catch (e) {
       console.error("get-tally-companies error:", e);
       return { success: false, companies: [] };
+    }
+  });
+
+  ipcMain.handle("get-tally-company-date-ranges", async () => {
+    try {
+      const tallyUrl = store.get("tallyUrl");
+      const xml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>CompanyDateRanges</ID></HEADER><BODY><DESC><STATICVARIABLES><SVFROMDATE TYPE="Date">01-Jan-1970</SVFROMDATE><SVTODATE TYPE="Date">01-Jan-1970</SVTODATE><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="CompanyDateRanges" ISMODIFY="No"><TYPE>Company</TYPE><FETCH>NAME,GUID,BOOKSFROM,BOOKSTO</FETCH><FILTERS>GroupFilter</FILTERS></COLLECTION><SYSTEM TYPE="FORMULAE" NAME="GroupFilter">$isaggregate = "No"</SYSTEM></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+
+      const response = await postTallyXml(tallyUrl, xml, "arraybuffer");
+      const decoded = decodeTallyResponse(
+        Buffer.from(response.data),
+        String(response.headers["content-type"] || ""),
+      );
+      const companies = parseTallyCompanyDateRanges(decoded);
+
+      return { success: true, companies };
+    } catch (e: any) {
+      console.error("get-tally-company-date-ranges error:", e);
+      return {
+        success: false,
+        companies: [],
+        error: e?.message || "Could not read company date ranges from Tally.",
+      };
     }
   });
 }
