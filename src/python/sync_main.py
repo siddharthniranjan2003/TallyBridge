@@ -50,6 +50,8 @@ ENABLE_INCREMENTAL_VOUCHER_SYNC = os.environ.get(
     "TB_ENABLE_INCREMENTAL_VOUCHER_SYNC",
     "",
 ).strip().lower() in {"1", "true", "yes", "on"}
+SYNC_FROM_DATE_OVERRIDE_RAW = os.environ.get("TB_SYNC_FROM_DATE", "").strip()
+SYNC_TO_DATE_OVERRIDE_RAW = os.environ.get("TB_SYNC_TO_DATE", "").strip()
 VOUCHER_OVERLAP_DAYS = 7
 
 
@@ -157,6 +159,56 @@ def parse_tally_compact_date(compact_str: str):
 
 def format_tally_compact(value: date) -> str:
     return value.strftime("%Y%m%d")
+
+
+def parse_date_override(raw_value: str) -> str | None:
+    value = (raw_value or "").strip()
+    if not value:
+        return None
+
+    if len(value) == 8 and value.isdigit():
+        parsed = parse_tally_compact_date(value)
+        if not parsed:
+            raise ValueError(f"Invalid compact date override: {value}")
+        return value
+
+    parsed_iso = parse_iso_date(value)
+    if parsed_iso:
+        return format_tally_compact(parsed_iso)
+
+    raise ValueError(
+        f"Invalid date override '{value}'. Use YYYY-MM-DD or YYYYMMDD."
+    )
+
+
+def resolve_effective_date_range(default_from_date: str, default_to_date: str) -> tuple[str, str, str]:
+    source = "company_fy"
+    from_date = default_from_date
+    to_date = default_to_date
+
+    override_from = parse_date_override(SYNC_FROM_DATE_OVERRIDE_RAW)
+    override_to = parse_date_override(SYNC_TO_DATE_OVERRIDE_RAW)
+    if override_from or override_to:
+        source = "override"
+        if override_from:
+            from_date = override_from
+        if override_to:
+            to_date = override_to
+
+    from_date_obj = parse_tally_compact_date(from_date)
+    to_date_obj = parse_tally_compact_date(to_date)
+    if not from_date_obj or not to_date_obj:
+        raise ValueError(
+            f"Invalid effective date range {from_date}..{to_date}. "
+            "Expected compact Tally dates (YYYYMMDD)."
+        )
+
+    if from_date_obj > to_date_obj:
+        raise ValueError(
+            f"Invalid date range: from_date {from_date} is after to_date {to_date}."
+        )
+
+    return from_date, to_date, source
 
 
 def build_full_sync_plan(reason: str, fy_from: str, fy_to: str) -> dict:
@@ -573,9 +625,19 @@ def main() -> int:
             else:
                 print(f"[ODBC] Probe status: {probe.get('state')} ({probe.get('message') or 'no DSN detected'})")
 
-        company_info, from_date, to_date = fetch_company_info_with_fallback()
+        company_info, default_from_date, default_to_date = fetch_company_info_with_fallback()
+        from_date, to_date, date_range_source = resolve_effective_date_range(
+            default_from_date,
+            default_to_date,
+        )
+        manual_range_override = date_range_source == "override"
+        if manual_range_override:
+            print(
+                "[TallyBridge] Manual date range override active "
+                f"({from_date} to {to_date})."
+            )
         current_ids = {}
-        print(f"[Tally] Date range: {from_date} to {to_date}")
+        print(f"[Tally] Effective date range: {from_date} to {to_date} ({date_range_source})")
 
         sync_plan = {
             "has_changes": True,
@@ -596,10 +658,13 @@ def main() -> int:
         try:
             print("[Tally] Checking for changes...")
             current_ids = parse_alter_ids(get_company_alter_ids())
-            force_full_sync = FORCE_FULL_SYNC
+            force_full_sync = FORCE_FULL_SYNC or manual_range_override
 
             if force_full_sync:
-                print("[TallyBridge] Forcing full sync because this company has not synced from this connector yet.")
+                if manual_range_override:
+                    print("[TallyBridge] Forcing full sync because a manual date range was configured.")
+                else:
+                    print("[TallyBridge] Forcing full sync because this company has not synced from this connector yet.")
 
             remote_alter_ids, remote_lookup_status = fetch_remote_alter_ids()
             if remote_lookup_status == "company_not_found":
@@ -834,6 +899,9 @@ def main() -> int:
                 "voucher_sync_mode": sync_plan.get("voucher_sync_mode", "full"),
                 "voucher_from_date": sync_plan.get("voucher_from_date"),
                 "voucher_to_date": sync_plan.get("voucher_to_date"),
+                "effective_from_date": from_date,
+                "effective_to_date": to_date,
+                "date_range_source": date_range_source,
                 "master_changed": sync_plan.get("master_changed", True),
                 "voucher_changed": sync_plan.get("voucher_changed", True),
                 "section_sources": section_sources,

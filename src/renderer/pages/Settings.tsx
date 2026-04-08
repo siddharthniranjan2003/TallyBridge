@@ -9,6 +9,8 @@ export default function Settings() {
     accountEmail: "",
     readMode: "auto",
     odbcDsnOverride: "",
+    syncFromDate: "",
+    syncToDate: "",
   });
   const [saved, setSaved] = useState(false);
   const [tallyOk, setTallyOk] = useState<boolean | null>(null);
@@ -24,6 +26,8 @@ export default function Settings() {
         accountEmail: cfg.accountEmail || "",
         readMode: cfg.readMode || "auto",
         odbcDsnOverride: cfg.odbcDsnOverride || "",
+        syncFromDate: cfg.syncFromDate || "",
+        syncToDate: cfg.syncToDate || "",
       });
     });
   }, []);
@@ -89,6 +93,22 @@ export default function Settings() {
             value={form.odbcDsnOverride}
             onChange={(e) => set("odbcDsnOverride", e.target.value)}
             placeholder="TallyODBC_9000"
+          />
+        </Field>
+
+        <Field label="Sync From Date" hint="Optional. Overrides auto FY start for backfill (YYYY-MM-DD).">
+          <input
+            type="date"
+            value={form.syncFromDate}
+            onChange={(e) => set("syncFromDate", e.target.value)}
+          />
+        </Field>
+
+        <Field label="Sync To Date" hint="Optional. Overrides auto FY end for backfill (YYYY-MM-DD).">
+          <input
+            type="date"
+            value={form.syncToDate}
+            onChange={(e) => set("syncToDate", e.target.value)}
           />
         </Field>
 

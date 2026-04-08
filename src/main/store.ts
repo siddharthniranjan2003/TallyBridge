@@ -33,6 +33,8 @@ export interface AppConfig {
   accountEmail: string;
   readMode: "auto" | "xml-only" | "hybrid";
   odbcDsnOverride: string;
+  syncFromDate: string;
+  syncToDate: string;
   companies: Company[];
 }
 
@@ -53,6 +55,8 @@ export const store = new Store<AppConfig>({
     accountEmail: "",
     readMode: "auto",
     odbcDsnOverride: "",
+    syncFromDate: "",
+    syncToDate: "",
     companies: [],
   },
 });

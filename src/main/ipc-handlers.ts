@@ -53,6 +53,23 @@ function parseTallyPort(tallyUrl: string) {
   }
 }
 
+function normalizeOptionalIsoDate(value: unknown) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) {
+    return "";
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    return raw;
+  }
+
+  if (/^\d{8}$/.test(raw)) {
+    return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`;
+  }
+
+  return "";
+}
+
 async function probeOdbcCapabilities(tallyUrl: string, odbcDsnOverride = "") {
   if (process.platform !== "win32") {
     return {
@@ -236,6 +253,8 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
     store.set("accountEmail", s.accountEmail);
     store.set("readMode", s.readMode || "auto");
     store.set("odbcDsnOverride", s.odbcDsnOverride || "");
+    store.set("syncFromDate", normalizeOptionalIsoDate(s.syncFromDate));
+    store.set("syncToDate", normalizeOptionalIsoDate(s.syncToDate));
     engine.reschedule();
     return { success: true };
   });

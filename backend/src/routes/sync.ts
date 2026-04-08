@@ -18,6 +18,9 @@ type SyncMeta = {
   voucher_sync_mode: VoucherSyncMode;
   voucher_from_date: string | null;
   voucher_to_date: string | null;
+  effective_from_date: string | null;
+  effective_to_date: string | null;
+  date_range_source: "company_fy" | "override" | null;
   master_changed: boolean;
   voucher_changed: boolean;
   section_sources: Record<string, string>;
@@ -61,6 +64,12 @@ function normalizeSyncMeta(value: unknown): SyncMeta {
     voucher_sync_mode,
     voucher_from_date: normalizeCompactDate(raw.voucher_from_date),
     voucher_to_date: normalizeCompactDate(raw.voucher_to_date),
+    effective_from_date: normalizeCompactDate(raw.effective_from_date),
+    effective_to_date: normalizeCompactDate(raw.effective_to_date),
+    date_range_source:
+      raw.date_range_source === "company_fy" || raw.date_range_source === "override"
+        ? raw.date_range_source
+        : null,
     master_changed: raw.master_changed !== false,
     voucher_changed: raw.voucher_changed !== false,
     section_sources:

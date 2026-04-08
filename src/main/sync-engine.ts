@@ -116,6 +116,8 @@ export class SyncEngine {
 
       const configuredReadMode = process.env.TB_READ_MODE || config.readMode || "auto";
       const odbcDsnOverride = config.odbcDsnOverride || process.env.TB_ODBC_DSN_OVERRIDE || "";
+      const syncFromDate = (config.syncFromDate || process.env.TB_SYNC_FROM_DATE || "").trim();
+      const syncToDate = (config.syncToDate || process.env.TB_SYNC_TO_DATE || "").trim();
 
       const env = {
         ...process.env,
@@ -125,6 +127,8 @@ export class SyncEngine {
         TB_FORCE_FULL_SYNC: company.lastSyncedAt ? "" : "1",
         TB_READ_MODE: configuredReadMode,
         TB_ODBC_DSN_OVERRIDE: odbcDsnOverride,
+        TB_SYNC_FROM_DATE: syncFromDate,
+        TB_SYNC_TO_DATE: syncToDate,
         BACKEND_URL: config.backendUrl,
         API_KEY: config.apiKey,
         TB_USER_DATA_DIR: app.getPath("userData"),
