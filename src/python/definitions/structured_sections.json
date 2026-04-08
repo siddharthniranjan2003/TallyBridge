@@ -355,6 +355,8 @@
       "object_type": "Voucher",
       "fetch": [
         "GUID",
+        "ALTERID",
+        "MASTERID",
         "DATE",
         "VOUCHERTYPENAME",
         "VOUCHERNUMBER",
@@ -364,9 +366,11 @@
         "PERSISTEDVIEW",
         "ISINVOICE",
         "ISCANCELLED",
+        "ISOPTIONAL",
         "NARRATION",
-        "ALLINVENTORYENTRIES",
-        "ALLLEDGERENTRIES"
+        "LEDGERENTRIES.LIST",
+        "ALLINVENTORYENTRIES.LIST",
+        "BILLALLOCATIONS.LIST"
       ],
       "filters": [
         "NotCancelledVouchers",
@@ -403,10 +407,22 @@
       "fields": {
         "tally_guid": {
           "sources": [
-            "@REMOTEID",
-            "GUID"
+            "GUID",
+            "@REMOTEID"
           ],
           "transform": "string"
+        },
+        "alter_id": {
+          "sources": [
+            "ALTERID"
+          ],
+          "transform": "int"
+        },
+        "master_id": {
+          "sources": [
+            "MASTERID"
+          ],
+          "transform": "int"
         },
         "voucher_number": {
           "sources": [
@@ -448,6 +464,12 @@
         "is_cancelled": {
           "sources": [
             "ISCANCELLED"
+          ],
+          "transform": "bool_yesno"
+        },
+        "is_optional": {
+          "sources": [
+            "ISOPTIONAL"
           ],
           "transform": "bool_yesno"
         },
@@ -522,8 +544,8 @@
         {
           "name": "ledger_entries",
           "source_paths": [
-            "ALLLEDGERENTRIES.LIST",
-            "LEDGERENTRIES.LIST"
+            "LEDGERENTRIES.LIST",
+            "ALLLEDGERENTRIES.LIST"
           ],
           "required_field": "ledger_name",
           "fields": {

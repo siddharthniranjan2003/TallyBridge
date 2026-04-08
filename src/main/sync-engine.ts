@@ -121,6 +121,7 @@ export class SyncEngine {
 
       const env = {
         ...process.env,
+        PYTHONUNBUFFERED: "1",
         TALLY_URL: config.tallyUrl,
         TALLY_COMPANY: companyName,
         TALLY_COMPANY_GUID: company.tallyGuid || "",
@@ -135,7 +136,7 @@ export class SyncEngine {
       };
 
       const args = isDev
-        ? process.platform === "win32" ? ["-3", scriptPath] : [scriptPath]
+        ? process.platform === "win32" ? ["-3", "-u", scriptPath] : ["-u", scriptPath]
         : [];
       let outputLines: string[] = [];
       let errorOutput = "";
@@ -145,7 +146,7 @@ export class SyncEngine {
       const parsedHardTimeoutMs = Number(process.env.TB_SYNC_PROCESS_HARD_TIMEOUT_MS);
       const idleTimeoutMs = Number.isFinite(parsedIdleTimeoutMs) && parsedIdleTimeoutMs > 0
         ? parsedIdleTimeoutMs
-        : 2 * 60 * 1000;
+        : 10 * 60 * 1000;
       const hardTimeoutMs = Number.isFinite(parsedHardTimeoutMs) && parsedHardTimeoutMs > 0
         ? parsedHardTimeoutMs
         : 45 * 60 * 1000;

@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS vouchers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
   tally_guid TEXT NOT NULL,
+  alter_id INTEGER,
+  master_id INTEGER,
   voucher_number TEXT,
   voucher_type TEXT,
   date DATE,
@@ -80,6 +82,7 @@ CREATE TABLE IF NOT EXISTS vouchers (
   amount NUMERIC DEFAULT 0,
   narration TEXT,
   is_cancelled BOOLEAN DEFAULT false,
+  is_optional BOOLEAN DEFAULT false,
   reference TEXT,
   is_invoice BOOLEAN DEFAULT false,
   view TEXT,
@@ -202,6 +205,7 @@ CREATE INDEX IF NOT EXISTS idx_ledgers_company_group ON ledgers(company_id, grou
 CREATE INDEX IF NOT EXISTS idx_vouchers_company_guid ON vouchers(company_id, tally_guid);
 CREATE INDEX IF NOT EXISTS idx_vouchers_company_date ON vouchers(company_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_vouchers_company_party ON vouchers(company_id, party_name);
+CREATE INDEX IF NOT EXISTS idx_vouchers_company_master_id ON vouchers(company_id, master_id);
 CREATE INDEX IF NOT EXISTS idx_voucher_items_voucher_id ON voucher_items(voucher_id);
 CREATE INDEX IF NOT EXISTS idx_voucher_ledger_entries_vid ON voucher_ledger_entries(voucher_id);
 CREATE INDEX IF NOT EXISTS idx_purchases_company_guid ON purchases(company_id, tally_guid);

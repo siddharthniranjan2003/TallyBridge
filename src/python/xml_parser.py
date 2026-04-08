@@ -280,7 +280,7 @@ def parse_vouchers(xml_text: str) -> list:
                 continue
 
             vtype  = v.get("@VCHTYPE") or v.get("VOUCHERTYPENAME", "")
-            guid   = v.get("@REMOTEID") or v.get("GUID", "")
+            guid   = v.get("GUID", "") or v.get("@REMOTEID")
             vnum   = v.get("VOUCHERNUMBER", "")
             vdate  = parse_tally_date(v.get("DATE", ""))
             party  = v.get("PARTYLEDGERNAME", "")
@@ -375,6 +375,47 @@ def parse_vouchers(xml_text: str) -> list:
         return result
     except Exception as e:
         print(f"[Parser] voucher error: {e}")
+        raise
+
+
+def parse_voucher_headers(xml_text: str) -> list:
+    try:
+        result = []
+        cleaned = clean_xml(xml_text)
+        voucher_blocks = re.findall(
+            r"(<VOUCHER\b[^>]*REMOTEID=.*?</VOUCHER>)",
+            cleaned,
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        for voucher_xml in voucher_blocks:
+            raw = xmltodict.parse(f"<ROOT>{voucher_xml}</ROOT>")
+            voucher = raw.get("ROOT", {}).get("VOUCHER", {})
+            if not voucher:
+                continue
+
+            if safe_str(voucher.get("ISCANCELLED", "No")) == "Yes":
+                continue
+            if safe_str(voucher.get("ISOPTIONAL", "No")) == "Yes":
+                continue
+
+            result.append({
+                "tally_guid": safe_str(voucher.get("GUID") or voucher.get("@REMOTEID")),
+                "master_id": safe_int(voucher.get("MASTERID", 0)),
+                "alter_id": safe_int(voucher.get("ALTERID", 0)),
+                "voucher_number": safe_str(voucher.get("VOUCHERNUMBER", "")),
+                "voucher_type": safe_str(voucher.get("@VCHTYPE") or voucher.get("VOUCHERTYPENAME", "")),
+                "date": parse_tally_date(safe_str(voucher.get("DATE", ""))),
+                "party_name": safe_str(voucher.get("PARTYLEDGERNAME", "")),
+                "reference": safe_str(voucher.get("REFERENCE", "")),
+                "amount": abs(safe_float(voucher.get("AMOUNT", 0))),
+                "is_cancelled": False,
+                "is_optional": False,
+            })
+
+        return result
+    except Exception as e:
+        print(f"[Parser] voucher header error: {e}")
         raise
 
 # ── stock summary ─────────────────────────────────────────────────

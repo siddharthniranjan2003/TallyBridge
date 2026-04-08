@@ -256,10 +256,14 @@ def _first_non_empty_indexed(row_context: dict, sources: list):
 
 def _resolve_source(value, source: str):
     current = value
-    for part in source.split("."):
+    parts = source.split(".")
+    for index, part in enumerate(parts):
         if isinstance(current, list):
             current = current[0] if current else None
         if isinstance(current, dict):
+            remaining_path = ".".join(parts[index:])
+            if remaining_path in current:
+                return current.get(remaining_path)
             current = current.get(part)
         else:
             return None

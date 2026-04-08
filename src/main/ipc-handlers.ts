@@ -279,7 +279,7 @@ async function probeOdbcCapabilities(tallyUrl: string, odbcDsnOverride = "") {
       port: parseTallyPort(tallyUrl),
       sections: ["groups", "ledgers", "stock_items"],
       queries: {
-        groups: "Select $Name, $Parent, $MasterID, $IsRevenue, $AffectsStock, $IsSubLedger from Group",
+        groups: "Select $Name, $Parent, $MasterID, $IsRevenue, $AffectsStock, $IsSubLedger from Groups",
         ledgers: "Select $Name, $Parent, $OpeningBalance, $ClosingBalance, $MasterID from Ledger",
         stock_items: "Select $Name, $Parent, $BaseUnits, $ClosingBalance, $ClosingValue, $ClosingRate from StockItem",
       },

@@ -1,11 +1,12 @@
 import json
 import os
 import sys
+import threading
 import time
 from datetime import date, datetime, timedelta
 
 from cloud_pusher import fetch_remote_alter_ids, push
-from definition_extractor import fetch_structured_section
+from definition_extractor import fetch_structured_section, parse_structured_section
 from odbc_bridge import OdbcBridge, compare_section_rows
 from tally_client import (
     TallyConnectionError,
@@ -22,7 +23,11 @@ from tally_client import (
     get_stock_items,
     get_stock_summary_report,
     get_trial_balance,
+    get_voucher_details_erp9_batch,
+    get_voucher_headers_erp9,
     get_vouchers,
+    get_vouchers_collection_tdl,
+    get_vouchers_legacy_data_request,
 )
 from xml_parser import (
     parse_alter_ids,
@@ -34,6 +39,7 @@ from xml_parser import (
     parse_profit_and_loss,
     parse_stock,
     parse_trial_balance,
+    parse_voucher_headers,
     parse_vouchers,
 )
 
@@ -52,7 +58,19 @@ ENABLE_INCREMENTAL_VOUCHER_SYNC = os.environ.get(
 ).strip().lower() in {"1", "true", "yes", "on"}
 SYNC_FROM_DATE_OVERRIDE_RAW = os.environ.get("TB_SYNC_FROM_DATE", "").strip()
 SYNC_TO_DATE_OVERRIDE_RAW = os.environ.get("TB_SYNC_TO_DATE", "").strip()
+try:
+    SYNC_HEARTBEAT_SECONDS = max(
+        0,
+        int(os.environ.get("TB_SYNC_HEARTBEAT_SECONDS", "20") or "20"),
+    )
+except ValueError:
+    SYNC_HEARTBEAT_SECONDS = 20
+ALLOW_DAYBOOK_FALLBACK = os.environ.get(
+    "TB_ALLOW_DAYBOOK_FALLBACK",
+    "",
+).strip().lower() in {"1", "true", "yes", "on"}
 VOUCHER_OVERLAP_DAYS = 7
+ERP9_DETAIL_BATCH_SIZE = 25
 
 
 def resolve_cache_file() -> str:
@@ -211,6 +229,68 @@ def resolve_effective_date_range(default_from_date: str, default_to_date: str) -
     return from_date, to_date, source
 
 
+def clamp_range_to_company_books(
+    from_date: str,
+    to_date: str,
+    company_info: dict,
+) -> tuple[str, str, bool]:
+    books_from_iso = (company_info or {}).get("books_from")
+    books_to_iso = (company_info or {}).get("books_to")
+    books_from = fy_date_from_iso(books_from_iso) if books_from_iso else ""
+    books_to = fy_date_from_iso(books_to_iso) if books_to_iso else ""
+
+    from_obj = parse_tally_compact_date(from_date)
+    to_obj = parse_tally_compact_date(to_date)
+    if not from_obj or not to_obj:
+        return from_date, to_date, False
+
+    was_clamped = False
+    if books_from:
+        books_from_obj = parse_tally_compact_date(books_from)
+        if books_from_obj and from_obj < books_from_obj:
+            print(
+                f"[TallyBridge] Clamping from_date {from_date} to company books start {books_from}."
+            )
+            from_date = books_from
+            from_obj = books_from_obj
+            was_clamped = True
+
+    if books_to:
+        books_to_obj = parse_tally_compact_date(books_to)
+        if books_to_obj and to_obj > books_to_obj:
+            print(
+                f"[TallyBridge] Clamping to_date {to_date} to company books end {books_to}."
+            )
+            to_date = books_to
+            to_obj = books_to_obj
+            was_clamped = True
+
+    if from_obj > to_obj:
+        raise ValueError(
+            f"Effective range after company bounds is invalid: {from_date}..{to_date}."
+        )
+
+    return from_date, to_date, was_clamped
+
+
+def start_sync_heartbeat() -> tuple[threading.Event | None, threading.Thread | None]:
+    if SYNC_HEARTBEAT_SECONDS <= 0:
+        return None, None
+
+    stop_event = threading.Event()
+
+    def heartbeat_loop():
+        while not stop_event.wait(SYNC_HEARTBEAT_SECONDS):
+            print(
+                f"[TallyBridge] Heartbeat: sync still running ({SYNC_HEARTBEAT_SECONDS}s interval).",
+                flush=True,
+            )
+
+    thread = threading.Thread(target=heartbeat_loop, daemon=True)
+    thread.start()
+    return stop_event, thread
+
+
 def build_full_sync_plan(reason: str, fy_from: str, fy_to: str) -> dict:
     return {
         "has_changes": True,
@@ -363,6 +443,99 @@ def dedupe_vouchers(vouchers: list[dict]) -> list[dict]:
     return deduped
 
 
+def validate_voucher_batch(
+    vouchers: list[dict],
+    from_date: str,
+    to_date: str,
+    voucher_source: str = "xml_collection",
+) -> None:
+    if not vouchers:
+        print("[Tally] Voucher batch returned no rows")
+        return
+
+    total = len(vouchers)
+    guid_counts: dict[str, int] = {}
+    missing_guids = 0
+    missing_dates = 0
+    voucher_dates: list[date] = []
+
+    for voucher in vouchers:
+        tally_guid = (voucher.get("tally_guid") or "").strip()
+        if tally_guid:
+            guid_counts[tally_guid] = guid_counts.get(tally_guid, 0) + 1
+        else:
+            missing_guids += 1
+
+        voucher_date = parse_iso_date(voucher.get("date") or "")
+        if voucher_date:
+            voucher_dates.append(voucher_date)
+        else:
+            missing_dates += 1
+
+    if missing_guids:
+        raise ValueError(
+            f"Voucher batch is missing tally_guid on {missing_guids} row(s); "
+            "aborting to avoid ambiguous voucher identity."
+        )
+
+    if missing_dates:
+        raise ValueError(
+            f"Voucher batch is missing date on {missing_dates} row(s); "
+            "aborting to avoid corrupted date history."
+        )
+
+    duplicate_guid_count = sum(count - 1 for count in guid_counts.values() if count > 1)
+    if duplicate_guid_count:
+        duplicate_ratio = duplicate_guid_count / total
+        if duplicate_guid_count > 3 or duplicate_ratio > 0.01:
+            raise ValueError(
+                f"Voucher batch returned {duplicate_guid_count} duplicate GUID row(s) "
+                f"out of {total}; refusing sync because the voucher identity is unstable."
+            )
+        print(
+            f"[Tally] Warning: voucher batch contained {duplicate_guid_count} duplicate "
+            "GUID row(s) before merge."
+        )
+
+    if not voucher_dates:
+        raise ValueError("Voucher batch did not contain any parseable voucher dates.")
+
+    min_date = min(voucher_dates)
+    max_date = max(voucher_dates)
+    unique_date_count = len(set(voucher_dates))
+    requested_start = parse_tally_compact_date(from_date)
+    requested_end = parse_tally_compact_date(to_date)
+    requested_span_days = (
+        (requested_end - requested_start).days
+        if requested_start and requested_end
+        else 0
+    )
+
+    print(
+        f"[Tally] Voucher date coverage: {min_date.isoformat()} to {max_date.isoformat()} "
+        f"across {unique_date_count} distinct date(s)"
+    )
+
+    if (
+        requested_span_days >= 30
+        and total >= 25
+        and unique_date_count == 1
+    ):
+        if voucher_source == "xml_daybook":
+            print(
+                "[Tally] Warning: Day Book export collapsed to a single voucher date "
+                f"({min_date.isoformat()}) across a {requested_span_days + 1}-day request "
+                "window. This ERP 9 build appears to ignore Day Book date filters; "
+                "proceeding with the returned full voucher set."
+            )
+            return
+        raise ValueError(
+            "Voucher batch collapsed to a single voucher date "
+            f"({min_date.isoformat()}) across a {requested_span_days + 1}-day request window; "
+            "this usually means a report-style export was parsed as raw vouchers."
+        )
+
+
 def is_retryable_voucher_error(error: Exception) -> bool:
     if isinstance(error, (TallyTimeoutError, TallyConnectionError, TimeoutError)):
         return True
@@ -370,24 +543,213 @@ def is_retryable_voucher_error(error: Exception) -> bool:
     return "timed out" in message or "unresponsive" in message or "connection" in message
 
 
-def fetch_voucher_window(from_date: str, to_date: str, prefer_day_book: bool = False) -> list[dict]:
-    if prefer_day_book:
-        print("[Tally] Using Day Book export for this voucher window")
-        return parse_vouchers(get_vouchers(from_date, to_date))
+def fetch_day_book_voucher_window(from_date: str, to_date: str) -> list[dict]:
+    print("[Tally] Using Day Book XML fallback for this voucher window")
+    requested_start = parse_tally_compact_date(from_date)
+    requested_end = parse_tally_compact_date(to_date)
 
+    def rows_match_requested_window(rows: list[dict]) -> bool:
+        if not rows or not requested_start or not requested_end:
+            return True
+
+        parsed_dates = [
+            parse_iso_date(row.get("date") or "")
+            for row in rows
+            if row.get("date")
+        ]
+        if not parsed_dates:
+            return False
+        return all(
+            requested_start <= voucher_date <= requested_end
+            for voucher_date in parsed_dates
+            if voucher_date
+        )
+
+    attempts = [
+        ("report-style request", get_vouchers),
+        ("legacy data request", get_vouchers_legacy_data_request),
+    ]
+    fallback_rows: list[dict] | None = None
+    last_error: Exception | None = None
+
+    for label, fetcher in attempts:
+        try:
+            print(f"[Tally] Day Book request shape: {label}")
+            rows = parse_vouchers(fetcher(from_date, to_date))
+            if not rows:
+                print(f"[Tally] {label} returned no rows")
+                return rows
+            if rows_match_requested_window(rows):
+                return rows
+            print(
+                f"[Tally] {label} ignored the requested date window "
+                f"{from_date}..{to_date}; trying alternate request shape."
+            )
+            if fallback_rows is None:
+                fallback_rows = rows
+        except Exception as error:
+            last_error = error
+            print(f"[Tally] {label} failed ({error})")
+
+    if fallback_rows is not None:
+        print("[Tally] No Day Book request shape honored the requested window; using best-effort result.")
+        return fallback_rows
+
+    if last_error:
+        raise last_error
+
+    print("[Tally] Day Book fallback returned no rows")
+    return []
+
+
+def fetch_tdl_collection_voucher_window(from_date: str, to_date: str) -> list[dict]:
+    print("[Tally] Using inline TDL voucher collection fallback for this voucher window")
+    rows = parse_structured_section(
+        "vouchers",
+        get_vouchers_collection_tdl(from_date, to_date),
+    )
+    if rows:
+        print("[Tally] Vouchers loaded via inline TDL voucher collection")
+    else:
+        print("[Tally] Inline TDL voucher collection returned no rows")
+    return rows
+
+
+def merge_voucher_headers_with_details(
+    headers: list[dict],
+    detail_rows: list[dict],
+) -> list[dict]:
+    detail_by_guid: dict[str, dict] = {}
+    duplicate_detail_guids = 0
+    for detail in detail_rows:
+        tally_guid = (detail.get("tally_guid") or "").strip()
+        if not tally_guid:
+            continue
+        if tally_guid in detail_by_guid:
+            duplicate_detail_guids += 1
+            continue
+        detail_by_guid[tally_guid] = detail
+
+    if duplicate_detail_guids:
+        print(
+            f"[Tally] Warning: ignored {duplicate_detail_guids} duplicate Day Book detail row(s) "
+            "while building the ERP 9 voucher detail map."
+        )
+
+    merged: list[dict] = []
+    missing_detail_count = 0
+    for header in headers:
+        tally_guid = (header.get("tally_guid") or "").strip()
+        detail = detail_by_guid.get(tally_guid)
+        if detail:
+            merged_row = dict(detail)
+        else:
+            missing_detail_count += 1
+            merged_row = {
+                "tally_guid": tally_guid,
+                "items": [],
+                "ledger_entries": [],
+                "narration": "",
+                "is_invoice": False,
+                "view": "",
+            }
+
+        merged_row["master_id"] = header.get("master_id", 0)
+        merged_row["alter_id"] = header.get("alter_id", 0)
+        merged_row["voucher_number"] = header.get("voucher_number") or merged_row.get("voucher_number", "")
+        merged_row["voucher_type"] = header.get("voucher_type") or merged_row.get("voucher_type", "")
+        merged_row["date"] = header.get("date") or merged_row.get("date")
+        merged_row["party_name"] = header.get("party_name") or merged_row.get("party_name", "")
+        merged_row["reference"] = header.get("reference") or merged_row.get("reference", "")
+        merged_row["amount"] = abs(header.get("amount") or merged_row.get("amount", 0) or 0)
+        merged_row["is_cancelled"] = bool(header.get("is_cancelled", merged_row.get("is_cancelled", False)))
+        merged_row["is_optional"] = bool(header.get("is_optional", merged_row.get("is_optional", False)))
+        merged_row.setdefault("items", [])
+        merged_row.setdefault("ledger_entries", [])
+        merged.append(merged_row)
+
+    if missing_detail_count:
+        print(
+            f"[Tally] Warning: {missing_detail_count} ERP 9 voucher header row(s) had no matching "
+            "Day Book detail row by GUID."
+        )
+
+    return merged
+
+
+def fetch_erp9_two_pass_vouchers(from_date: str, to_date: str) -> list[dict]:
+    print("[Tally] Using ERP 9 two-pass voucher sync (header collection + master-id detail batches)")
+    header_rows = parse_voucher_headers(get_voucher_headers_erp9(from_date, to_date))
+    print(f"[Tally] ERP 9 header pass returned {len(header_rows)} voucher row(s)")
+    validate_voucher_batch(header_rows, from_date, to_date, voucher_source="erp9_headers")
+    detail_rows: list[dict] = []
+    master_ids: list[int] = []
+    seen_master_ids: set[int] = set()
+    for header in header_rows:
+        master_id = header.get("master_id")
+        if not master_id or master_id in seen_master_ids:
+            continue
+        seen_master_ids.add(master_id)
+        master_ids.append(master_id)
+    batches = [
+        master_ids[index:index + ERP9_DETAIL_BATCH_SIZE]
+        for index in range(0, len(master_ids), ERP9_DETAIL_BATCH_SIZE)
+    ]
+    print(
+        f"[Tally] ERP 9 detail pass will fetch {len(master_ids)} voucher(s) "
+        f"in {len(batches)} batch(es) of up to {ERP9_DETAIL_BATCH_SIZE}."
+    )
+    for batch_index, batch_master_ids in enumerate(batches, start=1):
+        print(
+            f"[Tally] ERP 9 detail batch {batch_index}/{len(batches)} "
+            f"({len(batch_master_ids)} voucher id(s))"
+        )
+        detail_rows.extend(
+            parse_structured_section(
+                "vouchers",
+                get_voucher_details_erp9_batch(batch_master_ids),
+            )
+        )
+    print(f"[Tally] ERP 9 detail pass returned {len(detail_rows)} voucher row(s)")
+    merged_rows = merge_voucher_headers_with_details(header_rows, detail_rows)
+    print(f"[Tally] ERP 9 two-pass merge produced {len(merged_rows)} voucher row(s)")
+    return merged_rows
+
+
+def fetch_voucher_window(
+    from_date: str,
+    to_date: str,
+    prefer_day_book: bool = False,
+    allow_day_book_fallback: bool = False,
+) -> tuple[list[dict], str]:
     try:
         vouchers = fetch_structured_section(
             "vouchers",
             {"from_date": from_date, "to_date": to_date},
         )
         print("[Tally] Vouchers loaded via definition-driven collection")
-        return vouchers
+        return vouchers, "xml_collection"
     except Exception as structured_error:
         print(
             f"[Tally] Structured voucher fetch failed for {from_date}..{to_date} "
-            f"({structured_error}) - falling back to Day Book parser"
+            f"({structured_error}) - retrying with inline TDL voucher collection"
         )
-        return parse_vouchers(get_vouchers(from_date, to_date))
+        try:
+            return fetch_tdl_collection_voucher_window(from_date, to_date), "xml_collection_tdl"
+        except Exception as tdl_error:
+            if allow_day_book_fallback:
+                print(
+                    f"[Tally] Inline TDL voucher collection failed for {from_date}..{to_date} "
+                    f"({tdl_error}) - falling back to Day Book XML"
+                )
+                return fetch_day_book_voucher_window(from_date, to_date), "xml_daybook"
+
+            raise RuntimeError(
+                f"Structured voucher fetch failed for {from_date}..{to_date}: "
+                f"{structured_error}. Inline TDL voucher collection also failed: "
+                f"{tdl_error}. Day Book fallback is disabled because it can "
+                "produce corrupted voucher dates and IDs."
+            ) from tdl_error
 
 
 def fetch_vouchers_with_batches(
@@ -395,15 +757,27 @@ def fetch_vouchers_with_batches(
     to_date: str,
     mode: str,
     prefer_day_book: bool = False,
-) -> list[dict]:
+    allow_day_book_fallback: bool = False,
+) -> tuple[list[dict], str]:
     initial_windows = build_month_windows(from_date, to_date)
     all_vouchers: list[dict] = []
+    transport_sources: set[str] = set()
 
     def fetch_recursive(window_from: str, window_to: str, depth: int = 0) -> list[dict]:
         indent = "  " * depth
         print(f"[Tally] Voucher window {window_from} to {window_to}")
         try:
-            rows = fetch_voucher_window(window_from, window_to, prefer_day_book=prefer_day_book)
+            if prefer_day_book:
+                rows = fetch_erp9_two_pass_vouchers(window_from, window_to)
+                source = "erp9_two_pass"
+            else:
+                rows, source = fetch_voucher_window(
+                    window_from,
+                    window_to,
+                    prefer_day_book=prefer_day_book,
+                    allow_day_book_fallback=allow_day_book_fallback,
+                )
+            transport_sources.add(source)
             print(f"{indent}[Tally] Voucher window succeeded with {len(rows)} rows")
             return rows
         except Exception as error:
@@ -430,14 +804,36 @@ def fetch_vouchers_with_batches(
         f"[Tally] Fetching vouchers ({from_date} to {to_date}) using "
         f"{'batched full-year' if mode == 'full' else 'batched incremental'} XML export..."
     )
+    print(
+        f"[Tally] Voucher strategy: "
+        f"{'ERP 9 two-pass: header collection -> master-id detail batches' if prefer_day_book else 'definition-driven collection -> inline TDL collection'}"
+    )
+    if prefer_day_book:
+        print(
+            "[Tally] Month-window batching is enabled on ERP 9 so header fetches stay light "
+            "while detail rows are loaded by voucher master id."
+        )
     for window_from, window_to in initial_windows:
         all_vouchers.extend(fetch_recursive(window_from, window_to))
 
+    if transport_sources == {"xml_collection"}:
+        voucher_source = "xml_collection"
+    elif transport_sources == {"xml_collection_tdl"}:
+        voucher_source = "xml_collection_tdl"
+    elif transport_sources == {"erp9_two_pass"}:
+        voucher_source = "erp9_two_pass"
+    elif transport_sources == {"xml_daybook"}:
+        voucher_source = "xml_daybook"
+    elif transport_sources:
+        voucher_source = "xml_mixed"
+    else:
+        voucher_source = "xml_collection"
+    validate_voucher_batch(all_vouchers, from_date, to_date, voucher_source=voucher_source)
     deduped = dedupe_vouchers(all_vouchers)
     duplicates_removed = len(all_vouchers) - len(deduped)
     if duplicates_removed > 0:
         print(f"[Tally] Removed {duplicates_removed} duplicate vouchers after batch merge")
-    return deduped
+    return deduped, voucher_source
 
 
 def fetch_groups_xml() -> list[dict]:
@@ -589,6 +985,7 @@ def fetch_company_info_with_fallback() -> tuple[dict, str, str]:
 
 
 def main() -> int:
+    heartbeat_stop, heartbeat_thread = start_sync_heartbeat()
     print(f"[TallyBridge] Starting sync: {COMPANY}")
     product_info = detect_tally_product()
     if product_info.get("product_name"):
@@ -630,11 +1027,20 @@ def main() -> int:
             default_from_date,
             default_to_date,
         )
+        from_date, to_date, was_clamped = clamp_range_to_company_books(
+            from_date,
+            to_date,
+            company_info,
+        )
         manual_range_override = date_range_source == "override"
         if manual_range_override:
             print(
                 "[TallyBridge] Manual date range override active "
                 f"({from_date} to {to_date})."
+            )
+        if was_clamped:
+            print(
+                "[TallyBridge] Date range was clamped to the selected company's books range."
             )
         current_ids = {}
         print(f"[Tally] Effective date range: {from_date} to {to_date} ({date_range_source})")
@@ -767,14 +1173,19 @@ def main() -> int:
         if sync_plan.get("need_vouchers"):
             voucher_from_date = sync_plan.get("voucher_from_date", from_date)
             voucher_to_date = sync_plan.get("voucher_to_date", to_date)
-            prefer_day_book_vouchers = product_info.get("product_name") == "Tally.ERP 9"
-            vouchers = fetch_vouchers_with_batches(
+            allow_day_book_fallback = (
+                ALLOW_DAYBOOK_FALLBACK
+                or product_info.get("product_name") == "Tally.ERP 9"
+            )
+            prefer_day_book = product_info.get("product_name") == "Tally.ERP 9"
+            vouchers, voucher_source = fetch_vouchers_with_batches(
                 voucher_from_date,
                 voucher_to_date,
                 sync_plan.get("voucher_sync_mode", "full"),
-                prefer_day_book=prefer_day_book_vouchers,
+                prefer_day_book=prefer_day_book,
+                allow_day_book_fallback=allow_day_book_fallback,
             )
-            section_sources["vouchers"] = "xml"
+            section_sources["vouchers"] = voucher_source
             record_updates["vouchers"] = len(vouchers)
             print(f"[Tally] Got {len(vouchers)} vouchers")
 
@@ -902,6 +1313,7 @@ def main() -> int:
                 "effective_from_date": from_date,
                 "effective_to_date": to_date,
                 "date_range_source": date_range_source,
+                "date_range_clamped": was_clamped,
                 "master_changed": sync_plan.get("master_changed", True),
                 "voucher_changed": sync_plan.get("voucher_changed", True),
                 "section_sources": section_sources,
@@ -931,6 +1343,10 @@ def main() -> int:
         print(f"[Error] Sync failed: {error}", file=sys.stderr)
         return 1
     finally:
+        if heartbeat_stop:
+            heartbeat_stop.set()
+        if heartbeat_thread:
+            heartbeat_thread.join(timeout=1)
         if odbc_bridge:
             odbc_bridge.close()
 
