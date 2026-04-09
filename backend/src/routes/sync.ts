@@ -1573,4 +1573,120 @@ router.get("/parties", requireApiKey, async (req, res) => {
   }
 });
 
+// ── GET /api/sync/reorder-levels ────────────────────────────────────────────
+// Returns 90-day purchase-volume reorder trigger for all stock items.
+// Auto-detects the single company in Supabase — no company param required.
+// Formula: reorder_trigger = SUM(purchase qty in last 90 days), no averaging.
+// Sorted: needs_reorder=true first, then alphabetical.
+//
+// Optional query param:
+//   as_of_date  YYYY-MM-DD  end of 90-day window (default: 2019-03-31)
+
+router.get("/reorder-levels", requireApiKey, async (req, res) => {
+  try {
+    // Auto-detect the single company
+    const { data: companyRow, error: companyErr } = await supabase
+      .from("companies")
+      .select("id")
+      .limit(1)
+      .single();
+
+    if (companyErr || !companyRow) {
+      return res.status(404).json({ error: "No company found in database" });
+    }
+
+    const companyId: string = companyRow.id;
+
+    // Parse as_of_date — default 2019-03-31 (FY end for K.V. ENTERPRISES 18-19)
+    const DEFAULT_AS_OF = "2019-03-31";
+    const rawDate = String(req.query.as_of_date ?? "").trim();
+    const asOfDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? rawDate : DEFAULT_AS_OF;
+
+    // Compute inclusive 90-day window: subtract 89 days so both ends count
+    const toDate = new Date(asOfDate);
+    const fromDate = new Date(asOfDate);
+    fromDate.setDate(toDate.getDate() - 89);
+    const fromIso = fromDate.toISOString().slice(0, 10);
+    const toIso = toDate.toISOString().slice(0, 10);
+
+    // Step 1: fetch purchase voucher_ids in window (non-cancelled only)
+    const purchaseRows = await fetchAllPages("Reorder purchases", (from, to) =>
+      supabase
+        .from("purchases")
+        .select("voucher_id")
+        .eq("company_id", companyId)
+        .eq("is_cancelled", false)
+        .gte("date", fromIso)
+        .lte("date", toIso)
+        .order("id", { ascending: true })
+        .range(from, to)
+    );
+
+    const voucherIds = [
+      ...new Set(purchaseRows.map((p: any) => p.voucher_id).filter(Boolean)),
+    ];
+
+    // Step 2: fetch voucher_items and aggregate qty per stock item name
+    const qtyByItem = new Map<string, number>();
+    if (voucherIds.length > 0) {
+      const lineItems = await selectRowsByIn(
+        "voucher_items",
+        "voucher_id",
+        voucherIds,
+        "Reorder voucher items"
+      );
+      for (const item of lineItems) {
+        const name: string = item.stock_item_name;
+        if (!name || !name.trim()) continue;          // skip blank names
+        const qty = Number(item.quantity) || 0;
+        if (qty <= 0) continue;                       // skip returns / zero-qty rows
+        qtyByItem.set(name, (qtyByItem.get(name) ?? 0) + qty);
+      }
+    }
+
+    // Step 3: fetch all stock items for the company
+    const stockItems = await fetchAllPages("Reorder stock items", (from, to) =>
+      supabase
+        .from("stock_items")
+        .select("name, unit, closing_qty")
+        .eq("company_id", companyId)
+        .order("name", { ascending: true })
+        .range(from, to)
+    );
+
+    // Step 4: merge — reorder_trigger = raw 90-day purchase total
+    const result = stockItems.map((s: any) => {
+      const totalQtyPurchased = qtyByItem.get(s.name) ?? 0;
+      const reorderTrigger = totalQtyPurchased;
+      const closingQty = Number(s.closing_qty) || 0;
+      return {
+        stock_item_name: s.name,
+        unit: s.unit ?? null,
+        total_qty_purchased: totalQtyPurchased,
+        reorder_trigger: reorderTrigger,
+        closing_qty: closingQty,
+        needs_reorder: reorderTrigger > 0 && closingQty <= reorderTrigger,
+      };
+    });
+
+    // Sort: needs_reorder first, then alphabetical
+    result.sort((a: any, b: any) => {
+      if (a.needs_reorder !== b.needs_reorder) return a.needs_reorder ? -1 : 1;
+      return a.stock_item_name.localeCompare(b.stock_item_name);
+    });
+
+    res.json({
+      as_of_date: asOfDate,
+      window_from: fromIso,
+      window_to: toIso,
+      total_items: result.length,
+      needs_reorder_count: result.filter((r: any) => r.needs_reorder).length,
+      items: result,
+    });
+  } catch (err: any) {
+    console.error("[ReorderLevels] Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;

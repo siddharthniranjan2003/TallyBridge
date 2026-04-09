@@ -1,0 +1,164 @@
+{
+  "name": "challan-to-invoice",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0],
+      "id": "d07ac206-306a-49a7-acf5-d536bf6940f5",
+      "name": "Telegram Trigger",
+      "webhookId": "8661172273:AAGUoIxUjtZez84a583iL5ltrwNQZNdqf3k",
+      "credentials": {
+        "telegramApi": {
+          "id": "MzDsXbhbeli4cRfn",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "reorder-check",
+              "leftValue": "={{ $json.message.text }}",
+              "rightValue": "/reorder",
+              "operator": {
+                "type": "string",
+                "operation": "startsWith"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [220, 0],
+      "id": "a1b2c3d4-0001-0001-0001-000000000001",
+      "name": "IF: is /reorder"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://localhost:3001/api/sync/reorder-levels",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "sb_publishable_oFyc0kQxjkga2QZw0kq3ZQ_ovmR0P9h"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, -100],
+      "id": "a1b2c3d4-0002-0002-0002-000000000002",
+      "name": "GET reorder-levels"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst items = data.items || [];\n\nconst reorderItems = items.filter(i => i.needs_reorder).slice(0, 20);\n\nconst lines = reorderItems\n  .map((i, idx) => {\n    const comparison = `${i.closing_qty.toLocaleString()} <= ${i.reorder_trigger.toLocaleString()} -> ${i.needs_reorder}`;\n    return (\n      `${idx + 1}. ${i.stock_item_name}\\n` +\n      `   Total Qty (3m) : ${i.total_qty_purchased.toLocaleString()} ${i.unit || ''}\\n` +\n      `   Reorder Level  : ${i.reorder_trigger.toLocaleString()} ${i.unit || ''}\\n` +\n      `   Closing Stock  : ${i.closing_qty.toLocaleString()} ${i.unit || ''}\\n` +\n      `   Needs Reorder? : ${comparison}\\n` +\n      `   Status         : REORDER NOW`\n    );\n  })\n  .join('\\n\\n');\n\nconst header =\n  `Reorder Report\\n` +\n  `As of: ${data.as_of_date}\\n` +\n  `Window: ${data.window_from} to ${data.window_to}\\n` +\n  `${data.needs_reorder_count} of ${data.total_items} items flagged\\n` +\n  `──────────────────────\\n`;\n\nreturn [{ json: { text: header + (lines || 'All items are sufficiently stocked.') } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, -100],
+      "id": "a1b2c3d4-0003-0003-0003-000000000003",
+      "name": "Format reorder text"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [880, -100],
+      "id": "a1b2c3d4-0004-0004-0004-000000000004",
+      "name": "Send reorder reply",
+      "credentials": {
+        "telegramApi": {
+          "id": "MzDsXbhbeli4cRfn",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "IF: is /reorder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: is /reorder": {
+      "main": [
+        [
+          {
+            "node": "GET reorder-levels",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "GET reorder-levels": {
+      "main": [
+        [
+          {
+            "node": "Format reorder text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format reorder text": {
+      "main": [
+        [
+          {
+            "node": "Send reorder reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "618109dd-cc93-4428-a1f3-84c2e38c7695",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "faba9ee414c7a4aa19c677be52538a3e55090bdb1063ad9740989ea556dc24b3"
+  },
+  "id": "uL3Gbli0PW25ucdz",
+  "tags": []
+}
