@@ -290,6 +290,45 @@ async function selectRowsByIn(table: string, column: string, values: string[], l
   return rows;
 }
 
+async function selectCompanyRowsByIn(
+  table: string,
+  companyId: string,
+  column: string,
+  values: string[],
+  label: string,
+) {
+  const rows: any[] = [];
+  if (!values.length) return rows;
+
+  for (const chunk of chunkArray(values)) {
+    const { data, error } = await supabase
+      .from(table)
+      .select("*")
+      .eq("company_id", companyId)
+      .in(column, chunk);
+    if (error) {
+      throw new Error(`${label} lookup failed: ${error.message}`);
+    }
+
+    rows.push(...(data || []));
+  }
+
+  return rows;
+}
+
+type VoucherGraphSnapshot = {
+  voucherRows: any[];
+  itemRows: any[];
+  entryRows: any[];
+  purchaseRows: any[];
+};
+
+type VoucherRestoreContext = {
+  companyId: string;
+  voucherGuids: string[];
+  snapshot: VoucherGraphSnapshot;
+};
+
 async function rollbackInsertedRows(table: string, insertedIds: string[], label: string) {
   if (!insertedIds.length) return;
 
@@ -365,6 +404,103 @@ async function deleteVoucherGraph(voucherIds: string[]) {
     "Voucher ledger entries stale rows"
   );
   await deleteByIn("vouchers", "id", voucherIds, "Stale vouchers");
+}
+
+async function captureVoucherGraphSnapshot(
+  companyId: string,
+  voucherGuids: string[],
+  purchaseGuids: string[],
+): Promise<VoucherGraphSnapshot> {
+  const uniqueVoucherGuids = [...new Set(voucherGuids.filter((value) => typeof value === "string" && value))];
+  const uniquePurchaseGuids = [...new Set(purchaseGuids.filter((value) => typeof value === "string" && value))];
+
+  const voucherRows = await selectCompanyRowsByIn(
+    "vouchers",
+    companyId,
+    "tally_guid",
+    uniqueVoucherGuids,
+    "Voucher snapshot",
+  );
+  const voucherIds = voucherRows
+    .map((row: any) => row.id)
+    .filter((id: unknown): id is string => typeof id === "string");
+  const itemRows = await selectRowsByIn("voucher_items", "voucher_id", voucherIds, "Voucher item snapshot");
+  const entryRows = await selectRowsByIn(
+    "voucher_ledger_entries",
+    "voucher_id",
+    voucherIds,
+    "Voucher ledger entry snapshot",
+  );
+  const purchaseRows = await selectCompanyRowsByIn(
+    "purchases",
+    companyId,
+    "tally_guid",
+    uniquePurchaseGuids,
+    "Purchase snapshot",
+  );
+
+  return {
+    voucherRows,
+    itemRows,
+    entryRows,
+    purchaseRows,
+  };
+}
+
+async function restoreVoucherGraphSnapshot(
+  companyId: string,
+  voucherGuids: string[],
+  snapshot: VoucherGraphSnapshot,
+) {
+  try {
+    const currentVoucherIdMap = await getVoucherIdMap(companyId, voucherGuids);
+    const currentVoucherIds = [...currentVoucherIdMap.values()];
+    await deleteVoucherGraph(currentVoucherIds);
+
+    if (!snapshot.voucherRows.length) {
+      return;
+    }
+
+    const restorableVoucherRows = snapshot.voucherRows.map(({ id, ...row }) => row);
+    await upsertInBatches("vouchers", restorableVoucherRows, "company_id,tally_guid", "Voucher restore");
+
+    const restoredVoucherIdMap = await getVoucherIdMap(
+      companyId,
+      snapshot.voucherRows
+        .map((row: any) => row.tally_guid)
+        .filter((value: unknown): value is string => typeof value === "string" && value.length > 0),
+    );
+    const oldVoucherIdToGuid = new Map<string, string>();
+    for (const row of snapshot.voucherRows) {
+      if (typeof row?.id === "string" && typeof row?.tally_guid === "string" && row.tally_guid) {
+        oldVoucherIdToGuid.set(row.id, row.tally_guid);
+      }
+    }
+
+    const restorableItemRows = snapshot.itemRows
+      .map(({ id, ...row }) => {
+        const tallyGuid = oldVoucherIdToGuid.get(row.voucher_id);
+        const restoredVoucherId = tallyGuid ? restoredVoucherIdMap.get(tallyGuid) : null;
+        if (!restoredVoucherId) return null;
+        return { ...row, voucher_id: restoredVoucherId };
+      })
+      .filter(Boolean);
+    const restorableEntryRows = snapshot.entryRows
+      .map(({ id, ...row }) => {
+        const tallyGuid = oldVoucherIdToGuid.get(row.voucher_id);
+        const restoredVoucherId = tallyGuid ? restoredVoucherIdMap.get(tallyGuid) : null;
+        if (!restoredVoucherId) return null;
+        return { ...row, voucher_id: restoredVoucherId };
+      })
+      .filter(Boolean);
+    const restorablePurchaseRows = snapshot.purchaseRows.map(({ id, ...row }) => row);
+
+    await insertInBatches("voucher_items", restorableItemRows, "Voucher item restore");
+    await insertInBatches("voucher_ledger_entries", restorableEntryRows, "Voucher ledger entry restore");
+    await upsertInBatches("purchases", restorablePurchaseRows, "company_id,tally_guid", "Purchase restore");
+  } catch (error: any) {
+    console.error(`[Sync] Voucher graph restore warning: ${error.message}`);
+  }
 }
 
 async function selectVouchersForReconciliation(companyId: string, syncMeta: SyncMeta) {
@@ -738,6 +874,9 @@ router.post("/", requireApiKey, async (req, res) => {
     column: (typeof SNAPSHOT_TIMESTAMP_COLUMNS)[keyof typeof SNAPSHOT_TIMESTAMP_COLUMNS];
   }> = [];
   const snapshotInsertedRows: Array<{ table: string; label: string; insertedIds: string[] }> = [];
+  let voucherRestoreContext: VoucherRestoreContext | null = null;
+  let voucherGraphNeedsRestore = false;
+  let companySyncStatePersisted = false;
 
   try {
     // 1. Upsert company
@@ -765,134 +904,159 @@ router.post("/", requireApiKey, async (req, res) => {
     // 3. Upsert vouchers + items + ledger entries in batches
     if (Array.isArray(vouchers)) {
       const validVouchers = vouchers.filter((v: any) => v?.tally_guid);
-      const voucherRows = validVouchers.map(({ items, ledger_entries, ...vData }: any) => ({
-        ...vData,
-        company_id: companyId,
-        synced_at: syncedAt,
-      }));
-
-      await upsertInBatches("vouchers", voucherRows, "company_id,tally_guid", "Vouchers");
-
       const purchaseVouchers = validVouchers.filter(
         (voucher: any) => isPurchaseVoucherType(voucher.voucher_type)
       );
-      let purchaseRows: any[] = [];
-      if (voucherRows.length) {
-        const voucherIdMap = await getVoucherIdMap(
-          companyId,
-          voucherRows.map((voucher: any) => voucher.tally_guid)
-        );
-        const voucherIds = [...voucherIdMap.values()];
-        const existingItemRows = await selectRowsByIn(
-          "voucher_items",
-          "voucher_id",
-          voucherIds,
-          "Voucher items"
-        );
-        const existingEntryRows = await selectRowsByIn(
-          "voucher_ledger_entries",
-          "voucher_id",
-          voucherIds,
-          "Voucher ledger entries"
-        );
-        const existingItemIds = existingItemRows
-          .map((row: any) => row.id)
-          .filter((id: unknown): id is string => typeof id === "string");
-        const existingEntryIds = existingEntryRows
-          .map((row: any) => row.id)
-          .filter((id: unknown): id is string => typeof id === "string");
+      const voucherGuids = validVouchers
+        .map((voucher: any) => voucher.tally_guid)
+        .filter((value: unknown): value is string => typeof value === "string" && value.length > 0);
+      const purchaseGuids = purchaseVouchers
+        .map((voucher: any) => voucher.tally_guid)
+        .filter((value: unknown): value is string => typeof value === "string" && value.length > 0);
+      const voucherSnapshot = await captureVoucherGraphSnapshot(companyId, voucherGuids, purchaseGuids);
+      voucherRestoreContext = {
+        companyId,
+        voucherGuids,
+        snapshot: voucherSnapshot,
+      };
+      voucherGraphNeedsRestore = voucherGuids.length > 0
+        || voucherSnapshot.voucherRows.length > 0
+        || voucherSnapshot.itemRows.length > 0
+        || voucherSnapshot.entryRows.length > 0
+        || voucherSnapshot.purchaseRows.length > 0;
 
-        const itemRows: any[] = [];
-        const entryRows: any[] = [];
+      try {
+        const voucherRows = validVouchers.map(({ items, ledger_entries, ...vData }: any) => ({
+          ...vData,
+          company_id: companyId,
+          synced_at: syncedAt,
+        }));
 
-        for (const voucher of validVouchers) {
-          const voucherId = voucherIdMap.get(voucher.tally_guid);
-          if (!voucherId) {
-            throw new Error(`Voucher id missing after upsert for ${voucher.tally_guid}`);
-          }
+        await upsertInBatches("vouchers", voucherRows, "company_id,tally_guid", "Vouchers");
 
-          for (const item of voucher.items || []) {
-            if (!item?.stock_item_name) continue;
-            itemRows.push({ ...item, voucher_id: voucherId });
-          }
-
-          for (const entry of voucher.ledger_entries || []) {
-            if (!entry?.ledger_name) continue;
-            const { bill_allocations, ...entryData } = entry;
-            entryRows.push({
-              ...entryData,
-              voucher_id: voucherId,
-              bill_allocations: bill_allocations || [],
-            });
-          }
-        }
-
-        purchaseRows = purchaseVouchers
-          .map((voucher: any) => ({
-            company_id: companyId,
-            voucher_id: voucherIdMap.get(voucher.tally_guid),
-            tally_guid: voucher.tally_guid,
-            voucher_number: voucher.voucher_number ?? null,
-            voucher_type: voucher.voucher_type ?? null,
-            date: voucher.date ?? null,
-            party_name: voucher.party_name ?? null,
-            amount: voucher.amount ?? 0,
-            narration: voucher.narration ?? null,
-            reference: voucher.reference ?? null,
-            is_cancelled: voucher.is_cancelled ?? false,
-            is_invoice: voucher.is_invoice ?? false,
-            synced_at: syncedAt,
-          }))
-          .filter((purchase: any) => typeof purchase.voucher_id === "string");
-
-        const itemInsert = await insertReturningIdsInBatches("voucher_items", itemRows, "Voucher items");
-        if (itemInsert.error) {
-          await rollbackInsertedRows("voucher_items", itemInsert.insertedIds, "Voucher items");
-          throw itemInsert.error;
-        }
-
-        const entryInsert = await insertReturningIdsInBatches(
-          "voucher_ledger_entries",
-          entryRows,
-          "Voucher ledger entries"
-        );
-        if (entryInsert.error) {
-          await rollbackInsertedRows("voucher_ledger_entries", entryInsert.insertedIds, "Voucher ledger entries");
-          await rollbackInsertedRows("voucher_items", itemInsert.insertedIds, "Voucher items");
-          throw entryInsert.error;
-        }
-
-        try {
-          await deleteByIn("voucher_items", "id", existingItemIds, "Voucher items previous rows");
-          await deleteByIn(
-            "voucher_ledger_entries",
-            "id",
-            existingEntryIds,
-            "Voucher ledger entries previous rows"
+        let purchaseRows: any[] = [];
+        if (voucherRows.length) {
+          const voucherIdMap = await getVoucherIdMap(
+            companyId,
+            voucherRows.map((voucher: any) => voucher.tally_guid)
           );
-        } catch (error: any) {
-          await rollbackInsertedRows("voucher_ledger_entries", entryInsert.insertedIds, "Voucher ledger entries");
-          await rollbackInsertedRows("voucher_items", itemInsert.insertedIds, "Voucher items");
-          await restoreRows("voucher_items", existingItemRows, "Voucher items");
-          await restoreRows("voucher_ledger_entries", existingEntryRows, "Voucher ledger entries");
-          throw error;
+          const voucherIds = [...voucherIdMap.values()];
+          const existingItemRows = await selectRowsByIn(
+            "voucher_items",
+            "voucher_id",
+            voucherIds,
+            "Voucher items"
+          );
+          const existingEntryRows = await selectRowsByIn(
+            "voucher_ledger_entries",
+            "voucher_id",
+            voucherIds,
+            "Voucher ledger entries"
+          );
+          const existingItemIds = existingItemRows
+            .map((row: any) => row.id)
+            .filter((id: unknown): id is string => typeof id === "string");
+          const existingEntryIds = existingEntryRows
+            .map((row: any) => row.id)
+            .filter((id: unknown): id is string => typeof id === "string");
+
+          const itemRows: any[] = [];
+          const entryRows: any[] = [];
+
+          for (const voucher of validVouchers) {
+            const voucherId = voucherIdMap.get(voucher.tally_guid);
+            if (!voucherId) {
+              throw new Error(`Voucher id missing after upsert for ${voucher.tally_guid}`);
+            }
+
+            for (const item of voucher.items || []) {
+              if (!item?.stock_item_name) continue;
+              itemRows.push({ ...item, voucher_id: voucherId });
+            }
+
+            for (const entry of voucher.ledger_entries || []) {
+              if (!entry?.ledger_name) continue;
+              const { bill_allocations, ...entryData } = entry;
+              entryRows.push({
+                ...entryData,
+                voucher_id: voucherId,
+                bill_allocations: bill_allocations || [],
+              });
+            }
+          }
+
+          purchaseRows = purchaseVouchers
+            .map((voucher: any) => ({
+              company_id: companyId,
+              voucher_id: voucherIdMap.get(voucher.tally_guid),
+              tally_guid: voucher.tally_guid,
+              voucher_number: voucher.voucher_number ?? null,
+              voucher_type: voucher.voucher_type ?? null,
+              date: voucher.date ?? null,
+              party_name: voucher.party_name ?? null,
+              amount: voucher.amount ?? 0,
+              narration: voucher.narration ?? null,
+              reference: voucher.reference ?? null,
+              is_cancelled: voucher.is_cancelled ?? false,
+              is_invoice: voucher.is_invoice ?? false,
+              synced_at: syncedAt,
+            }))
+            .filter((purchase: any) => typeof purchase.voucher_id === "string");
+
+          const itemInsert = await insertReturningIdsInBatches("voucher_items", itemRows, "Voucher items");
+          if (itemInsert.error) {
+            await rollbackInsertedRows("voucher_items", itemInsert.insertedIds, "Voucher items");
+            throw itemInsert.error;
+          }
+
+          const entryInsert = await insertReturningIdsInBatches(
+            "voucher_ledger_entries",
+            entryRows,
+            "Voucher ledger entries"
+          );
+          if (entryInsert.error) {
+            await rollbackInsertedRows("voucher_ledger_entries", entryInsert.insertedIds, "Voucher ledger entries");
+            await rollbackInsertedRows("voucher_items", itemInsert.insertedIds, "Voucher items");
+            throw entryInsert.error;
+          }
+
+          try {
+            await deleteByIn("voucher_items", "id", existingItemIds, "Voucher items previous rows");
+            await deleteByIn(
+              "voucher_ledger_entries",
+              "id",
+              existingEntryIds,
+              "Voucher ledger entries previous rows"
+            );
+          } catch (error: any) {
+            await rollbackInsertedRows("voucher_ledger_entries", entryInsert.insertedIds, "Voucher ledger entries");
+            await rollbackInsertedRows("voucher_items", itemInsert.insertedIds, "Voucher items");
+            await restoreRows("voucher_items", existingItemRows, "Voucher items");
+            await restoreRows("voucher_ledger_entries", existingEntryRows, "Voucher ledger entries");
+            throw error;
+          }
+
+          if (purchaseRows.length) {
+            await upsertInBatches("purchases", purchaseRows, "company_id,tally_guid", "Purchases");
+          }
         }
 
-        if (purchaseRows.length) {
-          await upsertInBatches("purchases", purchaseRows, "company_id,tally_guid", "Purchases");
-        }
+        await reconcileVoucherScope(
+          companyId,
+          validVouchers.map((voucher: any) => voucher.tally_guid),
+          normalizedSyncMeta,
+        );
+        await reconcilePurchaseScope(
+          companyId,
+          purchaseVouchers.map((voucher: any) => voucher.tally_guid),
+          normalizedSyncMeta,
+        );
+      } catch (error: any) {
+        await restoreVoucherGraphSnapshot(companyId, voucherGuids, voucherSnapshot);
+        voucherGraphNeedsRestore = false;
+        throw error;
       }
 
-      await reconcileVoucherScope(
-        companyId,
-        validVouchers.map((voucher: any) => voucher.tally_guid),
-        normalizedSyncMeta,
-      );
-      await reconcilePurchaseScope(
-        companyId,
-        purchaseVouchers.map((voucher: any) => voucher.tally_guid),
-        normalizedSyncMeta,
-      );
       records.purchases = purchaseVouchers.length;
     }
 
@@ -1011,11 +1175,10 @@ router.post("/", requireApiKey, async (req, res) => {
       .single();
 
     if (companySyncStateError) {
-      for (const snapshot of snapshotInsertedRows) {
-        await rollbackInsertedRows(snapshot.table, snapshot.insertedIds, snapshot.label);
-      }
       throw new Error(`Company sync state update failed: ${companySyncStateError.message}`);
     }
+    companySyncStatePersisted = true;
+    voucherGraphNeedsRestore = false;
 
     for (const snapshot of snapshotCleanupTasks) {
       const activeSyncedAt = updatedCompany?.[snapshot.column];
@@ -1053,6 +1216,21 @@ router.post("/", requireApiKey, async (req, res) => {
       records,
     });
   } catch (err: any) {
+    if (!companySyncStatePersisted) {
+      if (voucherGraphNeedsRestore && voucherRestoreContext) {
+        await restoreVoucherGraphSnapshot(
+          voucherRestoreContext.companyId,
+          voucherRestoreContext.voucherGuids,
+          voucherRestoreContext.snapshot,
+        );
+        voucherGraphNeedsRestore = false;
+      }
+
+      for (const snapshot of snapshotInsertedRows) {
+        await rollbackInsertedRows(snapshot.table, snapshot.insertedIds, snapshot.label);
+      }
+    }
+
     console.error("[Sync] Error:", err.message);
     res.status(500).json({ error: err.message });
   }
@@ -1108,16 +1286,16 @@ router.get("/party-ledger", requireApiKey, async (req, res) => {
     }
 
     // 2. Get all vouchers for this party
-    const { data: vouchers, error: vErr } = await supabase
-      .from("vouchers")
-      .select("*, voucher_items(*), voucher_ledger_entries(*)")
-      .eq("company_id", companyLookup.companyId)
-      .eq("party_name", party_name)
-      .order("date", { ascending: true });
-
-    if (vErr) {
-      throw new Error(`Voucher query failed: ${vErr.message}`);
-    }
+    const vouchers = await fetchAllPages("Party vouchers", (from, to) =>
+      supabase
+        .from("vouchers")
+        .select("*, voucher_items(*), voucher_ledger_entries(*)")
+        .eq("company_id", companyLookup.companyId)
+        .eq("party_name", party_name)
+        .order("date", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to)
+    );
 
     // 3. Get outstanding for this party
     let outstanding: any[] = [];
