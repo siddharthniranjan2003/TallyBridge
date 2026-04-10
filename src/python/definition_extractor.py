@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from datetime import datetime
 from functools import lru_cache
 
 import xmltodict
@@ -131,6 +132,8 @@ def _get_definition(section_name: str) -> dict:
 def _render_static_variable(variable: dict, request_context: dict | None = None) -> str:
     type_attr = f' TYPE="{_xml_escape(variable["type"])}"' if variable.get("type") else ""
     value = _resolve_template(variable.get("value", ""), request_context or {})
+    if variable.get("type") == "Date" and isinstance(value, str) and re.fullmatch(r"\d{8}", value):
+        value = datetime.strptime(value, "%Y%m%d").strftime("%d-%b-%Y")
     value_text = _xml_escape(str(value)) if variable.get("escape") else str(value)
     return f"<{variable['name']}{type_attr}>{value_text}</{variable['name']}>"
 

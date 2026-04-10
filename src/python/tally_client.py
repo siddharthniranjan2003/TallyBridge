@@ -396,6 +396,8 @@ def get_vouchers_legacy_data_request(from_date: str, to_date: str) -> str:
 
 def get_vouchers_collection_tdl(from_date: str, to_date: str) -> str:
     """Fetch vouchers using a collection-style inline TDL request."""
+    from_date_report = _format_report_date(from_date)
+    to_date_report = _format_report_date(to_date)
     return _fetch(
         f"""
     <ENVELOPE>
@@ -409,8 +411,8 @@ def get_vouchers_collection_tdl(from_date: str, to_date: str) -> str:
         <DESC>
           <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-            <SVFROMDATE>{from_date}</SVFROMDATE>
-            <SVTODATE>{to_date}</SVTODATE>
+            <SVFROMDATE TYPE="Date">{from_date_report}</SVFROMDATE>
+            <SVTODATE TYPE="Date">{to_date_report}</SVTODATE>
             <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
           <TDL>
@@ -422,7 +424,7 @@ def get_vouchers_collection_tdl(from_date: str, to_date: str) -> str:
               </COLLECTION>
               <SYSTEM TYPE="FORMULAE" NAME="NotCancelledVouchers">NOT $IsCancelled</SYSTEM>
               <SYSTEM TYPE="FORMULAE" NAME="NotOptionalVouchers">NOT $IsOptional</SYSTEM>
-              <SYSTEM TYPE="FORMULAE" NAME="DateRangeFilter">$Date &gt;= $$Date:SVFromDate AND $Date &lt;= $$Date:SVToDate</SYSTEM>
+              <SYSTEM TYPE="FORMULAE" NAME="DateRangeFilter">$Date &gt;= ##SVFromDate AND $Date &lt;= ##SVToDate</SYSTEM>
             </TDLMESSAGE>
           </TDL>
         </DESC>

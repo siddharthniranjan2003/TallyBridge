@@ -1492,6 +1492,26 @@ router.get("/balance-sheet", requireApiKey, async (req, res) => {
   res.json({ balance_sheet: data || [] });
 });
 
+router.get("/trial-balance", requireApiKey, async (req, res) => {
+  const companyLookup = await resolveCompanyLookup({
+    companyId: req.query.company_id,
+    companyGuid: req.query.company_guid,
+    companyName: req.query.company_name,
+  });
+  if (companyLookup.status !== 200) {
+    return res.status(companyLookup.status).json({ error: companyLookup.error });
+  }
+  if (!companyLookup.lastTrialBalanceSyncedAt) {
+    return res.json({ trial_balance: [] });
+  }
+  const { data } = await supabase
+    .from("trial_balance")
+    .select("*")
+    .eq("company_id", companyLookup.companyId)
+    .eq("synced_at", companyLookup.lastTrialBalanceSyncedAt);
+  res.json({ trial_balance: data || [] });
+});
+
 
 router.get("/alter-ids", requireApiKey, async (req, res) => {
   const companyLookup = await resolveCompanyLookup({
@@ -1505,7 +1525,11 @@ router.get("/alter-ids", requireApiKey, async (req, res) => {
 
   const { data } = await supabase
     .from("companies")
-    .select("alter_id, alt_vch_id, alt_mst_id")
+    .select(
+      "alter_id, alt_vch_id, alt_mst_id, last_synced_at, "
+      + "last_outstanding_synced_at, last_profit_loss_synced_at, "
+      + "last_balance_sheet_synced_at, last_trial_balance_synced_at"
+    )
     .eq("id", companyLookup.companyId)
     .single();
   res.json(data || {});

@@ -1,4 +1,5 @@
 import os
+import time
 
 import requests
 
@@ -10,9 +11,37 @@ TALLY_COMPANY_GUID = os.environ.get("TALLY_COMPANY_GUID", "").strip()
 
 def get_backend_timeout_seconds() -> int:
     try:
-        return max(60, int(os.environ.get("BACKEND_TIMEOUT_SECONDS", "120")))
+        return max(120, int(os.environ.get("BACKEND_TIMEOUT_SECONDS", "900")))
     except ValueError:
-        return 120
+        return 900
+
+
+def get_backend_post_verify_seconds() -> int:
+    try:
+        return max(30, int(os.environ.get("BACKEND_POST_VERIFY_SECONDS", "180")))
+    except ValueError:
+        return 180
+
+
+def get_backend_post_verify_poll_seconds() -> int:
+    try:
+        return max(5, int(os.environ.get("BACKEND_POST_VERIFY_POLL_SECONDS", "10")))
+    except ValueError:
+        return 10
+
+
+def _string_marker(value) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _alter_ids_match(expected: dict | None, remote: dict | None) -> bool:
+    if not expected or not remote:
+        return False
+
+    return all(
+        _string_marker(remote.get(key)) == _string_marker(expected.get(key))
+        for key in ("alter_id", "alt_vch_id", "alt_mst_id")
+    )
 
 
 def fetch_remote_alter_ids() -> tuple[dict | None, str]:
@@ -55,10 +84,46 @@ def fetch_remote_alter_ids() -> tuple[dict | None, str]:
         print(f"[Cloud] Alter-id lookup error: {e}")
         return None, "lookup_failed"
 
+
+def verify_remote_sync_completion(
+    expected_alter_ids: dict | None,
+    previous_last_synced_at: str | None = None,
+) -> bool:
+    deadline = time.time() + get_backend_post_verify_seconds()
+    poll_seconds = get_backend_post_verify_poll_seconds()
+    print("[Cloud] Backend response timed out - checking whether the sync completed anyway...")
+
+    while time.time() < deadline:
+        remote_state, remote_status = fetch_remote_alter_ids()
+        if remote_status == "ok" and remote_state:
+            remote_last_synced_at = _string_marker(remote_state.get("last_synced_at"))
+            has_newer_sync = (
+                bool(remote_last_synced_at)
+                and remote_last_synced_at != _string_marker(previous_last_synced_at)
+            )
+            if has_newer_sync and _alter_ids_match(expected_alter_ids, remote_state):
+                print(
+                    "[Cloud] Backend completed the sync after the client timed out; "
+                    "treating this push as successful."
+                )
+                return True
+        time.sleep(poll_seconds)
+
+    print("[Cloud] Backend did not confirm sync completion after the timeout window.")
+    return False
+
+
 def push(payload: dict) -> bool:
     if not BACKEND_URL:
-        print("[Cloud] No backend URL configured — skipping push")
+        print("[Cloud] No backend URL configured - skipping push")
         return True
+
+    previous_remote_state, previous_remote_status = fetch_remote_alter_ids()
+    previous_last_synced_at = (
+        _string_marker(previous_remote_state.get("last_synced_at"))
+        if previous_remote_status == "ok" and previous_remote_state
+        else None
+    )
 
     try:
         response = requests.post(
@@ -78,7 +143,7 @@ def push(payload: dict) -> bool:
                 return False
 
             records = data.get("records", {})
-            print(f"[Cloud] Sync successful!")
+            print("[Cloud] Sync successful!")
             for key, label in (
                 ("groups", "Groups"),
                 ("ledgers", "Ledgers"),
@@ -92,14 +157,23 @@ def push(payload: dict) -> bool:
                 if key in records:
                     print(f"[Cloud] {label}: {records.get(key, 0)}")
             return True
-        else:
-            print(f"[Cloud] Push failed: HTTP {response.status_code}")
-            print(f"[Cloud] Response: {response.text[:300]}")
-            return False
+
+        print(f"[Cloud] Push failed: HTTP {response.status_code}")
+        print(f"[Cloud] Response: {response.text[:300]}")
+        return False
 
     except requests.exceptions.ConnectionError:
         print(f"[Cloud] Cannot reach backend at {BACKEND_URL}")
-        print(f"[Cloud] Is the backend running?")
+        print("[Cloud] Is the backend running?")
+        return False
+    except requests.exceptions.ReadTimeout:
+        expected_alter_ids = payload.get("alter_ids") if isinstance(payload.get("alter_ids"), dict) else None
+        if verify_remote_sync_completion(expected_alter_ids, previous_last_synced_at):
+            return True
+        print(
+            f"[Cloud] Backend at {BACKEND_URL} did not respond within "
+            f"{get_backend_timeout_seconds()}s."
+        )
         return False
     except Exception as e:
         print(f"[Cloud] Push error: {e}")

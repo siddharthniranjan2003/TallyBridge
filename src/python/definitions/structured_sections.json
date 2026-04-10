@@ -374,7 +374,8 @@
       ],
       "filters": [
         "NotCancelledVouchers",
-        "NotOptionalVouchers"
+        "NotOptionalVouchers",
+        "DateRangeFilter"
       ],
       "system_formulae": [
         {
@@ -384,15 +385,21 @@
         {
           "name": "NotOptionalVouchers",
           "expression": "NOT $IsOptional"
+        },
+        {
+          "name": "DateRangeFilter",
+          "expression": "$Date >= ##SVFromDate AND $Date <= ##SVToDate"
         }
       ],
       "static_variables": [
         {
           "name": "SVFROMDATE",
+          "type": "Date",
           "value": "{{from_date}}"
         },
         {
           "name": "SVTODATE",
+          "type": "Date",
           "value": "{{to_date}}"
         }
       ]
