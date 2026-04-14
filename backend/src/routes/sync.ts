@@ -566,6 +566,400 @@ function isPurchaseVoucherType(value: unknown) {
   return normalised.includes("purchase") && !normalised.includes("order");
 }
 
+const INVENTORY_TRIGGER_META = {
+  A: { triggerWord: "INERT", color: "orange", priority: 4 },
+  B: { triggerWord: "ONSET", color: "green", priority: 5 },
+  C: { triggerWord: "GHOST", color: "red", priority: 2 },
+  D: { triggerWord: "BLOAT", color: "red", priority: 3 },
+  E: { triggerWord: "BLAZE", color: "green", priority: 7 },
+  F: { triggerWord: "TAPER", color: "orange", priority: 6 },
+  G: { triggerWord: "SURGE", color: "green", priority: 4 },
+  H: { triggerWord: "DRAIN", color: "orange", priority: 8 },
+  I: { triggerWord: "STARVE", color: "green", priority: 1 },
+} as const;
+
+type InventoryScenarioCode = keyof typeof INVENTORY_TRIGGER_META;
+type InventoryTriggerWord = (typeof INVENTORY_TRIGGER_META)[InventoryScenarioCode]["triggerWord"];
+type ReorderQuantityStatus =
+  | "not_needed"
+  | "computed"
+  | "manual_rate_required";
+
+type InventoryIntelligenceItem = {
+  stock_item_name: string;
+  unit: string | null;
+  scenario: InventoryScenarioCode;
+  trigger_word: InventoryTriggerWord;
+  color: string;
+  priority: number;
+  avg_sale_6m: number;
+  last_month_purchase: number;
+  closing_stock_value: number;
+  reorder_level: number;
+  reorder_at: number;
+  current_quantity: number;
+  reorder_quantity: number | null;
+  reorder_quantity_status: ReorderQuantityStatus;
+  needs_reorder: boolean;
+};
+
+const INVENTORY_TRIGGER_WORDS = new Set<InventoryTriggerWord>(
+  Object.values(INVENTORY_TRIGGER_META).map((entry) => entry.triggerWord),
+);
+const INVENTORY_TRIGGER_TO_SCENARIO = Object.fromEntries(
+  Object.entries(INVENTORY_TRIGGER_META).map(([scenario, entry]) => [entry.triggerWord, scenario]),
+) as Record<InventoryTriggerWord, InventoryScenarioCode>;
+
+function isIsoDateString(value: string) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function shiftIsoDate(value: string, days: number) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) {
+    throw new Error(`Invalid ISO date: ${value}`);
+  }
+
+  const [, yearRaw, monthRaw, dayRaw] = match;
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  const day = Number(dayRaw);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function toMoney(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return 0;
+  }
+  return Number(numeric.toFixed(2));
+}
+
+function toPaise(value: unknown) {
+  return Math.round(toMoney(value) * 100);
+}
+
+function parseThresholdValue(value: unknown, fallback = 500_000) {
+  const normalized = normalizeTrimmedString(value);
+  if (!normalized) {
+    return fallback;
+  }
+
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error("threshold must be a non-negative number");
+  }
+
+  return parsed;
+}
+
+function parseLimitValue(value: unknown) {
+  const normalized = normalizeTrimmedString(value);
+  if (!normalized) {
+    return null;
+  }
+
+  const parsed = Number(normalized);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error("limit must be a positive integer");
+  }
+
+  return parsed;
+}
+
+function normalizeTriggerWord(value: unknown) {
+  const normalized = normalizeTrimmedString(value);
+  if (!normalized) {
+    return null;
+  }
+
+  const upper = normalized.toUpperCase() as InventoryTriggerWord;
+  return INVENTORY_TRIGGER_WORDS.has(upper) ? upper : null;
+}
+
+async function getLatestCompanyVoucherDate(companyId: string) {
+  const { data, error } = await supabase
+    .from("vouchers")
+    .select("date, id")
+    .eq("company_id", companyId)
+    .not("date", "is", null)
+    .order("date", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Latest voucher date lookup failed: ${error.message}`);
+  }
+
+  const latestDate = normalizeTrimmedString(data?.date);
+  return latestDate && isIsoDateString(latestDate) ? latestDate : null;
+}
+
+async function aggregateVoucherItemAmountsByName(voucherIds: string[], label: string) {
+  const amountsByItem = new Map<string, number>();
+  if (!voucherIds.length) {
+    return amountsByItem;
+  }
+
+  for (const chunk of chunkArray(voucherIds, 100)) {
+    const rows = await fetchAllPages(`${label} rows`, (from, to) =>
+      supabase
+        .from("voucher_items")
+        .select("id, stock_item_name, amount")
+        .in("voucher_id", chunk)
+        .order("id", { ascending: true })
+        .range(from, to),
+    );
+
+    for (const row of rows) {
+      const stockItemName = normalizeTrimmedString((row as any).stock_item_name);
+      if (!stockItemName) {
+        continue;
+      }
+
+      const amount = Math.abs(Number((row as any).amount) || 0);
+      amountsByItem.set(stockItemName, (amountsByItem.get(stockItemName) ?? 0) + amount);
+    }
+  }
+
+  return amountsByItem;
+}
+
+function classifyInventoryScenario(
+  avgSale6mPaise: number,
+  lastMonthPurchasePaise: number,
+  closingStockPaise: number,
+): InventoryScenarioCode | null {
+  if (avgSale6mPaise === 0) {
+    if (lastMonthPurchasePaise === 0) {
+      return closingStockPaise > 0 ? "A" : null;
+    }
+    if (lastMonthPurchasePaise === closingStockPaise) {
+      return "B";
+    }
+    return closingStockPaise < lastMonthPurchasePaise ? "C" : "D";
+  }
+
+  if (closingStockPaise === 0) {
+    if (lastMonthPurchasePaise === avgSale6mPaise) {
+      return "E";
+    }
+    return lastMonthPurchasePaise < avgSale6mPaise ? "F" : "G";
+  }
+
+  if (lastMonthPurchasePaise === 0) {
+    return closingStockPaise <= avgSale6mPaise ? "I" : "H";
+  }
+
+  return null;
+}
+
+async function buildInventoryIntelligenceReport(
+  {
+    companyId,
+    companyGuid,
+    companyName,
+    asOfDateInput,
+    thresholdInput,
+    limitInput,
+    triggerWordFilter,
+  }: {
+    companyId: string;
+    companyGuid: string | null;
+    companyName: string | null;
+    asOfDateInput: unknown;
+    thresholdInput: unknown;
+    limitInput: unknown;
+    triggerWordFilter?: InventoryTriggerWord | null;
+  },
+) {
+  const requestedAsOfDate = normalizeTrimmedString(asOfDateInput);
+  if (requestedAsOfDate && !isIsoDateString(requestedAsOfDate)) {
+    throw new Error("as_of_date must be in YYYY-MM-DD format");
+  }
+
+  const asOfDate = requestedAsOfDate ?? await getLatestCompanyVoucherDate(companyId);
+  if (!asOfDate) {
+    throw new Error("No voucher date available for this company");
+  }
+
+  const threshold = parseThresholdValue(thresholdInput);
+  const limit = parseLimitValue(limitInput);
+  const thresholdPaise = Math.round(threshold * 100);
+
+  const saleWindowFrom = shiftIsoDate(asOfDate, -179);
+  const saleWindowTo = asOfDate;
+  const purchaseWindowFrom = shiftIsoDate(asOfDate, -29);
+  const purchaseWindowTo = asOfDate;
+
+  const saleVoucherRows = await fetchAllPages("Inventory GST SALE vouchers", (from, to) =>
+    supabase
+      .from("vouchers")
+      .select("id")
+      .eq("company_id", companyId)
+      .eq("voucher_type", "GST SALE")
+      .eq("is_cancelled", false)
+      .gte("date", saleWindowFrom)
+      .lte("date", saleWindowTo)
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+
+  const purchaseVoucherRows = await fetchAllPages("Inventory purchase vouchers", (from, to) =>
+    supabase
+      .from("vouchers")
+      .select("id, voucher_type")
+      .eq("company_id", companyId)
+      .eq("is_cancelled", false)
+      .gte("date", purchaseWindowFrom)
+      .lte("date", purchaseWindowTo)
+      .order("id", { ascending: true })
+      .range(from, to),
+  );
+
+  const purchaseVoucherIds = purchaseVoucherRows
+    .filter((row: any) => typeof row?.id === "string" && isPurchaseVoucherType(row?.voucher_type))
+    .map((row: any) => row.id as string);
+
+  const [saleAmountsByItem, purchaseAmountsByItem, stockItems] = await Promise.all([
+    aggregateVoucherItemAmountsByName(
+      saleVoucherRows
+        .map((row: any) => row?.id)
+        .filter((value: unknown): value is string => typeof value === "string" && value.length > 0),
+      "Inventory GST SALE voucher items",
+    ),
+    aggregateVoucherItemAmountsByName(purchaseVoucherIds, "Inventory purchase voucher items"),
+    fetchAllPages("Inventory stock items", (from, to) =>
+      supabase
+        .from("stock_items")
+        .select("id, name, unit, closing_qty, closing_value, rate")
+        .eq("company_id", companyId)
+        .order("name", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to),
+    ),
+  ]);
+
+  const allClassifiedItems: InventoryIntelligenceItem[] = [];
+  let itemsAboveThreshold = 0;
+  let unclassifiedCount = 0;
+
+  for (const stockItem of stockItems) {
+    const stockItemName = normalizeTrimmedString((stockItem as any).name);
+    if (!stockItemName) {
+      continue;
+    }
+
+    const totalSaleAmountRaw = saleAmountsByItem.get(stockItemName) ?? 0;
+    const avgSale6mRaw = totalSaleAmountRaw / 6;
+    const lastMonthPurchaseRaw = purchaseAmountsByItem.get(stockItemName) ?? 0;
+    const closingQuantityRaw = Number((stockItem as any).closing_qty) || 0;
+    const closingStockRaw = Math.abs(Number((stockItem as any).closing_value) || 0);
+    const avgSale6mPaise = toPaise(avgSale6mRaw);
+    const lastMonthPurchasePaise = toPaise(lastMonthPurchaseRaw);
+    const closingStockPaise = toPaise(closingStockRaw);
+
+    if (
+      avgSale6mPaise < thresholdPaise
+      && lastMonthPurchasePaise < thresholdPaise
+      && closingStockPaise < thresholdPaise
+    ) {
+      continue;
+    }
+
+    itemsAboveThreshold += 1;
+
+    const scenario = classifyInventoryScenario(
+      avgSale6mPaise,
+      lastMonthPurchasePaise,
+      closingStockPaise,
+    );
+    if (!scenario) {
+      unclassifiedCount += 1;
+      continue;
+    }
+
+    const meta = INVENTORY_TRIGGER_META[scenario];
+    const reorderLevel = avgSale6mRaw * 2;
+    const reorderAt = reorderLevel;
+    const reorderValueGap = Math.max(reorderLevel - closingStockRaw, 0);
+    const configuredRate = Math.abs(Number((stockItem as any).rate) || 0);
+    const fallbackRate = closingQuantityRaw > 0 && closingStockRaw > 0
+      ? closingStockRaw / closingQuantityRaw
+      : 0;
+    let reorderQuantity: number | null = 0;
+    let reorderQuantityStatus: ReorderQuantityStatus = "not_needed";
+
+    if (toPaise(reorderValueGap) > 0) {
+      if (configuredRate > 0) {
+        reorderQuantity = Math.ceil(reorderValueGap / configuredRate);
+        reorderQuantityStatus = "computed";
+      } else if (fallbackRate > 0) {
+        reorderQuantity = Math.ceil(reorderValueGap / fallbackRate);
+        reorderQuantityStatus = "computed";
+      } else {
+        reorderQuantity = null;
+        reorderQuantityStatus = "manual_rate_required";
+      }
+    }
+
+    allClassifiedItems.push({
+      stock_item_name: stockItemName,
+      unit: normalizeTrimmedString((stockItem as any).unit),
+      scenario,
+      trigger_word: meta.triggerWord,
+      color: meta.color,
+      priority: meta.priority,
+      avg_sale_6m: toMoney(avgSale6mRaw),
+      last_month_purchase: toMoney(lastMonthPurchaseRaw),
+      closing_stock_value: toMoney(closingStockRaw),
+      reorder_level: toMoney(reorderLevel),
+      reorder_at: toMoney(reorderAt),
+      current_quantity: toMoney(closingQuantityRaw),
+      reorder_quantity: reorderQuantity,
+      reorder_quantity_status: reorderQuantityStatus,
+      needs_reorder: closingStockPaise <= toPaise(reorderAt),
+    });
+  }
+
+  allClassifiedItems.sort((left, right) => {
+    if (left.priority !== right.priority) {
+      return left.priority - right.priority;
+    }
+    return left.stock_item_name.localeCompare(right.stock_item_name);
+  });
+
+  const filteredItems = triggerWordFilter
+    ? allClassifiedItems.filter((item) => item.trigger_word === triggerWordFilter)
+    : allClassifiedItems;
+  const limitedItems = limit ? filteredItems.slice(0, limit) : filteredItems;
+
+  return {
+    company_id: companyId,
+    company_guid: companyGuid,
+    company_name: companyName,
+    trigger_word_filter: triggerWordFilter ?? null,
+    as_of_date: asOfDate,
+    sale_window_from: saleWindowFrom,
+    sale_window_to: saleWindowTo,
+    purchase_window_from: purchaseWindowFrom,
+    purchase_window_to: purchaseWindowTo,
+    threshold,
+    limit,
+    total_items_scanned: stockItems.length,
+    items_above_threshold: itemsAboveThreshold,
+    total_classified_count: allClassifiedItems.length,
+    classified_count: filteredItems.length,
+    unclassified_count: unclassifiedCount,
+    needs_reorder_count: filteredItems.filter((item) => item.needs_reorder).length,
+    returned_count: limitedItems.length,
+    items: limitedItems,
+  };
+}
+
 async function selectPurchasesForReconciliation(companyId: string, syncMeta: SyncMeta) {
   let fromIso: string | null = null;
   let toIso: string | null = null;
@@ -1598,117 +1992,77 @@ router.get("/parties", requireApiKey, async (req, res) => {
 });
 
 // ── GET /api/sync/reorder-levels ────────────────────────────────────────────
-// Returns 90-day purchase-volume reorder trigger for all stock items.
 // Auto-detects the single company in Supabase — no company param required.
-// Formula: reorder_trigger = SUM(purchase qty in last 90 days), no averaging.
-// Sorted: needs_reorder=true first, then alphabetical.
-//
-// Optional query param:
-//   as_of_date  YYYY-MM-DD  end of 90-day window (default: 2019-03-31)
 
+// Returns the direct amount-based inventory intelligence report.
 router.get("/reorder-levels", requireApiKey, async (req, res) => {
   try {
-    // Auto-detect the single company
-    const { data: companyRow, error: companyErr } = await supabase
-      .from("companies")
-      .select("id")
-      .limit(1)
-      .single();
-
-    if (companyErr || !companyRow) {
-      return res.status(404).json({ error: "No company found in database" });
+    const companyLookup = await resolveCompanyLookup({
+      companyId: req.query.company_id,
+      companyGuid: req.query.company_guid,
+      companyName: req.query.company_name,
+    });
+    if (companyLookup.status !== 200) {
+      return res.status(companyLookup.status).json({ error: companyLookup.error });
     }
 
-    const companyId: string = companyRow.id;
-
-    // Parse as_of_date — default 2019-03-31 (FY end for K.V. ENTERPRISES 18-19)
-    const DEFAULT_AS_OF = "2019-03-31";
-    const rawDate = String(req.query.as_of_date ?? "").trim();
-    const asOfDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? rawDate : DEFAULT_AS_OF;
-
-    // Compute inclusive 90-day window: subtract 89 days so both ends count
-    const toDate = new Date(asOfDate);
-    const fromDate = new Date(asOfDate);
-    fromDate.setDate(toDate.getDate() - 89);
-    const fromIso = fromDate.toISOString().slice(0, 10);
-    const toIso = toDate.toISOString().slice(0, 10);
-
-    // Step 1: fetch purchase voucher_ids in window (non-cancelled only)
-    const purchaseRows = await fetchAllPages("Reorder purchases", (from, to) =>
-      supabase
-        .from("purchases")
-        .select("voucher_id")
-        .eq("company_id", companyId)
-        .eq("is_cancelled", false)
-        .gte("date", fromIso)
-        .lte("date", toIso)
-        .order("id", { ascending: true })
-        .range(from, to)
-    );
-
-    const voucherIds = [
-      ...new Set(purchaseRows.map((p: any) => p.voucher_id).filter(Boolean)),
-    ];
-
-    // Step 2: fetch voucher_items and aggregate qty per stock item name
-    const qtyByItem = new Map<string, number>();
-    if (voucherIds.length > 0) {
-      const lineItems = await selectRowsByIn(
-        "voucher_items",
-        "voucher_id",
-        voucherIds,
-        "Reorder voucher items"
-      );
-      for (const item of lineItems) {
-        const name: string = item.stock_item_name;
-        if (!name || !name.trim()) continue;          // skip blank names
-        const qty = Number(item.quantity) || 0;
-        if (qty <= 0) continue;                       // skip returns / zero-qty rows
-        qtyByItem.set(name, (qtyByItem.get(name) ?? 0) + qty);
-      }
-    }
-
-    // Step 3: fetch all stock items for the company
-    const stockItems = await fetchAllPages("Reorder stock items", (from, to) =>
-      supabase
-        .from("stock_items")
-        .select("name, unit, closing_qty")
-        .eq("company_id", companyId)
-        .order("name", { ascending: true })
-        .range(from, to)
-    );
-
-    // Step 4: merge — reorder_trigger = raw 90-day purchase total
-    const result = stockItems.map((s: any) => {
-      const totalQtyPurchased = qtyByItem.get(s.name) ?? 0;
-      const reorderTrigger = totalQtyPurchased;
-      const closingQty = Number(s.closing_qty) || 0;
-      return {
-        stock_item_name: s.name,
-        unit: s.unit ?? null,
-        total_qty_purchased: totalQtyPurchased,
-        reorder_trigger: reorderTrigger,
-        closing_qty: closingQty,
-        needs_reorder: reorderTrigger > 0 && closingQty <= reorderTrigger,
-      };
+    const report = await buildInventoryIntelligenceReport({
+      companyId: companyLookup.companyId,
+      companyGuid: companyLookup.companyGuid,
+      companyName: companyLookup.companyName,
+      asOfDateInput: req.query.as_of_date,
+      thresholdInput: req.query.threshold,
+      limitInput: req.query.limit,
     });
 
-    // Sort: needs_reorder first, then alphabetical
-    result.sort((a: any, b: any) => {
-      if (a.needs_reorder !== b.needs_reorder) return a.needs_reorder ? -1 : 1;
-      return a.stock_item_name.localeCompare(b.stock_item_name);
+    return res.json(report);
+
+
+    // Parse as_of_date — default 2019-03-31 (FY end for K.V. ENTERPRISES 18-19)
+
+
+
+  } catch (err: any) {
+    console.error("[ReorderLevels] Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get("/reorder-levels/:triggerWord", requireApiKey, async (req, res) => {
+  try {
+    const triggerWord = normalizeTriggerWord(req.params.triggerWord);
+    if (!triggerWord) {
+      return res.status(400).json({
+        error: `triggerWord must be one of: ${[...INVENTORY_TRIGGER_WORDS].join(", ")}`,
+      });
+    }
+
+    const companyLookup = await resolveCompanyLookup({
+      companyId: req.query.company_id,
+      companyGuid: req.query.company_guid,
+      companyName: req.query.company_name,
+    });
+    if (companyLookup.status !== 200) {
+      return res.status(companyLookup.status).json({ error: companyLookup.error });
+    }
+
+    const report = await buildInventoryIntelligenceReport({
+      companyId: companyLookup.companyId,
+      companyGuid: companyLookup.companyGuid,
+      companyName: companyLookup.companyName,
+      asOfDateInput: req.query.as_of_date,
+      thresholdInput: req.query.threshold,
+      limitInput: req.query.limit,
+      triggerWordFilter: triggerWord,
     });
 
     res.json({
-      as_of_date: asOfDate,
-      window_from: fromIso,
-      window_to: toIso,
-      total_items: result.length,
-      needs_reorder_count: result.filter((r: any) => r.needs_reorder).length,
-      items: result,
+      ...report,
+      trigger_word_filter: triggerWord,
+      scenario: INVENTORY_TRIGGER_TO_SCENARIO[triggerWord],
     });
   } catch (err: any) {
-    console.error("[ReorderLevels] Error:", err.message);
+    console.error("[ReorderLevels] Trigger Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
