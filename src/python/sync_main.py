@@ -948,28 +948,68 @@ def fetch_company_info_with_fallback() -> tuple[dict, str, str]:
         if company_info:
             books_from = company_info.get("books_from")
             books_to = company_info.get("books_to")
-            if books_from and not books_to:
-                books_from_date = parse_iso_date(books_from)
-                if books_from_date:
+            books_from_date = parse_iso_date(books_from) if books_from else None
+            books_to_date = parse_iso_date(books_to) if books_to else None
+            last_voucher_date = None
+
+            if books_from_date:
+                try:
+                    live_alter_ids = parse_alter_ids(get_company_alter_ids())
+                    last_voucher_date = parse_iso_date(
+                        live_alter_ids.get("last_voucher_date", "")
+                    )
+                except Exception as alter_error:
+                    print(
+                        f"[Tally] Could not read last voucher date for range detection "
+                        f"({alter_error})"
+                    )
+
+                inferred_books_to = None
+                if not books_to_date:
                     try:
-                        books_to = (
+                        inferred_books_to = (
                             books_from_date.replace(year=books_from_date.year + 1)
                             - timedelta(days=1)
-                        ).isoformat()
-                        company_info["books_to"] = books_to
+                        )
                     except ValueError:
-                        books_to = None
+                        inferred_books_to = None
 
-            if books_from:
-                from_date = fy_date_from_iso(books_from)
-                effective_to = min(parse_iso_date(books_to) or date.today(), date.today())
+                candidate_end_dates = [
+                    candidate
+                    for candidate in (
+                        books_to_date,
+                        inferred_books_to,
+                        last_voucher_date,
+                    )
+                    if candidate and candidate >= books_from_date
+                ]
+                effective_to = min(
+                    max(candidate_end_dates) if candidate_end_dates else date.today(),
+                    date.today(),
+                )
+
+                from_date = format_tally_compact(books_from_date)
                 to_date = format_tally_compact(effective_to)
-                if books_to:
+
+                if not books_to_date and last_voucher_date and last_voucher_date > (inferred_books_to or books_from_date):
+                    company_info["books_to"] = effective_to.isoformat()
+                    print(
+                        f"[Tally] Company books end was not exposed; using last voucher date "
+                        f"{effective_to.isoformat()} for full sync coverage."
+                    )
+                elif books_to_date and last_voucher_date and last_voucher_date > books_to_date:
+                    company_info["books_to"] = effective_to.isoformat()
+                    print(
+                        f"[Tally] Company books end {books_to} lagged behind the latest "
+                        f"voucher date {last_voucher_date.isoformat()}; syncing through "
+                        f"{effective_to.isoformat()}."
+                    )
+                elif books_to_date:
                     print(f"[Tally] Company FY: {books_from} to {books_to}")
                 else:
                     print(
-                        f"[Tally] Company FY starts {books_from}; end date not exposed by Tally, "
-                        f"syncing through {effective_to.isoformat()}"
+                        f"[Tally] Company FY starts {books_from}; syncing through "
+                        f"{effective_to.isoformat()}."
                     )
             else:
                 print("[Tally] Could not read FY dates - using default April-March")
