@@ -1150,13 +1150,15 @@ def main() -> int:
         try:
             print("[Tally] Checking for changes...")
             current_ids = parse_alter_ids(get_company_alter_ids())
-            force_full_sync = FORCE_FULL_SYNC or manual_range_override
+            force_full_sync = FORCE_FULL_SYNC
 
             if force_full_sync:
-                if manual_range_override:
-                    print("[TallyBridge] Forcing full sync because a manual date range was configured.")
-                else:
-                    print("[TallyBridge] Forcing full sync because this company has not synced from this connector yet.")
+                print("[TallyBridge] Forcing full sync because this company has not synced from this connector yet.")
+            elif manual_range_override:
+                print(
+                    "[TallyBridge] Manual date range override will scope this run, "
+                    "but it will not force heartbeat runs into full sync mode."
+                )
 
             remote_alter_ids, remote_lookup_status = fetch_remote_alter_ids()
             if remote_lookup_status == "company_not_found":

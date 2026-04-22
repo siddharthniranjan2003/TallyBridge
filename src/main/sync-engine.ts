@@ -23,9 +23,8 @@ export class SyncEngine {
 
   start() {
     console.log("[SyncEngine] Starting...");
-    // Run one sync immediately, then schedule
+    // Run one sync immediately. Later runs are scheduled after each sync completes.
     setTimeout(() => this.runAllCompanies(), 3000);
-    this.scheduleNext();
   }
 
   stop() {
@@ -49,17 +48,22 @@ export class SyncEngine {
       this.emit("sync-log", { company: "System", line: "Sync already in progress..." });
       return;
     }
+    this.stop();
     await this.runAllCompanies();
   }
 
-  private scheduleNext() {
+  private scheduleNext(delayMs?: number) {
     const minutes = store.get("syncIntervalMinutes", 5);
     if (this.timer) {
-      clearInterval(this.timer);
+      clearTimeout(this.timer);
     }
-    this.timer = setInterval(
-      () => this.runAllCompanies(),
-      minutes * 60 * 1000
+    const intervalMs = delayMs ?? minutes * 60 * 1000;
+    this.timer = setTimeout(
+      () => {
+        this.timer = null;
+        void this.runAllCompanies();
+      },
+      intervalMs
     );
     console.log(`[SyncEngine] Scheduled every ${minutes} minutes`);
   }
@@ -96,6 +100,7 @@ export class SyncEngine {
       this.emit("sync-complete", { at: new Date().toISOString() });
       // Refresh company list in UI
       this.emit("companies-updated", store.get("companies"));
+      this.scheduleNext();
     }
   }
 
