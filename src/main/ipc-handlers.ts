@@ -395,6 +395,53 @@ function parseTallyCompanyDateRanges(decodedXml: string): TallyCompanyDateRange[
   return companies;
 }
 
+function extractTallyLineErrors(decodedXml: string) {
+  return Array.from(decodedXml.matchAll(/<LINEERROR[^>]*>([\s\S]*?)<\/LINEERROR>/gi))
+    .map((match) => decodeXmlEntities(match[1]?.trim() || ""))
+    .filter(Boolean);
+}
+
+function extractTallyStatusError(decodedXml: string) {
+  const statusMatch = /<STATUS[^>]*>\s*0\s*<\/STATUS>/i.exec(decodedXml);
+  if (!statusMatch) {
+    return null;
+  }
+
+  const dataMatch = /<DATA[^>]*>([\s\S]*?)<\/DATA>/i.exec(decodedXml);
+  if (!dataMatch?.[1]) {
+    return "Tally returned an unknown error.";
+  }
+
+  const cleaned = decodeXmlEntities(dataMatch[1])
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return cleaned || "Tally returned an unknown error.";
+}
+
+function getTallyResponseError(decodedXml: string) {
+  const lineErrors = extractTallyLineErrors(decodedXml);
+  if (lineErrors.length) {
+    return lineErrors.join(" | ");
+  }
+
+  return extractTallyStatusError(decodedXml);
+}
+
+function assertTallyXmlSuccess(decodedXml: string) {
+  const error = getTallyResponseError(decodedXml);
+  if (error) {
+    throw new Error(error);
+  }
+
+  return decodedXml;
+}
+
+function buildTallyCompanyCollectionXml(id: string, fetchFields: string) {
+  return `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>${id}</ID></HEADER><BODY><DESC><STATICVARIABLES><SVFROMDATE TYPE="Date">01-Jan-1970</SVFROMDATE><SVTODATE TYPE="Date">01-Jan-1970</SVTODATE><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="${id}" ISMODIFY="No"><TYPE>Company</TYPE><FETCH>${fetchFields}</FETCH><FILTERS>GroupFilter</FILTERS></COLLECTION><SYSTEM TYPE="FORMULAE" NAME="GroupFilter">$isaggregate = "No"</SYSTEM></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+}
+
 async function postTallyXml(tallyUrl: string, xml: string, responseType: "text" | "arraybuffer" = "text") {
   const xmlBuf = Buffer.from(xml, "utf8");
   return axios.post(tallyUrl, xmlBuf, {
@@ -406,6 +453,46 @@ async function postTallyXml(tallyUrl: string, xml: string, responseType: "text" 
     responseType,
     transformResponse: response => response,
   });
+}
+
+async function postAndDecodeTallyXml(tallyUrl: string, xml: string) {
+  const response = await postTallyXml(tallyUrl, xml, "arraybuffer");
+  return decodeTallyResponse(
+    Buffer.from(response.data),
+    String(response.headers["content-type"] || ""),
+  );
+}
+
+async function fetchTallyCompanies(tallyUrl: string) {
+  const decoded = await postAndDecodeTallyXml(
+    tallyUrl,
+    buildTallyCompanyCollectionXml("CompanyList", "NAME,GUID,BASICCOMPANYFORMALNAME"),
+  );
+
+  assertTallyXmlSuccess(decoded);
+  return parseTallyCompanies(decoded);
+}
+
+async function fetchTallyCompanyDateRanges(tallyUrl: string) {
+  const decoded = await postAndDecodeTallyXml(
+    tallyUrl,
+    buildTallyCompanyCollectionXml("CompanyDateRanges", "NAME,GUID,BOOKSFROM,BOOKSTO"),
+  );
+
+  assertTallyXmlSuccess(decoded);
+  return parseTallyCompanyDateRanges(decoded);
+}
+
+function doesTallyCompanyMatchSelection(
+  company: TallyCompanyOption,
+  selection: TallyCompanySelection,
+) {
+  const selectionGuid = selection.guid?.trim();
+  if (selectionGuid && company.guid?.trim()) {
+    return company.guid.trim() === selectionGuid;
+  }
+
+  return company.name.trim().toLowerCase() === selection.name.trim().toLowerCase();
 }
 
 export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
@@ -452,11 +539,15 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
     // Verify Tally is reachable
     try {
       const tallyUrl = store.get("tallyUrl");
-      const testXml = `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
-        <BODY><EXPORTDATA><REQUESTDESC>
-        <REPORTNAME>List of Companies</REPORTNAME>
-        </REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
-      await postTallyXml(tallyUrl, testXml);
+      const companies = await fetchTallyCompanies(tallyUrl);
+      const companyStillExists = companies.some((company) => doesTallyCompanyMatchSelection(company, selection));
+      if (!companyStillExists) {
+        return {
+          success: false,
+          error: "The selected company is no longer available in TallyPrime. Refresh the company list and try again.",
+        };
+      }
+
       const company = addCompany({
         name,
         guid: guid || undefined,
@@ -464,11 +555,12 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
       });
       window.webContents.send("companies-updated", store.get("companies"));
       return { success: true, company };
-    } catch {
+    } catch (error: any) {
       return {
         success: false,
         error:
-          "Cannot connect to TallyPrime. Make sure it is open and HTTP server is enabled on port 9000.",
+          error?.message
+          || "Cannot connect to TallyPrime. Make sure it is open and HTTP server is enabled on port 9000.",
       };
     }
   });
@@ -487,14 +579,10 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
   ipcMain.handle("check-tally", async () => {
     try {
       const tallyUrl = store.get("tallyUrl");
-      const testXml = `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
-      <BODY><EXPORTDATA><REQUESTDESC>
-      <REPORTNAME>List of Companies</REPORTNAME>
-      </REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
-      await postTallyXml(tallyUrl, testXml);
+      await fetchTallyCompanies(tallyUrl);
       return { connected: true };
-    } catch {
-      return { connected: false };
+    } catch (error: any) {
+      return { connected: false, error: error?.message || "Could not connect to TallyPrime." };
     }
   });
   ipcMain.handle("check-tally-capabilities", async () => {
@@ -505,11 +593,7 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
     let xmlConnected = false;
     let xmlError: string | null = null;
     try {
-      const testXml = `<ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
-      <BODY><EXPORTDATA><REQUESTDESC>
-      <REPORTNAME>List of Companies</REPORTNAME>
-      </REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
-      await postTallyXml(tallyUrl, testXml);
+      await fetchTallyCompanies(tallyUrl);
       xmlConnected = true;
     } catch (error: any) {
       xmlError = error?.message || "Could not connect to Tally XML";
@@ -546,33 +630,19 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
   ipcMain.handle("get-tally-companies", async () => {
     try {
       const tallyUrl = store.get("tallyUrl");
-      const xml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>CompanyList</ID></HEADER><BODY><DESC><STATICVARIABLES><SVFROMDATE TYPE="Date">01-Jan-1970</SVFROMDATE><SVTODATE TYPE="Date">01-Jan-1970</SVTODATE><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="CompanyList" ISMODIFY="No"><TYPE>Company</TYPE><FETCH>NAME,GUID,BASICCOMPANYFORMALNAME</FETCH><FILTERS>GroupFilter</FILTERS></COLLECTION><SYSTEM TYPE="FORMULAE" NAME="GroupFilter">$isaggregate = "No"</SYSTEM></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
-
-      const response = await postTallyXml(tallyUrl, xml, "arraybuffer");
-      const decoded = decodeTallyResponse(
-        Buffer.from(response.data),
-        String(response.headers["content-type"] || ""),
-      );
-      const companies = parseTallyCompanies(decoded);
+      const companies = await fetchTallyCompanies(tallyUrl);
 
       return { success: true, companies };
-    } catch (e) {
+    } catch (e: any) {
       console.error("get-tally-companies error:", e);
-      return { success: false, companies: [] };
+      return { success: false, companies: [], error: e?.message || "Could not read companies from Tally." };
     }
   });
 
   ipcMain.handle("get-tally-company-date-ranges", async () => {
     try {
       const tallyUrl = store.get("tallyUrl");
-      const xml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>CompanyDateRanges</ID></HEADER><BODY><DESC><STATICVARIABLES><SVFROMDATE TYPE="Date">01-Jan-1970</SVFROMDATE><SVTODATE TYPE="Date">01-Jan-1970</SVTODATE><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="CompanyDateRanges" ISMODIFY="No"><TYPE>Company</TYPE><FETCH>NAME,GUID,BOOKSFROM,BOOKSTO</FETCH><FILTERS>GroupFilter</FILTERS></COLLECTION><SYSTEM TYPE="FORMULAE" NAME="GroupFilter">$isaggregate = "No"</SYSTEM></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
-
-      const response = await postTallyXml(tallyUrl, xml, "arraybuffer");
-      const decoded = decodeTallyResponse(
-        Buffer.from(response.data),
-        String(response.headers["content-type"] || ""),
-      );
-      const companies = parseTallyCompanyDateRanges(decoded);
+      const companies = await fetchTallyCompanyDateRanges(tallyUrl);
 
       return { success: true, companies };
     } catch (e: any) {

@@ -757,6 +757,22 @@ function classifyInventoryScenario(
   return null;
 }
 
+function withSupabaseSchemaGuidance(message: string) {
+  const normalized = (message || "").toLowerCase();
+  const looksLikeSchemaProblem =
+    normalized.includes("schema cache")
+    || normalized.includes("could not find the table")
+    || normalized.includes("could not find the '")
+    || normalized.includes("relation ")
+    || normalized.includes("column ");
+
+  if (!looksLikeSchemaProblem || normalized.includes("apply backend/full_schema.sql")) {
+    return message;
+  }
+
+  return `${message}. Supabase schema appears missing or outdated. Apply backend/full_schema.sql to the new Supabase project, then restart the backend.`;
+}
+
 async function buildInventoryIntelligenceReport(
   {
     companyId,
@@ -1625,8 +1641,9 @@ router.post("/", requireApiKey, async (req, res) => {
       }
     }
 
-    console.error("[Sync] Error:", err.message);
-    res.status(500).json({ error: err.message });
+    const errorMessage = withSupabaseSchemaGuidance(err.message || "Unknown sync error");
+    console.error("[Sync] Error:", errorMessage);
+    res.status(500).json({ error: errorMessage });
   }
 });
 

@@ -58,10 +58,11 @@ def parse_structured_section(section_name: str, xml_text: str):
 
 def build_collection_request(request_def: dict, request_context: dict | None = None) -> str:
     request_type = request_def.get("type", "Collection")
-    static_vars = [
-        {"name": "SVEXPORTFORMAT", "value": "$$SysName:XML"},
-        {"name": "SVCURRENTCOMPANY", "value": TALLY_COMPANY, "escape": True},
-    ]
+    static_vars = [{"name": "SVEXPORTFORMAT", "value": "$$SysName:XML"}]
+    if request_type != "Data" and request_def.get("object_type") != "Voucher":
+        static_vars.append(
+            {"name": "SVCURRENTCOMPANY", "value": TALLY_COMPANY, "escape": True}
+        )
     static_vars.extend(request_def.get("static_variables", []))
 
     if request_type == "Data":

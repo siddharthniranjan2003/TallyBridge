@@ -1,3 +1,23 @@
+# =============================================================================
+# CHANGES — 2026-04-21 (branch: tallybridge-tallyprime-fix-attempt)
+# Revert by undoing the 4 marked blocks below.
+#
+# CHANGE 1 (line ~1031): should_skip_voucher_family()
+#   OLD: returned True for TallyPrime, skipping all voucher-family data
+#   NEW: always returns False — TallyPrime now goes through the Day Book path
+#
+# CHANGE 2 (line ~723): fetch_voucher_window()
+#   OLD: signature had no is_tallyprime param — tried TDL collection first (crashes TallyPrime)
+#   NEW: added is_tallyprime=False — if True, skips TDL and goes directly to Day Book
+#
+# CHANGE 3 (line ~759): fetch_vouchers_with_batches()
+#   OLD: signature had no is_tallyprime param
+#   NEW: added is_tallyprime=False — passed through to fetch_voucher_window()
+#
+# CHANGE 4 (line ~1247): main() voucher fetch block
+#   OLD: allow_day_book_fallback only True for ERP9; no is_tallyprime passed
+#   NEW: allow_day_book_fallback also True for TallyPrime; is_tallyprime passed in
+# =============================================================================
 import json
 import os
 import sys
@@ -5,7 +25,7 @@ import threading
 import time
 from datetime import date, datetime, timedelta
 
-from cloud_pusher import fetch_remote_alter_ids, push
+from cloud_pusher import fetch_remote_alter_ids, get_last_push_error, push
 from definition_extractor import fetch_structured_section, parse_structured_section
 from odbc_bridge import OdbcBridge, compare_section_rows
 from tally_client import (
@@ -67,6 +87,10 @@ except ValueError:
     SYNC_HEARTBEAT_SECONDS = 20
 ALLOW_DAYBOOK_FALLBACK = os.environ.get(
     "TB_ALLOW_DAYBOOK_FALLBACK",
+    "",
+).strip().lower() in {"1", "true", "yes", "on"}
+ALLOW_TALLYPRIME_VOUCHER_XML = os.environ.get(
+    "TB_ALLOW_TALLYPRIME_VOUCHER_XML",
     "",
 ).strip().lower() in {"1", "true", "yes", "on"}
 VOUCHER_OVERLAP_DAYS = 7
@@ -721,7 +745,14 @@ def fetch_voucher_window(
     to_date: str,
     prefer_day_book: bool = False,
     allow_day_book_fallback: bool = False,
+    is_tallyprime: bool = False,  # CHANGE 2 — new param
 ) -> tuple[list[dict], str]:
+    if is_tallyprime:
+        print(
+            f"[Tally] TallyPrime detected — using voucher collection path without "
+            f"SVCURRENTCOMPANY for {from_date}..{to_date}"
+        )
+
     try:
         vouchers = fetch_structured_section(
             "vouchers",
@@ -758,6 +789,7 @@ def fetch_vouchers_with_batches(
     mode: str,
     prefer_day_book: bool = False,
     allow_day_book_fallback: bool = False,
+    is_tallyprime: bool = False,  # CHANGE 3 — new param, passed through to fetch_voucher_window
 ) -> tuple[list[dict], str]:
     initial_windows = build_month_windows(from_date, to_date)
     all_vouchers: list[dict] = []
@@ -776,6 +808,7 @@ def fetch_vouchers_with_batches(
                     window_to,
                     prefer_day_book=prefer_day_book,
                     allow_day_book_fallback=allow_day_book_fallback,
+                    is_tallyprime=is_tallyprime,  # CHANGE 3 — pass through
                 )
             transport_sources.add(source)
             print(f"{indent}[Tally] Voucher window succeeded with {len(rows)} rows")
@@ -1024,6 +1057,19 @@ def fetch_company_info_with_fallback() -> tuple[dict, str, str]:
     return company_info, from_date, to_date
 
 
+def should_skip_voucher_family(product_name: str | None) -> tuple[bool, str | None]:
+    # CHANGE 1 — commented out TallyPrime skip; Day Book path now handles vouchers safely
+    # if product_name == "TallyPrime" and not ALLOW_TALLYPRIME_VOUCHER_XML:
+    #     return (
+    #         True,
+    #         "Skipping voucher, outstanding, and financial report XML export on TallyPrime "
+    #         "to avoid the server crash seen on port 9000. Stable masters and stock sync "
+    #         "will continue.",
+    #     )
+
+    return False, None
+
+
 def main() -> int:
     heartbeat_stop, heartbeat_thread = start_sync_heartbeat()
     print(f"[TallyBridge] Starting sync: {COMPANY}")
@@ -1159,6 +1205,24 @@ def main() -> int:
         balance_sheet = None
         trial_balance = None
         record_updates: dict[str, int] = {}
+        warnings: list[str] = []
+        voucher_family_skipped = False
+        skip_voucher_family, skip_voucher_reason = should_skip_voucher_family(
+            product_info.get("product_name")
+        )
+
+        if skip_voucher_family and sync_plan.get("voucher_changed"):
+            voucher_family_skipped = True
+            warnings.append(skip_voucher_reason or "Voucher family skipped.")
+            print(f"[TallyBridge] {skip_voucher_reason}")
+            for section_name in (
+                "vouchers",
+                "outstanding",
+                "profit_loss",
+                "balance_sheet",
+                "trial_balance",
+            ):
+                section_sources[section_name] = "skipped_tallyprime_safe_mode"
 
         if sync_plan.get("need_groups"):
             print("[Tally] Fetching groups...")
@@ -1210,24 +1274,41 @@ def main() -> int:
             record_updates["ledgers"] = len(ledgers)
             print(f"[Tally] Got {len(ledgers)} ledgers")
 
-        if sync_plan.get("need_vouchers"):
+        if sync_plan.get("need_vouchers") and not voucher_family_skipped:
             voucher_from_date = sync_plan.get("voucher_from_date", from_date)
             voucher_to_date = sync_plan.get("voucher_to_date", to_date)
+            # CHANGE 4 — detect TallyPrime, enable Day Book fallback for it too
+            is_tallyprime = product_info.get("product_name") == "TallyPrime"
             allow_day_book_fallback = (
                 ALLOW_DAYBOOK_FALLBACK
                 or product_info.get("product_name") == "Tally.ERP 9"
+                or is_tallyprime  # CHANGE 4
             )
             prefer_day_book = product_info.get("product_name") == "Tally.ERP 9"
-            vouchers, voucher_source = fetch_vouchers_with_batches(
-                voucher_from_date,
-                voucher_to_date,
-                sync_plan.get("voucher_sync_mode", "full"),
-                prefer_day_book=prefer_day_book,
-                allow_day_book_fallback=allow_day_book_fallback,
-            )
-            section_sources["vouchers"] = voucher_source
-            record_updates["vouchers"] = len(vouchers)
-            print(f"[Tally] Got {len(vouchers)} vouchers")
+            try:
+                vouchers, voucher_source = fetch_vouchers_with_batches(
+                    voucher_from_date,
+                    voucher_to_date,
+                    sync_plan.get("voucher_sync_mode", "full"),
+                    prefer_day_book=prefer_day_book,
+                    allow_day_book_fallback=allow_day_book_fallback,
+                    is_tallyprime=is_tallyprime,  # CHANGE 4
+                )
+                section_sources["vouchers"] = voucher_source
+                record_updates["vouchers"] = len(vouchers)
+                print(f"[Tally] Got {len(vouchers)} vouchers")
+            except Exception as voucher_error:
+                voucher_family_skipped = True
+                warning = (
+                    "Voucher XML export became unstable and was skipped so the rest of the "
+                    f"sync could finish safely: {voucher_error}"
+                )
+                warnings.append(warning)
+                print(f"[TallyBridge] {warning}")
+                section_sources["vouchers"] = "skipped_after_voucher_error"
+                for section_name in ("outstanding", "profit_loss", "balance_sheet", "trial_balance"):
+                    section_sources[section_name] = "skipped_after_voucher_error"
+                vouchers = None
 
         if sync_plan.get("need_stock"):
             print("[Tally] Fetching stock items...")
@@ -1253,7 +1334,7 @@ def main() -> int:
                 print("[ODBC][Shadow] Stock compared against XML; XML remains authoritative.")
             record_updates["stock"] = len(stock)
 
-        if sync_plan.get("need_outstanding"):
+        if sync_plan.get("need_outstanding") and not voucher_family_skipped:
             print("[Tally] Fetching outstanding...")
             try:
                 outstanding = (
@@ -1274,7 +1355,7 @@ def main() -> int:
             record_updates["outstanding"] = len(outstanding)
             print(f"[Tally] Got {len(outstanding)} outstanding entries")
 
-        if sync_plan.get("need_reports"):
+        if sync_plan.get("need_reports") and not voucher_family_skipped:
             print("[Tally] Fetching Profit & Loss...")
             try:
                 profit_loss = fetch_structured_section(
@@ -1333,6 +1414,12 @@ def main() -> int:
             print(f"[Tally] Got {len(trial_balance)} Trial Balance items")
 
         print("[Cloud] Pushing to backend...")
+        effective_voucher_sync_mode = (
+            "none" if voucher_family_skipped else sync_plan.get("voucher_sync_mode", "full")
+        )
+        effective_voucher_changed = False if voucher_family_skipped else sync_plan.get(
+            "voucher_changed", True
+        )
         payload = {
             "company_name": COMPANY,
             "company_guid": COMPANY_GUID or None,
@@ -1347,7 +1434,7 @@ def main() -> int:
             "balance_sheet": balance_sheet,
             "trial_balance": trial_balance,
             "sync_meta": {
-                "voucher_sync_mode": sync_plan.get("voucher_sync_mode", "full"),
+                "voucher_sync_mode": effective_voucher_sync_mode,
                 "voucher_from_date": sync_plan.get("voucher_from_date"),
                 "voucher_to_date": sync_plan.get("voucher_to_date"),
                 "effective_from_date": from_date,
@@ -1355,7 +1442,7 @@ def main() -> int:
                 "date_range_source": date_range_source,
                 "date_range_clamped": was_clamped,
                 "master_changed": sync_plan.get("master_changed", True),
-                "voucher_changed": sync_plan.get("voucher_changed", True),
+                "voucher_changed": effective_voucher_changed,
                 "section_sources": section_sources,
                 "product_name": product_info.get("product_name"),
                 "product_version": product_info.get("product_version"),
@@ -1364,18 +1451,24 @@ def main() -> int:
         }
 
         if not push(payload):
-            raise RuntimeError("Cloud push failed")
+            raise RuntimeError(get_last_push_error() or "Cloud push failed")
 
-        if current_ids:
+        if current_ids and not voucher_family_skipped:
             if save_cached_ids(current_ids):
                 print("[TallyBridge] Cached alter IDs for next change detection.")
             else:
                 print("[TallyBridge] Alter ID cache could not be updated; next sync may re-fetch more data.")
+        elif current_ids and voucher_family_skipped:
+            print(
+                "[TallyBridge] Skipped updating alter ID cache because voucher-family sync "
+                "did not complete."
+            )
 
         print(json.dumps({
             "status": "success",
             "records": record_updates,
-            "voucher_sync_mode": sync_plan.get("voucher_sync_mode", "full"),
+            "voucher_sync_mode": effective_voucher_sync_mode,
+            "warnings": warnings,
             "sync_meta": payload["sync_meta"],
         }))
         return 0

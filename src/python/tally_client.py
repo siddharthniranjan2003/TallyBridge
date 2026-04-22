@@ -363,7 +363,6 @@ def get_vouchers(from_date: str, to_date: str) -> str:
               <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
               <SVFROMDATE TYPE="Date">{report_from_date}</SVFROMDATE>
               <SVTODATE TYPE="Date">{report_to_date}</SVTODATE>
-              <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
             </STATICVARIABLES>
           </REQUESTDESC>
         </EXPORTDATA>
@@ -387,7 +386,6 @@ def get_vouchers_legacy_data_request(from_date: str, to_date: str) -> str:
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
             <SVFROMDATE>{from_date}</SVFROMDATE>
             <SVTODATE>{to_date}</SVTODATE>
-            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
         </DESC>
       </BODY>
@@ -413,7 +411,6 @@ def get_vouchers_collection_tdl(from_date: str, to_date: str) -> str:
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
             <SVFROMDATE TYPE="Date">{from_date_report}</SVFROMDATE>
             <SVTODATE TYPE="Date">{to_date_report}</SVTODATE>
-            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
           <TDL>
             <TDLMESSAGE>
@@ -431,7 +428,7 @@ def get_vouchers_collection_tdl(from_date: str, to_date: str) -> str:
       </BODY>
     </ENVELOPE>""",
         read_timeout=max(get_read_timeout_seconds(), 75),
-        request_encoding="utf-16",
+        request_encoding="utf-8",
     )
 
 
@@ -454,7 +451,6 @@ def get_voucher_headers_erp9(from_date: str, to_date: str) -> str:
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
             <SVFROMDATE TYPE="Date">{from_date_report}</SVFROMDATE>
             <SVTODATE TYPE="Date">{to_date_report}</SVTODATE>
-            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
           <TDL>
             <TDLMESSAGE>
@@ -472,7 +468,7 @@ def get_voucher_headers_erp9(from_date: str, to_date: str) -> str:
       </BODY>
     </ENVELOPE>""",
         read_timeout=max(get_read_timeout_seconds(), 45),
-        request_encoding="utf-16",
+        request_encoding="utf-8",
     )
 
 
@@ -502,7 +498,6 @@ def get_voucher_details_erp9_batch(master_ids: list[int | str]) -> str:
         <DESC>
           <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
           <TDL>
             <TDLMESSAGE>
@@ -518,7 +513,7 @@ def get_voucher_details_erp9_batch(master_ids: list[int | str]) -> str:
       </BODY>
     </ENVELOPE>""",
         read_timeout=max(get_read_timeout_seconds(), 45),
-        request_encoding="utf-16",
+        request_encoding="utf-8",
     )
 
 
@@ -567,7 +562,6 @@ def get_stock_summary_report() -> str:
         <DESC>
           <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
         </DESC>
       </BODY>
@@ -590,7 +584,6 @@ def get_outstanding_receivables() -> str:
         <DESC>
           <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
         </DESC>
       </BODY>
@@ -611,7 +604,6 @@ def get_outstanding_payables() -> str:
         <DESC>
           <STATICVARIABLES>
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
         </DESC>
       </BODY>
@@ -636,7 +628,6 @@ def get_profit_and_loss(from_date: str, to_date: str) -> str:
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
             <SVFROMDATE>{from_date}</SVFROMDATE>
             <SVTODATE>{to_date}</SVTODATE>
-            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
         </DESC>
       </BODY>
@@ -659,7 +650,6 @@ def get_balance_sheet(from_date: str, to_date: str) -> str:
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
             <SVFROMDATE>{from_date}</SVFROMDATE>
             <SVTODATE>{to_date}</SVTODATE>
-            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
         </DESC>
       </BODY>
@@ -682,7 +672,6 @@ def get_trial_balance(from_date: str, to_date: str) -> str:
             <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
             <SVFROMDATE>{from_date}</SVFROMDATE>
             <SVTODATE>{to_date}</SVTODATE>
-            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
           </STATICVARIABLES>
         </DESC>
       </BODY>

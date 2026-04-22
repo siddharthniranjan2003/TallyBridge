@@ -7,6 +7,7 @@ BACKEND_URL = os.environ.get("BACKEND_URL", "")
 API_KEY = os.environ.get("API_KEY", "")
 TALLY_COMPANY = os.environ.get("TALLY_COMPANY", "").strip()
 TALLY_COMPANY_GUID = os.environ.get("TALLY_COMPANY_GUID", "").strip()
+LAST_PUSH_ERROR = ""
 
 
 def get_backend_timeout_seconds() -> int:
@@ -32,6 +33,34 @@ def get_backend_post_verify_poll_seconds() -> int:
 
 def _string_marker(value) -> str:
     return str(value).strip() if value is not None else ""
+
+
+def _set_last_push_error(message: str) -> None:
+    global LAST_PUSH_ERROR
+    LAST_PUSH_ERROR = (message or "").strip()
+
+
+def get_last_push_error() -> str:
+    return LAST_PUSH_ERROR
+
+
+def _extract_backend_error(response: requests.Response) -> str:
+    try:
+        data = response.json()
+        if isinstance(data, dict):
+            error_value = data.get("error")
+            if error_value:
+                return str(error_value)
+            if data.get("success") is False:
+                return str(data)
+    except Exception:
+        pass
+
+    text = (response.text or "").strip()
+    if text:
+        return text[:500]
+
+    return f"HTTP {response.status_code}"
 
 
 def _alter_ids_match(expected: dict | None, remote: dict | None) -> bool:
@@ -114,6 +143,8 @@ def verify_remote_sync_completion(
 
 
 def push(payload: dict) -> bool:
+    _set_last_push_error("")
+
     if not BACKEND_URL:
         print("[Cloud] No backend URL configured - skipping push")
         return True
@@ -139,7 +170,9 @@ def push(payload: dict) -> bool:
         if response.ok:
             data = response.json()
             if data.get("success") is False:
-                print(f"[Cloud] Push failed: {data}")
+                message = str(data.get("error") or data)
+                _set_last_push_error(message)
+                print(f"[Cloud] Push failed: {message}")
                 return False
 
             records = data.get("records", {})
@@ -158,23 +191,29 @@ def push(payload: dict) -> bool:
                     print(f"[Cloud] {label}: {records.get(key, 0)}")
             return True
 
+        error_message = _extract_backend_error(response)
+        _set_last_push_error(error_message)
         print(f"[Cloud] Push failed: HTTP {response.status_code}")
-        print(f"[Cloud] Response: {response.text[:300]}")
+        print(f"[Cloud] Response: {error_message}")
         return False
 
     except requests.exceptions.ConnectionError:
         print(f"[Cloud] Cannot reach backend at {BACKEND_URL}")
         print("[Cloud] Is the backend running?")
+        _set_last_push_error(f"Cannot reach backend at {BACKEND_URL}")
         return False
     except requests.exceptions.ReadTimeout:
         expected_alter_ids = payload.get("alter_ids") if isinstance(payload.get("alter_ids"), dict) else None
         if verify_remote_sync_completion(expected_alter_ids, previous_last_synced_at):
             return True
-        print(
-            f"[Cloud] Backend at {BACKEND_URL} did not respond within "
+        timeout_message = (
+            f"Backend at {BACKEND_URL} did not respond within "
             f"{get_backend_timeout_seconds()}s."
         )
+        _set_last_push_error(timeout_message)
+        print(f"[Cloud] {timeout_message}")
         return False
     except Exception as e:
         print(f"[Cloud] Push error: {e}")
+        _set_last_push_error(str(e))
         return False
