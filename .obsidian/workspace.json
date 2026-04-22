@@ -1,0 +1,219 @@
+{
+  "main": {
+    "id": "1ed653dd25480f3c",
+    "type": "split",
+    "children": [
+      {
+        "id": "53661be195a6ef4f",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "c83086e2dec17eba",
+            "type": "leaf",
+            "state": {
+              "type": "graph",
+              "state": {},
+              "icon": "lucide-git-fork",
+              "title": "Graph view"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "9fc95057d6ce9b30",
+    "type": "split",
+    "children": [
+      {
+        "id": "5fedb05534c71794",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "fb3bf8866df90ba6",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "990b7ec361d9ddda",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "4347c9db0267656a",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "734089bb4ec0a630",
+    "type": "split",
+    "children": [
+      {
+        "id": "31d2e94639d3600d",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "0f9ebcd85125828a",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "md_files/shipping_readiness_findings_2026-04-10.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for shipping_readiness_findings_2026-04-10"
+            }
+          },
+          {
+            "id": "f287f7d7460b57f5",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "md_files/shipping_readiness_findings_2026-04-10.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from shipping_readiness_findings_2026-04-10"
+            }
+          },
+          {
+            "id": "cebb8224924b7c19",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "9df7b8f9dba34843",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "2809c5f79d975a67",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "md_files/shipping_readiness_findings_2026-04-10.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline of shipping_readiness_findings_2026-04-10"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "c83086e2dec17eba",
+  "lastOpenFiles": [
+    "md_files/reorder_level/reorder_level_issues_and_fixes.md",
+    "md_files/reorder_level/reorder_level_issues_and_fixes.md.tmp.22332.1776091474538",
+    "md_files/reorder_level/reorder_level_code_changes_summary.md",
+    "n8n/challan-to-invoice.json",
+    "n8n/challan-to-invoice (1).json",
+    "n8n",
+    "md_files/reorder_level/reorder_level_final_execution_plan.md",
+    "md_files/reorder_level/reorder_levels_implementation_plan.md",
+    "md_files/purchaseheaderadd.md",
+    "md_files/Using BizAnalyst with TallyPrime.md",
+    "node_modules/socks/docs/examples/index.md",
+    "node_modules/bl/LICENSE.md",
+    "node_modules/@types/use-sync-external-store/README.md",
+    "md_files/shipping_readiness_findings_2026-04-10.md",
+    "md_files/odbcimplementaion_1_1.md",
+    "node_modules/gopd/CHANGELOG.md",
+    "md_files/plan4.md",
+    "Untitled 2.canvas",
+    "2026-04-10.md",
+    "node_modules/@malept/cross-spawn-promise/README.md",
+    "md_files/bizanalystobserve.md",
+    "Untitled 1.canvas",
+    "Untitled.canvas",
+    "md_files/walkthrough.md",
+    "md_files/odbcquery.md",
+    "md_files/odbcimplementaion_1_0.md",
+    "md_files/endpoint_workbook.md",
+    "md_files/claudefindings1.md",
+    "node_modules/concurrently/docs/README.md",
+    "node_modules/postject/node_modules/commander/Readme.md",
+    "md_files/walkthrough1.md",
+    "md_files/tally_fetch_audit.md",
+    "md_files/TALLY_COMPATIBILITY.md",
+    "md_files"
+  ]
+}
