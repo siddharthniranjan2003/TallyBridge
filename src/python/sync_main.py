@@ -78,6 +78,13 @@ ENABLE_INCREMENTAL_VOUCHER_SYNC = os.environ.get(
 ).strip().lower() in {"1", "true", "yes", "on"}
 SYNC_FROM_DATE_OVERRIDE_RAW = os.environ.get("TB_SYNC_FROM_DATE", "").strip()
 SYNC_TO_DATE_OVERRIDE_RAW = os.environ.get("TB_SYNC_TO_DATE", "").strip()
+SYNC_TRIGGER = (os.environ.get("TB_SYNC_TRIGGER", "manual") or "manual").strip().lower()
+if SYNC_TRIGGER not in {"startup", "manual", "heartbeat"}:
+    SYNC_TRIGGER = "manual"
+MANUAL_BACKFILL_PENDING = os.environ.get(
+    "TB_MANUAL_BACKFILL_PENDING",
+    "",
+).strip().lower() in {"1", "true", "yes", "on"}
 try:
     SYNC_HEARTBEAT_SECONDS = max(
         0,
@@ -1073,6 +1080,7 @@ def should_skip_voucher_family(product_name: str | None) -> tuple[bool, str | No
 def main() -> int:
     heartbeat_stop, heartbeat_thread = start_sync_heartbeat()
     print(f"[TallyBridge] Starting sync: {COMPANY}")
+    print(f"[TallyBridge] Sync trigger: {SYNC_TRIGGER}")
     product_info = detect_tally_product()
     if product_info.get("product_name"):
         version_suffix = f" {product_info['product_version']}" if product_info.get("product_version") else ""
@@ -1159,6 +1167,8 @@ def main() -> int:
                     "[TallyBridge] Manual date range override will scope this run, "
                     "but it will not force heartbeat runs into full sync mode."
                 )
+            elif SYNC_TRIGGER == "heartbeat":
+                print("[TallyBridge] Heartbeat mode: checking TallyPrime for changes before syncing.")
 
             remote_alter_ids, remote_lookup_status = fetch_remote_alter_ids()
             if remote_lookup_status == "company_not_found":
@@ -1181,11 +1191,18 @@ def main() -> int:
                     f"MstID={current_ids.get('alt_mst_id')}"
                 )
                 if not sync_plan.get("has_changes"):
-                    print("[TallyBridge] No changes detected - skipping sync.")
+                    if SYNC_TRIGGER == "heartbeat":
+                        print("[TallyBridge] Heartbeat found no changes - skipping sync.")
+                    else:
+                        print("[TallyBridge] No changes detected - skipping sync.")
                     print(json.dumps({
                         "status": "skipped",
                         "reason": "no_changes",
                         "records": {},
+                        "sync_meta": {
+                            "change_detection_mode": SYNC_TRIGGER,
+                            "manual_backfill_pending": MANUAL_BACKFILL_PENDING,
+                        },
                     }))
                     return 0
 
@@ -1443,6 +1460,8 @@ def main() -> int:
                 "effective_to_date": to_date,
                 "date_range_source": date_range_source,
                 "date_range_clamped": was_clamped,
+                "change_detection_mode": SYNC_TRIGGER,
+                "manual_backfill_pending": MANUAL_BACKFILL_PENDING,
                 "master_changed": sync_plan.get("master_changed", True),
                 "voucher_changed": effective_voucher_changed,
                 "section_sources": section_sources,

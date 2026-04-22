@@ -24,12 +24,12 @@ export class SyncEngine {
   start() {
     console.log("[SyncEngine] Starting...");
     // Run one sync immediately. Later runs are scheduled after each sync completes.
-    setTimeout(() => this.runAllCompanies(), 3000);
+    setTimeout(() => this.runAllCompanies("startup"), 3000);
   }
 
   stop() {
     if (this.timer) {
-      clearInterval(this.timer);
+      clearTimeout(this.timer);
       this.timer = null;
     }
   }
@@ -49,7 +49,7 @@ export class SyncEngine {
       return;
     }
     this.stop();
-    await this.runAllCompanies();
+    await this.runAllCompanies("manual");
   }
 
   private scheduleNext(delayMs?: number) {
@@ -61,14 +61,14 @@ export class SyncEngine {
     this.timer = setTimeout(
       () => {
         this.timer = null;
-        void this.runAllCompanies();
+        void this.runAllCompanies("heartbeat");
       },
       intervalMs
     );
     console.log(`[SyncEngine] Scheduled every ${minutes} minutes`);
   }
 
-  private async runAllCompanies() {
+  private async runAllCompanies(trigger: "startup" | "manual" | "heartbeat") {
     if (this.isSyncing) {
       this.emit("sync-log", { company: "System", line: "Sync already in progress..." });
       return;
@@ -92,7 +92,7 @@ export class SyncEngine {
           id: company.id,
           status: "syncing",
         });
-        await this.syncOneCompany(company);
+        await this.syncOneCompany(company, trigger);
       }
     } finally {
       this.isSyncing = false;
@@ -104,7 +104,7 @@ export class SyncEngine {
     }
   }
 
-  private syncOneCompany(company: Company): Promise<void> {
+  private syncOneCompany(company: Company, trigger: "startup" | "manual" | "heartbeat"): Promise<void> {
     return new Promise((resolve) => {
       const config = store.store;
       const companyId = company.id;
@@ -121,8 +121,33 @@ export class SyncEngine {
 
       const configuredReadMode = process.env.TB_READ_MODE || config.readMode || "auto";
       const odbcDsnOverride = config.odbcDsnOverride || process.env.TB_ODBC_DSN_OVERRIDE || "";
-      const syncFromDate = (config.syncFromDate || process.env.TB_SYNC_FROM_DATE || "").trim();
-      const syncToDate = (config.syncToDate || process.env.TB_SYNC_TO_DATE || "").trim();
+      const configuredSyncFromDate = (config.syncFromDate || process.env.TB_SYNC_FROM_DATE || "").trim();
+      const configuredSyncToDate = (config.syncToDate || process.env.TB_SYNC_TO_DATE || "").trim();
+      const backfillSignature = this.buildBackfillSignature(configuredSyncFromDate, configuredSyncToDate);
+      const backfillPending = Boolean(
+        backfillSignature
+        && company.lastCompletedBackfillSignature !== backfillSignature
+      );
+      const shouldUseManualBackfill = backfillPending && trigger !== "heartbeat";
+      const syncFromDate = shouldUseManualBackfill ? configuredSyncFromDate : "";
+      const syncToDate = shouldUseManualBackfill ? configuredSyncToDate : "";
+      const forceFullSync = !company.lastSyncedAt || shouldUseManualBackfill;
+
+      this.emit("sync-log", {
+        company: companyName,
+        line: `[TallyBridge] Sync trigger: ${trigger}`,
+      });
+      if (shouldUseManualBackfill && backfillSignature) {
+        this.emit("sync-log", {
+          company: companyName,
+          line: `[TallyBridge] One-time backfill armed for ${backfillSignature}.`,
+        });
+      } else if (backfillSignature && trigger === "heartbeat") {
+        this.emit("sync-log", {
+          company: companyName,
+          line: "[TallyBridge] Heartbeat mode is ignoring the saved manual backfill range.",
+        });
+      }
 
       const env = {
         ...process.env,
@@ -130,11 +155,13 @@ export class SyncEngine {
         TALLY_URL: config.tallyUrl,
         TALLY_COMPANY: companyName,
         TALLY_COMPANY_GUID: company.tallyGuid || "",
-        TB_FORCE_FULL_SYNC: company.lastSyncedAt ? "" : "1",
+        TB_FORCE_FULL_SYNC: forceFullSync ? "1" : "",
         TB_READ_MODE: configuredReadMode,
         TB_ODBC_DSN_OVERRIDE: odbcDsnOverride,
         TB_SYNC_FROM_DATE: syncFromDate,
         TB_SYNC_TO_DATE: syncToDate,
+        TB_SYNC_TRIGGER: trigger,
+        TB_MANUAL_BACKFILL_PENDING: shouldUseManualBackfill ? "1" : "",
         BACKEND_URL: config.backendUrl,
         API_KEY: config.apiKey,
         TB_USER_DATA_DIR: app.getPath("userData"),
@@ -175,6 +202,7 @@ export class SyncEngine {
           const existing = store.get("companies").find((c) => c.id === companyId);
           let records = this.normalizeRecordCounts(existing?.lastSyncRecords);
           let status = "success";
+          let syncMeta: any = undefined;
           try {
             // Find the last line that starts with "{" (tally/python logs might have trailing empty lines or junk)
             const validJsonLine = [...outputLines].reverse().find(line => line.trim().startsWith("{"));
@@ -182,6 +210,7 @@ export class SyncEngine {
               const parsed = JSON.parse(validJsonLine.trim());
               records = this.mergeRecordCounts(records, parsed.records);
               status = parsed.status || "success";
+              syncMeta = parsed.sync_meta;
             }
           } catch (e) {
             console.error("JSON parse error from python output:", e);
@@ -192,12 +221,22 @@ export class SyncEngine {
             records = this.normalizeRecordCounts(existing?.lastSyncRecords || records);
           }
 
-          updateCompanyStatus(companyId, {
+          const update: Partial<Company> = {
             lastSyncStatus: "success",
             lastSyncedAt: new Date().toISOString(),
             lastSyncRecords: records,
             lastSyncError: undefined,
-          });
+          };
+          if (status === "success" && shouldUseManualBackfill && backfillSignature) {
+            update.lastCompletedBackfillSignature = backfillSignature;
+          }
+          updateCompanyStatus(companyId, update);
+          if (syncMeta?.change_detection_mode === "heartbeat") {
+            this.emit("sync-log", {
+              company: companyName,
+              line: "[TallyBridge] Heartbeat completed its change check.",
+            });
+          }
           this.emit("company-synced", { id: companyId, name: companyName, records });
         } else {
           const errMsg = overrideError?.trim()
@@ -327,5 +366,14 @@ export class SyncEngine {
       balance_sheet: typeof updates?.balance_sheet === "number" ? updates.balance_sheet : normalizedBase.balance_sheet,
       trial_balance: typeof updates?.trial_balance === "number" ? updates.trial_balance : normalizedBase.trial_balance,
     };
+  }
+
+  private buildBackfillSignature(syncFromDate: string, syncToDate: string) {
+    const fromValue = syncFromDate.trim();
+    const toValue = syncToDate.trim();
+    if (!fromValue && !toValue) {
+      return "";
+    }
+    return `${fromValue || "open"}..${toValue || "open"}`;
   }
 }

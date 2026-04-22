@@ -12,6 +12,7 @@ export interface Company {
   lastSyncStatus?: "success" | "error" | "syncing" | "idle";
   lastSyncRecords?: SyncRecordCounts;
   lastSyncError?: string;
+  lastCompletedBackfillSignature?: string;
 }
 
 export interface SyncRecordCounts {
@@ -89,4 +90,26 @@ export function updateCompanyStatus(
     c.id === id ? { ...c, ...update } : c
   );
   store.set("companies", companies);
+}
+
+export function resetStaleSyncStatuses() {
+  const companies = store.get("companies");
+  let changed = false;
+  const nextCompanies = companies.map((company) => {
+    if (company.lastSyncStatus !== "syncing") {
+      return company;
+    }
+
+    changed = true;
+    return {
+      ...company,
+      lastSyncStatus: "idle" as const,
+    };
+  });
+
+  if (changed) {
+    store.set("companies", nextCompanies);
+  }
+
+  return changed;
 }

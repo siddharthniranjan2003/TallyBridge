@@ -3,7 +3,7 @@ import { spawn } from "child_process";
 import axios from "axios";
 import isDev from "electron-is-dev";
 import path from "path";
-import { store, addCompany, removeCompany, TallyCompanySelection } from "./store";
+import { store, addCompany, removeCompany, resetStaleSyncStatuses, TallyCompanySelection } from "./store";
 import { SyncEngine } from "./sync-engine";
 
 const TALLY_REQUEST_TIMEOUT_MS = 5000;
@@ -496,6 +496,12 @@ function doesTallyCompanyMatchSelection(
 }
 
 export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
+  if (resetStaleSyncStatuses()) {
+    window.webContents.once("did-finish-load", () => {
+      window.webContents.send("companies-updated", store.get("companies"));
+    });
+  }
+
   ipcMain.handle("get-config", () => store.store);
 
   ipcMain.handle("get-companies", () => store.get("companies"));
