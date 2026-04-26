@@ -4,6 +4,8 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import syncRouter from "./routes/sync.js";
+import pushVoucherRouter from "./routes/push-voucher.js";
+import pushInvoiceRouter from "./routes/push-invoice.js";
 
 function resolveJsonBodyLimit() {
   const configured = process.env.TB_JSON_BODY_LIMIT?.trim();
@@ -15,6 +17,8 @@ app.use(cors());
 app.use(express.json({ limit: resolveJsonBodyLimit() }));
 
 app.use("/api/sync", syncRouter);
+app.use("/api/push-voucher", pushVoucherRouter);
+app.use("/api/push-invoice", pushInvoiceRouter);
 
 app.get("/health", (_, res) => {
   res.json({ status: "ok", service: "TallyBridge API" });

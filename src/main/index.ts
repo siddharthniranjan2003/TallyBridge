@@ -3,9 +3,11 @@ import path from "path";
 import isDev from "electron-is-dev";
 import { setupTray } from "./tray";
 import { setupIpcHandlers } from "./ipc-handlers";
+import { LocalPushServer } from "./local-push-server";
 import { SyncEngine } from "./sync-engine";
 
 let mainWindow: BrowserWindow | null = null;
+let localPushServer: LocalPushServer | null = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -47,6 +49,8 @@ app.whenReady().then(() => {
   createWindow();
 
   const syncEngine = new SyncEngine(mainWindow!);
+  localPushServer = new LocalPushServer(mainWindow!);
+  localPushServer.start();
   const trayController = setupTray(mainWindow!, () => {
     void syncEngine.syncNow();
   });
@@ -63,4 +67,8 @@ app.whenReady().then(() => {
 // Keep running when all windows closed
 app.on("window-all-closed", () => {
   // keep app running in tray
+});
+
+app.on("before-quit", () => {
+  localPushServer?.stop();
 });

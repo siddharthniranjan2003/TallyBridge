@@ -25,7 +25,13 @@ import threading
 import time
 from datetime import date, datetime, timedelta
 
-from cloud_pusher import fetch_remote_alter_ids, get_last_push_error, push
+from cloud_pusher import (
+    fetch_pending_push_vouchers,
+    fetch_remote_alter_ids,
+    get_last_push_error,
+    mark_push_results,
+    push,
+)
 from definition_extractor import fetch_structured_section, parse_structured_section
 from odbc_bridge import OdbcBridge, compare_section_rows
 from tally_client import (
@@ -100,6 +106,13 @@ ALLOW_TALLYPRIME_VOUCHER_XML = os.environ.get(
     "TB_ALLOW_TALLYPRIME_VOUCHER_XML",
     "",
 ).strip().lower() in {"1", "true", "yes", "on"}
+ENABLE_PUSH = os.environ.get(
+    "TB_ENABLE_PUSH",
+    "",
+).strip().lower() in {"1", "true", "yes", "on"}
+COMMAND = (os.environ.get("TB_COMMAND", "sync") or "sync").strip().lower()
+if COMMAND not in {"sync", "push_voucher"}:
+    COMMAND = "sync"
 VOUCHER_OVERLAP_DAYS = 7
 ERP9_DETAIL_BATCH_SIZE = 25
 
@@ -1077,7 +1090,129 @@ def should_skip_voucher_family(product_name: str | None) -> tuple[bool, str | No
     return False, None
 
 
+def run_pending_push_cycle(warnings: list[str]) -> None:
+    # PUSH PHASE 1: outbound Tally import is optional and must never break the
+    # already-stable inbound sync path.
+    from tally_pusher import push_vouchers
+
+    print("[Push] Checking backend queue for pending Sales/Purchase vouchers...")
+    pending_jobs, status = fetch_pending_push_vouchers()
+    if status != "ok":
+        warning = (
+            "Outbound push queue check was skipped because the backend queue could not "
+            f"be read ({status})."
+        )
+        warnings.append(warning)
+        print(f"[Push] {warning}")
+        return
+
+    if not pending_jobs:
+        print("[Push] No pending push jobs found.")
+        return
+
+    print(f"[Push] Found {len(pending_jobs)} pending job(s).")
+    job_results: list[dict] = []
+    for job in pending_jobs:
+        job_id = str(job.get("id") or "").strip()
+        voucher_payload = job.get("voucher_payload")
+        if not job_id or not isinstance(voucher_payload, dict):
+            print("[Push] Skipping malformed push job from backend queue.")
+            continue
+
+        voucher_label = (
+            f"{voucher_payload.get('voucher_type', 'Voucher')} "
+            f"{voucher_payload.get('voucher_number', '').strip()}".strip()
+        )
+        print(f"[Push] Importing {voucher_label or 'voucher'}...")
+
+        try:
+            result = push_vouchers([voucher_payload], company=COMPANY)
+            status_value = "failed" if result.get("errors") else "pushed"
+            error_message = "; ".join(result.get("line_errors") or []) or None
+            if status_value == "failed":
+                warning = (
+                    f"Voucher push failed for job {job_id}: "
+                    f"{error_message or 'unknown Tally import error'}"
+                )
+                warnings.append(warning)
+                print(f"[Push] {warning}")
+            else:
+                print(
+                    f"[Push] Imported successfully (created={result.get('created', 0)}, "
+                    f"altered={result.get('altered', 0)})."
+                )
+
+            job_results.append({
+                "id": job_id,
+                "status": status_value,
+                "error_message": error_message,
+                "tally_response": result,
+            })
+        except Exception as error:
+            warning = f"Voucher push failed for job {job_id}: {error}"
+            warnings.append(warning)
+            print(f"[Push] {warning}")
+            job_results.append({
+                "id": job_id,
+                "status": "failed",
+                "error_message": str(error),
+                "tally_response": {
+                    "created": 0,
+                    "altered": 0,
+                    "errors": 1,
+                    "line_errors": [str(error)],
+                },
+            })
+
+    if job_results and not mark_push_results(job_results):
+        warning = "Outbound push results could not be stored in the backend queue."
+        warnings.append(warning)
+        print(f"[Push] {warning}")
+
+
+def run_single_push_command() -> int:
+    # PUSH LOCAL API: reuse the existing engine entrypoint for one direct
+    # voucher push so the local backend can hand work to TallyBridge cleanly.
+    from tally_pusher import push_vouchers
+
+    try:
+        raw_payload = sys.stdin.read().strip()
+        if not raw_payload:
+            raise ValueError("No voucher payload was provided on stdin")
+
+        payload = json.loads(raw_payload)
+        if not isinstance(payload, dict):
+            raise ValueError("Voucher payload must be a JSON object")
+
+        company_name = str(
+            payload.get("company_name")
+            or payload.get("company")
+            or COMPANY
+            or ""
+        ).strip()
+        if not company_name:
+            raise ValueError("company_name is required for direct push mode")
+
+        result = push_vouchers([payload], company_name)
+        ok = bool(result.get("created") or result.get("altered")) and not result.get("errors")
+        print(json.dumps({
+            "ok": ok,
+            "company_name": company_name,
+            **result,
+        }))
+        return 0 if ok else 1
+    except Exception as error:
+        print(json.dumps({
+            "ok": False,
+            "error": str(error),
+        }))
+        return 1
+
+
 def main() -> int:
+    if COMMAND == "push_voucher":
+        return run_single_push_command()
+
     heartbeat_stop, heartbeat_thread = start_sync_heartbeat()
     print(f"[TallyBridge] Starting sync: {COMPANY}")
     print(f"[TallyBridge] Sync trigger: {SYNC_TRIGGER}")
@@ -1484,6 +1619,9 @@ def main() -> int:
                 "[TallyBridge] Skipped updating alter ID cache because voucher-family sync "
                 "did not complete."
             )
+
+        if ENABLE_PUSH:
+            run_pending_push_cycle(warnings)
 
         print(json.dumps({
             "status": "success",
