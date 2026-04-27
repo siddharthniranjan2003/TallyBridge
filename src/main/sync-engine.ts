@@ -43,6 +43,10 @@ export class SyncEngine {
     this.lifecycleCallbacks = callbacks;
   }
 
+  isSyncInProgress() {
+    return this.isSyncing;
+  }
+
   async syncNow() {
     if (this.isSyncing) {
       this.emit("sync-log", { company: "System", line: "Sync already in progress..." });

@@ -73,16 +73,23 @@ def _alter_ids_match(expected: dict | None, remote: dict | None) -> bool:
     )
 
 
+def _company_identity_params() -> tuple[dict[str, str], str]:
+    params: dict[str, str] = {}
+    if TALLY_COMPANY_GUID:
+        params["company_guid"] = TALLY_COMPANY_GUID
+        return params, "ok"
+    if TALLY_COMPANY:
+        params["company_name"] = TALLY_COMPANY
+        return params, "ok"
+    return params, "company_identity_missing"
+
+
 def fetch_remote_alter_ids() -> tuple[dict | None, str]:
     if not BACKEND_URL:
         return None, "backend_unconfigured"
 
-    params: dict[str, str] = {}
-    if TALLY_COMPANY_GUID:
-        params["company_guid"] = TALLY_COMPANY_GUID
-    elif TALLY_COMPANY:
-        params["company_name"] = TALLY_COMPANY
-    else:
+    params, company_status = _company_identity_params()
+    if company_status != "ok":
         return None, "company_identity_missing"
 
     try:
@@ -112,6 +119,90 @@ def fetch_remote_alter_ids() -> tuple[dict | None, str]:
     except Exception as e:
         print(f"[Cloud] Alter-id lookup error: {e}")
         return None, "lookup_failed"
+
+
+def fetch_pending_push_vouchers(limit: int = 10) -> tuple[list[dict], str]:
+    # PUSH PHASE 1: Poll outbound voucher jobs for the selected company.
+    if not BACKEND_URL:
+        return [], "backend_unconfigured"
+
+    params, company_status = _company_identity_params()
+    if company_status != "ok":
+        return [], company_status
+
+    params["limit"] = str(max(1, min(limit, 50)))
+
+    try:
+        response = requests.get(
+            f"{BACKEND_URL}/api/sync/push-queue",
+            params=params,
+            headers={"x-api-key": API_KEY},
+            timeout=min(get_backend_timeout_seconds(), 60),
+        )
+
+        if response.status_code == 404:
+            return [], "company_not_found"
+
+        if response.status_code == 409:
+            return [], "company_not_ready"
+
+        if not response.ok:
+            print(f"[Cloud][Push] Queue fetch failed: HTTP {response.status_code}")
+            print(f"[Cloud][Push] Response: {response.text[:300]}")
+            return [], "lookup_failed"
+
+        data = response.json() if response.content else {}
+        jobs = data.get("jobs") if isinstance(data, dict) else None
+        if not isinstance(jobs, list):
+            return [], "malformed_response"
+
+        normalized_jobs = [
+            job for job in jobs
+            if isinstance(job, dict)
+            and job.get("id")
+            and isinstance(job.get("voucher_payload"), dict)
+        ]
+        return normalized_jobs, "ok"
+    except requests.exceptions.ConnectionError:
+        print(f"[Cloud][Push] Cannot reach backend push queue endpoint at {BACKEND_URL}")
+        return [], "backend_unreachable"
+    except Exception as e:
+        print(f"[Cloud][Push] Queue fetch error: {e}")
+        return [], "lookup_failed"
+
+
+def mark_push_results(job_results: list[dict]) -> bool:
+    # PUSH PHASE 1: Persist outbound Tally import outcomes without affecting the main sync.
+    if not BACKEND_URL:
+        print("[Cloud][Push] No backend URL configured - cannot store push results")
+        return False
+
+    if not job_results:
+        return True
+
+    try:
+        response = requests.post(
+            f"{BACKEND_URL}/api/sync/push-results",
+            json={"results": job_results},
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": API_KEY,
+            },
+            timeout=min(get_backend_timeout_seconds(), 60),
+        )
+
+        if response.ok:
+            return True
+
+        print(f"[Cloud][Push] Result update failed: HTTP {response.status_code}")
+        print(f"[Cloud][Push] Response: {_extract_backend_error(response)}")
+        return False
+    except requests.exceptions.ConnectionError:
+        print(f"[Cloud][Push] Cannot reach backend at {BACKEND_URL} to store push results")
+        return False
+    except Exception as e:
+        print(f"[Cloud][Push] Result update error: {e}")
+        return False
 
 
 def verify_remote_sync_completion(

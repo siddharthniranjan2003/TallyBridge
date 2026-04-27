@@ -195,6 +195,19 @@ CREATE TABLE IF NOT EXISTS sync_log (
   sync_meta JSONB
 );
 
+-- PUSH PHASE 1: outbound Sales/Purchase voucher queue
+CREATE TABLE IF NOT EXISTS push_queue (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  voucher_payload JSONB NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'pushed', 'failed')),
+  error_message TEXT,
+  tally_response JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  pushed_at TIMESTAMPTZ
+);
+
 CREATE INDEX IF NOT EXISTS idx_groups_company ON groups(company_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_guid_unique
   ON companies(guid)
@@ -218,3 +231,4 @@ CREATE INDEX IF NOT EXISTS idx_profit_loss_company_synced_at ON profit_loss(comp
 CREATE INDEX IF NOT EXISTS idx_balance_sheet_company_synced_at ON balance_sheet(company_id, synced_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trial_balance_company_synced_at ON trial_balance(company_id, synced_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sync_log_company_synced_at ON sync_log(company_id, synced_at DESC);
+CREATE INDEX IF NOT EXISTS idx_push_queue_company_status ON push_queue(company_id, status, created_at);

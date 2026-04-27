@@ -4,10 +4,12 @@ import isDev from "electron-is-dev";
 import { setupTray } from "./tray";
 import { setupIpcHandlers } from "./ipc-handlers";
 import { LocalPushServer } from "./local-push-server";
+import { PushQueuePoller } from "./push-queue-poller";
 import { SyncEngine } from "./sync-engine";
 
 let mainWindow: BrowserWindow | null = null;
 let localPushServer: LocalPushServer | null = null;
+let pushQueuePoller: PushQueuePoller | null = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -50,6 +52,7 @@ app.whenReady().then(() => {
 
   const syncEngine = new SyncEngine(mainWindow!);
   localPushServer = new LocalPushServer(mainWindow!);
+  pushQueuePoller = new PushQueuePoller(mainWindow!, syncEngine);
   localPushServer.start();
   const trayController = setupTray(mainWindow!, () => {
     void syncEngine.syncNow();
@@ -62,6 +65,7 @@ app.whenReady().then(() => {
   setupIpcHandlers(syncEngine, mainWindow!);
 
   syncEngine.start();
+  pushQueuePoller.start();
 });
 
 // Keep running when all windows closed
@@ -70,5 +74,6 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  pushQueuePoller?.stop();
   localPushServer?.stop();
 });

@@ -111,7 +111,7 @@ ENABLE_PUSH = os.environ.get(
     "",
 ).strip().lower() in {"1", "true", "yes", "on"}
 COMMAND = (os.environ.get("TB_COMMAND", "sync") or "sync").strip().lower()
-if COMMAND not in {"sync", "push_voucher"}:
+if COMMAND not in {"sync", "push_voucher", "poll_push_queue"}:
     COMMAND = "sync"
 VOUCHER_OVERLAP_DAYS = 7
 ERP9_DETAIL_BATCH_SIZE = 25
@@ -1090,14 +1090,25 @@ def should_skip_voucher_family(product_name: str | None) -> tuple[bool, str | No
     return False, None
 
 
-def run_pending_push_cycle(warnings: list[str]) -> None:
+def run_pending_push_cycle(
+    warnings: list[str],
+    quiet_no_jobs: bool = False,
+) -> None:
     # PUSH PHASE 1: outbound Tally import is optional and must never break the
     # already-stable inbound sync path.
     from tally_pusher import push_vouchers
 
-    print("[Push] Checking backend queue for pending Sales/Purchase vouchers...")
+    if not quiet_no_jobs:
+        print("[Push] Checking backend queue for pending Sales/Purchase vouchers...")
     pending_jobs, status = fetch_pending_push_vouchers()
     if status != "ok":
+        if quiet_no_jobs and status in {
+            "backend_unconfigured",
+            "company_identity_missing",
+            "company_not_found",
+            "company_not_ready",
+        }:
+            return
         warning = (
             "Outbound push queue check was skipped because the backend queue could not "
             f"be read ({status})."
@@ -1107,7 +1118,8 @@ def run_pending_push_cycle(warnings: list[str]) -> None:
         return
 
     if not pending_jobs:
-        print("[Push] No pending push jobs found.")
+        if not quiet_no_jobs:
+            print("[Push] No pending push jobs found.")
         return
 
     print(f"[Push] Found {len(pending_jobs)} pending job(s).")
@@ -1170,6 +1182,16 @@ def run_pending_push_cycle(warnings: list[str]) -> None:
         print(f"[Push] {warning}")
 
 
+def run_poll_push_queue_command() -> int:
+    try:
+        warnings: list[str] = []
+        run_pending_push_cycle(warnings, quiet_no_jobs=True)
+        return 0
+    except Exception as error:
+        print(f"[Push] Queue poll failed: {error}", file=sys.stderr)
+        return 1
+
+
 def run_single_push_command() -> int:
     # PUSH LOCAL API: reuse the existing engine entrypoint for one direct
     # voucher push so the local backend can hand work to TallyBridge cleanly.
@@ -1212,6 +1234,8 @@ def run_single_push_command() -> int:
 def main() -> int:
     if COMMAND == "push_voucher":
         return run_single_push_command()
+    if COMMAND == "poll_push_queue":
+        return run_poll_push_queue_command()
 
     heartbeat_stop, heartbeat_thread = start_sync_heartbeat()
     print(f"[TallyBridge] Starting sync: {COMPANY}")

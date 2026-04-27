@@ -10,6 +10,14 @@ const SNAPSHOT_TIMESTAMP_COLUMNS = {
     balance_sheet: "last_balance_sheet_synced_at",
     trial_balance: "last_trial_balance_synced_at",
 };
+const DEFAULT_ALLOWED_PUSH_VOUCHER_TYPES = [
+    "Sales",
+    "Purchase",
+    "GST SALE",
+    "GST PURCHASE",
+];
+const DEFAULT_PUSH_QUEUE_BATCH_SIZE = 10;
+const MAX_PUSH_QUEUE_BATCH_SIZE = 50;
 function isNonEmptyString(value) {
     return typeof value === "string" && value.trim().length > 0;
 }
@@ -28,6 +36,165 @@ function compactDateToIsoDate(value) {
         return null;
     }
     return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+}
+function normalizeVoucherTypeKey(value) {
+    const normalized = normalizeTrimmedString(value);
+    return normalized ? normalized.toUpperCase() : null;
+}
+function getAllowedPushVoucherTypeKeys() {
+    const configured = process.env.TB_PUSH_ALLOWED_TYPES?.trim();
+    const source = configured
+        ? configured.split(",").map((entry) => entry.trim()).filter(Boolean)
+        : [...DEFAULT_ALLOWED_PUSH_VOUCHER_TYPES];
+    return new Set(source.map((entry) => entry.toUpperCase()));
+}
+function isAllowedPushVoucherType(value) {
+    const normalized = normalizeVoucherTypeKey(value);
+    return Boolean(normalized && getAllowedPushVoucherTypeKeys().has(normalized));
+}
+function normalizeIsoLikeDate(value) {
+    const normalized = normalizeTrimmedString(value);
+    if (!normalized) {
+        return null;
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(normalized) || /^\d{8}$/.test(normalized)) {
+        return normalized;
+    }
+    return null;
+}
+function normalizeFiniteNumber(value) {
+    const numeric = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+}
+function normalizeBoolean(value) {
+    if (typeof value === "boolean") {
+        return value;
+    }
+    if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (["true", "yes", "1"].includes(normalized)) {
+            return true;
+        }
+        if (["false", "no", "0"].includes(normalized)) {
+            return false;
+        }
+    }
+    return null;
+}
+function normalizePushVoucherPayload(value) {
+    // PUSH PHASE 1: keep the backend strict so the new outbound path cannot enqueue
+    // unsupported voucher shapes that would interfere with the stable inbound sync.
+    const raw = value && typeof value === "object" ? value : null;
+    if (!raw) {
+        return { error: "voucher_payload must be an object" };
+    }
+    const voucherType = normalizeTrimmedString(raw.voucher_type);
+    if (!voucherType) {
+        return { error: "voucher_payload.voucher_type is required" };
+    }
+    if (!isAllowedPushVoucherType(voucherType)) {
+        return {
+            error: `voucher_payload.voucher_type must be one of: ${[...getAllowedPushVoucherTypeKeys()].join(", ")}`,
+        };
+    }
+    const date = normalizeIsoLikeDate(raw.date);
+    if (!date) {
+        return { error: "voucher_payload.date must be in YYYY-MM-DD or YYYYMMDD format" };
+    }
+    const partyName = normalizeTrimmedString(raw.party_name);
+    if (!partyName) {
+        return { error: "voucher_payload.party_name is required" };
+    }
+    const rawLedgerEntries = raw.ledger_entries;
+    if (!Array.isArray(rawLedgerEntries) || !rawLedgerEntries.length) {
+        return { error: "voucher_payload.ledger_entries must be a non-empty array" };
+    }
+    const ledger_entries = [];
+    for (const [index, ledgerEntry] of rawLedgerEntries.entries()) {
+        const rawEntry = ledgerEntry && typeof ledgerEntry === "object"
+            ? ledgerEntry
+            : null;
+        if (!rawEntry) {
+            return { error: `voucher_payload.ledger_entries[${index}] must be an object` };
+        }
+        const ledgerName = normalizeTrimmedString(rawEntry.ledger_name);
+        if (!ledgerName) {
+            return { error: `voucher_payload.ledger_entries[${index}].ledger_name is required` };
+        }
+        const amount = normalizeFiniteNumber(rawEntry.amount);
+        if (amount == null) {
+            return { error: `voucher_payload.ledger_entries[${index}].amount must be numeric` };
+        }
+        const isDeemedPositive = normalizeBoolean(rawEntry.is_deemed_positive);
+        if (isDeemedPositive == null) {
+            return {
+                error: `voucher_payload.ledger_entries[${index}].is_deemed_positive must be boolean`,
+            };
+        }
+        ledger_entries.push({
+            ledger_name: ledgerName,
+            amount,
+            is_deemed_positive: isDeemedPositive,
+            is_party_ledger: normalizeBoolean(rawEntry.is_party_ledger) ?? false,
+        });
+    }
+    const rawItems = raw.items;
+    if (rawItems != null && !Array.isArray(rawItems)) {
+        return { error: "voucher_payload.items must be an array when provided" };
+    }
+    const items = [];
+    for (const [index, itemValue] of (rawItems || []).entries()) {
+        const rawItem = itemValue && typeof itemValue === "object"
+            ? itemValue
+            : null;
+        if (!rawItem) {
+            return { error: `voucher_payload.items[${index}] must be an object` };
+        }
+        const stockItemName = normalizeTrimmedString(rawItem.stock_item_name);
+        if (!stockItemName) {
+            return { error: `voucher_payload.items[${index}].stock_item_name is required` };
+        }
+        const quantity = normalizeFiniteNumber(rawItem.quantity);
+        if (quantity == null || quantity <= 0) {
+            return { error: `voucher_payload.items[${index}].quantity must be greater than zero` };
+        }
+        const unit = normalizeTrimmedString(rawItem.unit);
+        if (!unit) {
+            return { error: `voucher_payload.items[${index}].unit is required` };
+        }
+        const rate = normalizeFiniteNumber(rawItem.rate);
+        if (rate == null) {
+            return { error: `voucher_payload.items[${index}].rate must be numeric` };
+        }
+        const amount = normalizeFiniteNumber(rawItem.amount);
+        if (amount == null) {
+            return { error: `voucher_payload.items[${index}].amount must be numeric` };
+        }
+        items.push({
+            stock_item_name: stockItemName,
+            quantity,
+            unit,
+            rate,
+            amount,
+            godown_name: normalizeTrimmedString(rawItem.godown_name),
+            batch_name: normalizeTrimmedString(rawItem.batch_name),
+            destination_godown_name: normalizeTrimmedString(rawItem.destination_godown_name),
+        });
+    }
+    return {
+        voucher: {
+            date,
+            voucher_type: voucherType,
+            voucher_number: normalizeTrimmedString(raw.voucher_number),
+            party_name: partyName,
+            narration: normalizeTrimmedString(raw.narration),
+            reference: normalizeTrimmedString(raw.reference),
+            inventory_ledger_name: normalizeTrimmedString(raw.inventory_ledger_name),
+            stock_ledger_name: normalizeTrimmedString(raw.stock_ledger_name),
+            ledger_entries,
+            items,
+        },
+    };
 }
 function normalizeSyncMeta(value) {
     const raw = value && typeof value === "object" ? value : {};
@@ -1212,6 +1379,122 @@ router.post("/", requireApiKey, async (req, res) => {
         const errorMessage = withSupabaseSchemaGuidance(err.message || "Unknown sync error");
         console.error("[Sync] Error:", errorMessage);
         res.status(500).json({ error: errorMessage });
+    }
+});
+// PUSH PHASE 1: queue outbound Sales/Purchase voucher imports without touching
+// the current inbound sync route or renderer flow.
+router.post("/push-queue", requireApiKey, async (req, res) => {
+    const { company_id, company_guid, company_name, voucher_payload } = req.body || {};
+    const companyLookup = await resolveCompanyLookup({
+        companyId: company_id,
+        companyGuid: company_guid,
+        companyName: company_name,
+    }, { requireSuccessfulSync: false });
+    if (companyLookup.status !== 200) {
+        return res.status(companyLookup.status).json({ error: companyLookup.error });
+    }
+    const normalizedVoucher = normalizePushVoucherPayload(voucher_payload);
+    if (normalizedVoucher.error) {
+        return res.status(400).json({ error: normalizedVoucher.error });
+    }
+    try {
+        const { data, error } = await supabase
+            .from("push_queue")
+            .insert({
+            company_id: companyLookup.companyId,
+            voucher_payload: normalizedVoucher.voucher,
+            status: "pending",
+        })
+            .select("id, status, created_at")
+            .single();
+        if (error || !data) {
+            throw new Error(`Push queue insert failed: ${error?.message}`);
+        }
+        return res.json({
+            success: true,
+            job: data,
+        });
+    }
+    catch (err) {
+        const errorMessage = withSupabaseSchemaGuidance(err.message || "Could not enqueue push voucher");
+        console.error("[PushQueue] Enqueue error:", errorMessage);
+        return res.status(500).json({ error: errorMessage });
+    }
+});
+router.get("/push-queue", requireApiKey, async (req, res) => {
+    const companyLookup = await resolveCompanyLookup({
+        companyId: req.query.company_id,
+        companyGuid: req.query.company_guid,
+        companyName: req.query.company_name,
+    }, { requireSuccessfulSync: false });
+    if (companyLookup.status !== 200) {
+        return res.status(companyLookup.status).json({ error: companyLookup.error });
+    }
+    const requestedLimit = normalizeFiniteNumber(req.query.limit);
+    const limit = requestedLimit == null
+        ? DEFAULT_PUSH_QUEUE_BATCH_SIZE
+        : Math.max(1, Math.min(MAX_PUSH_QUEUE_BATCH_SIZE, Math.trunc(requestedLimit)));
+    try {
+        const { data, error } = await supabase
+            .from("push_queue")
+            .select("id, voucher_payload, created_at")
+            .eq("company_id", companyLookup.companyId)
+            .eq("status", "pending")
+            .order("created_at", { ascending: true })
+            .limit(limit);
+        if (error) {
+            throw new Error(`Push queue lookup failed: ${error.message}`);
+        }
+        const jobs = (data || []).filter((row) => isAllowedPushVoucherType(row?.voucher_payload?.voucher_type));
+        return res.json({ jobs });
+    }
+    catch (err) {
+        const errorMessage = withSupabaseSchemaGuidance(err.message || "Could not fetch push queue");
+        console.error("[PushQueue] Lookup error:", errorMessage);
+        return res.status(500).json({ error: errorMessage });
+    }
+});
+router.post("/push-results", requireApiKey, async (req, res) => {
+    const rawResults = Array.isArray(req.body) ? req.body : req.body?.results;
+    if (!Array.isArray(rawResults) || !rawResults.length) {
+        return res.status(400).json({ error: "results must be a non-empty array" });
+    }
+    try {
+        for (const [index, result] of rawResults.entries()) {
+            const rawResult = result && typeof result === "object"
+                ? result
+                : null;
+            if (!rawResult) {
+                return res.status(400).json({ error: `results[${index}] must be an object` });
+            }
+            const id = normalizeTrimmedString(rawResult.id);
+            if (!id) {
+                return res.status(400).json({ error: `results[${index}].id is required` });
+            }
+            const status = normalizeTrimmedString(rawResult.status);
+            if (status !== "pushed" && status !== "failed") {
+                return res.status(400).json({ error: `results[${index}].status must be pushed or failed` });
+            }
+            const updatePayload = {
+                status,
+                error_message: normalizeTrimmedString(rawResult.error_message),
+                tally_response: rawResult.tally_response ?? null,
+                pushed_at: status === "pushed" ? new Date().toISOString() : null,
+            };
+            const { error } = await supabase
+                .from("push_queue")
+                .update(updatePayload)
+                .eq("id", id);
+            if (error) {
+                throw new Error(`Push result update failed for ${id}: ${error.message}`);
+            }
+        }
+        return res.json({ success: true, updated: rawResults.length });
+    }
+    catch (err) {
+        const errorMessage = withSupabaseSchemaGuidance(err.message || "Could not store push results");
+        console.error("[PushQueue] Result error:", errorMessage);
+        return res.status(500).json({ error: errorMessage });
     }
 });
 // ── Pagination helper ────────────────────────────────────────────

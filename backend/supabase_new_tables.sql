@@ -62,3 +62,25 @@ CREATE POLICY "Service role full access" ON balance_sheet
 
 CREATE POLICY "Service role full access" ON trial_balance
   FOR ALL USING (true) WITH CHECK (true);
+
+
+-- 4. PUSH PHASE 1: outbound Sales/Purchase voucher queue
+CREATE TABLE IF NOT EXISTS push_queue (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  voucher_payload JSONB NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'pushed', 'failed')),
+  error_message TEXT,
+  tally_response JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  pushed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_push_queue_company_status
+  ON push_queue(company_id, status, created_at);
+
+ALTER TABLE push_queue ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Service role full access" ON push_queue
+  FOR ALL USING (true) WITH CHECK (true);
