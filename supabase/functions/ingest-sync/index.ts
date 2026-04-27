@@ -7,6 +7,7 @@ type SyncPayload = {
   company_name?: unknown;
   company_guid?: unknown;
   sync_contract_version?: unknown;
+  sync_run_synced_at?: unknown;
   company_info?: unknown;
   alter_ids?: unknown;
   groups?: unknown;
@@ -21,6 +22,7 @@ type SyncPayload = {
 };
 
 const MAX_SECTION_ROWS = 100_000;
+const MAX_VOUCHER_ROWS = 2_000;
 const corsHeaders = {
   "access-control-allow-origin": "*",
   "access-control-allow-headers":
@@ -73,13 +75,93 @@ function summarizeDomains(payload: SyncPayload) {
   };
 }
 
+function mergeRecordMaps(...maps: Array<Record<string, number>>) {
+  const merged: Record<string, number> = {};
+  for (const map of maps) {
+    for (const [key, value] of Object.entries(map)) {
+      if (Number.isFinite(value)) {
+        merged[key] = value;
+      }
+    }
+  }
+  return merged;
+}
+
 function normalizeContractVersion(value: unknown) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 0;
 }
 
+function normalizePositiveInteger(value: unknown) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 function normalizeTrimmedString(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function normalizeBoolean(value: unknown) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "1") {
+      return true;
+    }
+    if (normalized === "false" || normalized === "0") {
+      return false;
+    }
+  }
+  if (typeof value === "number") {
+    if (value === 1) {
+      return true;
+    }
+    if (value === 0) {
+      return false;
+    }
+  }
+  return null;
+}
+
+function normalizeSyncedAt(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return parsed.toISOString();
+}
+
+function getSyncMetaRecord(payload: SyncPayload) {
+  if (
+    payload.sync_meta &&
+    typeof payload.sync_meta === "object" &&
+    !Array.isArray(payload.sync_meta)
+  ) {
+    return payload.sync_meta as Record<string, unknown>;
+  }
+  return {};
+}
+
+function normalizeRecordCounts(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  const normalized: Record<string, number> = {};
+  for (const [key, rawValue] of Object.entries(value)) {
+    const parsed = Number(rawValue);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      normalized[key] = Math.trunc(parsed);
+    }
+  }
+  return normalized;
 }
 
 function validateSectionArray(label: string, value: unknown) {
@@ -213,7 +295,7 @@ function buildCompanyUpsertPayload(
 }
 
 function withSchemaGuidance(message: string) {
-  return `${message} Apply supabase/migrations/20260427_phase3_direct_ingest.sql before using Phase 3 live writes.`;
+  return `${message} Apply supabase/migrations/20260427_phase3_direct_ingest.sql and supabase/migrations/20260428_phase4_voucher_ingest.sql before using Phase 4 live writes.`;
 }
 
 async function upsertCompanyRecord(
@@ -312,8 +394,8 @@ serve(async (request) => {
       contract_version: SYNC_CONTRACT_VERSION,
       direct_write_ready: adminConfig.ready && hasSyncKey,
       supported_modes: ["dry-run", "live-write"],
-      supported_domains: ["masters", "snapshots"],
-      voucher_live_write_supported: false,
+      supported_domains: ["masters", "snapshots", "vouchers"],
+      voucher_live_write_supported: true,
     });
   }
 
@@ -395,9 +477,33 @@ serve(async (request) => {
     return jsonResponse({ success: false, error: validationError }, 400);
   }
 
+  if (countRows(payload.vouchers) > MAX_VOUCHER_ROWS) {
+    return jsonResponse(
+      {
+        success: false,
+        error: `vouchers exceeds the per-request maximum of ${MAX_VOUCHER_ROWS} rows. Chunk voucher uploads from the desktop client.`,
+        max_voucher_rows: MAX_VOUCHER_ROWS,
+      },
+      400,
+    );
+  }
+
   const domainHints = summarizeDomains(payload);
   const records = summarizeRecords(payload);
   const dryRun = isDryRun(request, payload);
+  const syncMeta = getSyncMetaRecord(payload);
+  const chunkIndex =
+    normalizePositiveInteger(syncMeta.chunk_index) ||
+    normalizePositiveInteger(syncMeta.voucher_chunk_index) ||
+    (domainHints.vouchers ? 1 : null);
+  const chunkCount =
+    normalizePositiveInteger(syncMeta.chunk_count) ||
+    normalizePositiveInteger(syncMeta.voucher_chunk_count) ||
+    (chunkIndex ? Math.max(chunkIndex, 1) : null);
+  const isFinalChunk =
+    normalizeBoolean(syncMeta.is_final_chunk) ??
+    (chunkIndex != null && chunkCount != null ? chunkIndex >= chunkCount : false);
+  const recordCounts = normalizeRecordCounts(syncMeta.record_counts);
 
   if (dryRun) {
     return jsonResponse({
@@ -408,29 +514,18 @@ serve(async (request) => {
       company_name: payload.company_name,
       domain_hints: domainHints,
       records,
-      warnings: domainHints.vouchers
-        ? [
-            "Voucher live writes are not supported in Phase 3. Use hybrid mode so vouchers stay on Render.",
-          ]
-        : [
-            "No database writes were performed. This is a dry-run validation response.",
-          ],
+      chunk: domainHints.vouchers
+        ? {
+            chunk_index: chunkIndex,
+            chunk_count: chunkCount,
+            is_final_chunk: isFinalChunk,
+            max_voucher_rows: MAX_VOUCHER_ROWS,
+          }
+        : null,
+      warnings: [
+        "No database writes were performed. This is a dry-run validation response.",
+      ],
     });
-  }
-
-  if (domainHints.vouchers) {
-    return jsonResponse(
-      {
-        success: false,
-        error:
-          "Phase 3 direct ingest supports masters and snapshots only. Use hybrid mode so vouchers continue through Render.",
-        phase: INGEST_SKELETON_PHASE,
-        contract_version: SYNC_CONTRACT_VERSION,
-        domain_hints: domainHints,
-        records,
-      },
-      409,
-    );
   }
 
   try {
@@ -444,7 +539,9 @@ serve(async (request) => {
             (payload.company_info as Record<string, unknown>).guid,
           )
         : null);
-    const syncedAt = new Date().toISOString();
+    const syncedAt =
+      normalizeSyncedAt(payload.sync_run_synced_at) ||
+      new Date().toISOString();
 
     const company = await upsertCompanyRecord(
       supabase,
@@ -478,6 +575,29 @@ serve(async (request) => {
       }
     }
 
+    let voucherRecords: Record<string, number> = {};
+    if (payload.vouchers != null) {
+      const { data, error } = await supabase.rpc("tb_ingest_vouchers", {
+        p_company_id: companyId,
+        p_synced_at: syncedAt,
+        p_vouchers: payload.vouchers ?? [],
+        p_sync_meta: payload.sync_meta ?? {},
+        p_alter_ids: payload.alter_ids ?? {},
+        p_is_final_chunk: isFinalChunk,
+        p_record_counts: recordCounts,
+      });
+
+      if (error) {
+        throw new Error(withSchemaGuidance(error.message));
+      }
+
+      if (data && typeof data === "object" && !Array.isArray(data)) {
+        voucherRecords = data as Record<string, number>;
+      }
+    }
+
+    const combinedRecords = mergeRecordMaps(directRecords, voucherRecords);
+
     return jsonResponse({
       success: true,
       dry_run: false,
@@ -486,11 +606,19 @@ serve(async (request) => {
       company_name: normalizedCompanyName,
       company_id: companyId,
       domain_hints: domainHints,
-      records: directRecords,
+      records: combinedRecords,
       synced_at: syncedAt,
       direct_write_ready: true,
+      chunk: domainHints.vouchers
+        ? {
+            chunk_index: chunkIndex,
+            chunk_count: chunkCount,
+            is_final_chunk: isFinalChunk,
+            max_voucher_rows: MAX_VOUCHER_ROWS,
+          }
+        : null,
       warnings:
-        domainHints.masters || domainHints.snapshots
+        domainHints.masters || domainHints.snapshots || payload.vouchers != null
           ? []
           : ["No direct-ingest sections were provided, so only company identity was refreshed."],
     });
@@ -498,7 +626,7 @@ serve(async (request) => {
     const message =
       error instanceof Error
         ? error.message
-        : "Phase 3 direct ingest failed unexpectedly.";
+        : "Phase 4 direct ingest failed unexpectedly.";
     return jsonResponse({ success: false, error: message }, 500);
   }
 });

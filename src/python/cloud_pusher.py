@@ -1,5 +1,6 @@
 import os
 import time
+from datetime import datetime, timezone
 
 import requests
 
@@ -35,6 +36,7 @@ DIRECT_INGEST_SECTION_KEYS = (
     "balance_sheet",
     "trial_balance",
 )
+DIRECT_VOUCHER_CHUNK_SIZE = 2000
 
 
 def get_backend_timeout_seconds() -> int:
@@ -168,7 +170,68 @@ def _clone_sync_meta(payload: dict, ingest_role: str) -> dict:
     return next_meta
 
 
-def _build_direct_payload(payload: dict) -> dict | None:
+def _count_rows(value) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def _nested_row_count(rows, field_name: str) -> int:
+    total = 0
+    if not isinstance(rows, list):
+        return 0
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        nested_rows = row.get(field_name)
+        if isinstance(nested_rows, list):
+            total += len(nested_rows)
+    return total
+
+
+def _is_purchase_voucher_type(value) -> bool:
+    if not isinstance(value, str):
+        return False
+
+    normalized = value.strip().lower()
+    if normalized in {"purchase", "local purchase", "import purchase"}:
+        return True
+    return "purchase" in normalized and "order" not in normalized
+
+
+def _build_record_counts(payload: dict) -> dict[str, int]:
+    vouchers = payload.get("vouchers") if isinstance(payload.get("vouchers"), list) else []
+    return {
+        "groups": _count_rows(payload.get("groups")),
+        "ledgers": _count_rows(payload.get("ledgers")),
+        "vouchers": len(vouchers),
+        "stock": _count_rows(payload.get("stock_items")),
+        "outstanding": _count_rows(payload.get("outstanding")),
+        "profit_loss": _count_rows(payload.get("profit_loss")),
+        "balance_sheet": _count_rows(payload.get("balance_sheet")),
+        "trial_balance": _count_rows(payload.get("trial_balance")),
+        "purchases": sum(
+            1
+            for voucher in vouchers
+            if isinstance(voucher, dict) and _is_purchase_voucher_type(voucher.get("voucher_type"))
+        ),
+        "voucher_items": _nested_row_count(vouchers, "items"),
+        "voucher_ledger_entries": _nested_row_count(vouchers, "ledger_entries"),
+    }
+
+
+def _chunk_rows(rows: list[dict], chunk_size: int) -> list[list[dict]]:
+    if not rows:
+        return [[]]
+    return [
+        rows[index:index + chunk_size]
+        for index in range(0, len(rows), chunk_size)
+    ]
+
+
+def _build_direct_payload(
+    payload: dict,
+    sync_run_synced_at: str,
+) -> dict | None:
     if not any(payload.get(key) is not None for key in DIRECT_INGEST_SECTION_KEYS):
         return None
 
@@ -185,6 +248,7 @@ def _build_direct_payload(payload: dict) -> dict | None:
         "trial_balance": payload.get("trial_balance"),
         "sync_meta": _clone_sync_meta(payload, "direct_masters_snapshots"),
         "sync_contract_version": SYNC_CONTRACT_VERSION,
+        "sync_run_synced_at": sync_run_synced_at,
     }
 
 
@@ -198,6 +262,42 @@ def _build_render_payload(payload: dict) -> dict:
         "sync_meta": _clone_sync_meta(payload, "render_voucher_control_plane"),
         "sync_contract_version": SYNC_CONTRACT_VERSION,
     }
+
+
+def _build_direct_voucher_payloads(
+    payload: dict,
+    sync_run_synced_at: str,
+    record_counts: dict[str, int],
+) -> list[dict]:
+    vouchers = payload.get("vouchers") if isinstance(payload.get("vouchers"), list) else []
+    voucher_chunks = _chunk_rows(vouchers, DIRECT_VOUCHER_CHUNK_SIZE)
+    chunk_count = len(voucher_chunks)
+    direct_payloads: list[dict] = []
+
+    for chunk_index, voucher_chunk in enumerate(voucher_chunks, start=1):
+        sync_meta = _clone_sync_meta(payload, "direct_vouchers")
+        sync_meta.update({
+            "chunk_index": chunk_index,
+            "chunk_count": chunk_count,
+            "voucher_chunk_index": chunk_index,
+            "voucher_chunk_count": chunk_count,
+            "voucher_chunk_size": len(voucher_chunk),
+            "is_final_chunk": chunk_index == chunk_count,
+            "record_counts": record_counts,
+        })
+
+        direct_payloads.append({
+            "company_name": payload.get("company_name"),
+            "company_guid": payload.get("company_guid"),
+            "company_info": payload.get("company_info") if chunk_index == 1 else None,
+            "alter_ids": payload.get("alter_ids") if chunk_index == chunk_count else None,
+            "vouchers": voucher_chunk,
+            "sync_meta": sync_meta,
+            "sync_contract_version": SYNC_CONTRACT_VERSION,
+            "sync_run_synced_at": sync_run_synced_at,
+        })
+
+    return direct_payloads
 
 
 def fetch_remote_alter_ids() -> tuple[dict | None, str]:
@@ -538,20 +638,6 @@ def push(payload: dict) -> bool:
     request_payload = dict(payload)
     request_payload["sync_contract_version"] = SYNC_CONTRACT_VERSION
 
-    if SYNC_INGEST_MODE == "direct" and request_payload.get("vouchers") is not None:
-        message = (
-            "Direct ingest mode does not support voucher uploads yet. "
-            "Use hybrid mode so masters and snapshots go direct while vouchers stay on Render."
-        )
-        print(f"[Ingest] {message}")
-        _set_last_push_error(message)
-        _set_last_push_stats({
-            "mode": "direct",
-            "status": "unsupported",
-            "reason": "vouchers_not_supported",
-        })
-        return False
-
     if SYNC_INGEST_MODE == "render":
         render_result = _post_sync_payload(
             "render",
@@ -565,18 +651,16 @@ def push(payload: dict) -> bool:
         _set_last_push_error(str(render_result["error"] or "Cloud push failed"))
         return False
 
-    if SYNC_INGEST_MODE == "direct":
-        direct_result = _post_sync_payload("direct", request_payload, "direct-full")
-        _set_last_push_stats(direct_result["stats"])
-        if direct_result["ok"]:
-            return True
-        _set_last_push_error(str(direct_result["error"] or "Cloud push failed"))
-        return False
-
-    direct_payload = _build_direct_payload(request_payload)
-    render_payload = _build_render_payload(request_payload)
+    sync_run_synced_at = datetime.now(timezone.utc).isoformat()
+    direct_payload = _build_direct_payload(request_payload, sync_run_synced_at)
+    record_counts = _build_record_counts(request_payload)
+    voucher_payloads = _build_direct_voucher_payloads(
+        request_payload,
+        sync_run_synced_at,
+        record_counts,
+    )
     aggregate_stats: dict[str, object] = {
-        "mode": "hybrid",
+        "mode": SYNC_INGEST_MODE,
         "status": "in_progress",
         "steps": {},
     }
@@ -607,21 +691,28 @@ def push(payload: dict) -> bool:
             },
         }
 
-    render_result = _post_sync_payload(
-        "render",
-        render_payload,
-        "render-voucher-control-plane",
-        verify_after_timeout=True,
-    )
+    voucher_chunk_stats: list[dict[str, object]] = []
+    for chunk_index, voucher_payload in enumerate(voucher_payloads, start=1):
+        voucher_result = _post_sync_payload(
+            "direct",
+            voucher_payload,
+            f"direct-voucher-chunk-{chunk_index}",
+        )
+        voucher_chunk_stats.append(voucher_result["stats"])
+        if not voucher_result["ok"]:
+            aggregate_stats["steps"] = {
+                **(aggregate_stats.get("steps") or {}),
+                "voucher_chunks": voucher_chunk_stats,
+            }
+            aggregate_stats["status"] = "voucher_direct_failed"
+            _set_last_push_stats(aggregate_stats)
+            _set_last_push_error(str(voucher_result["error"] or "Direct voucher ingest failed"))
+            return False
+
     aggregate_stats["steps"] = {
         **(aggregate_stats.get("steps") or {}),
-        "render": render_result["stats"],
+        "voucher_chunks": voucher_chunk_stats,
     }
-    if not render_result["ok"]:
-        aggregate_stats["status"] = "render_failed"
-        _set_last_push_stats(aggregate_stats)
-        _set_last_push_error(str(render_result["error"] or "Render voucher sync failed"))
-        return False
 
     total_request_ms = 0.0
     for step_stats in (aggregate_stats.get("steps") or {}).values():
@@ -629,6 +720,15 @@ def push(payload: dict) -> bool:
             duration = step_stats.get("request_duration_ms")
             if isinstance(duration, (int, float)):
                 total_request_ms += float(duration)
+            continue
+
+        if isinstance(step_stats, list):
+            for nested_stats in step_stats:
+                if not isinstance(nested_stats, dict):
+                    continue
+                duration = nested_stats.get("request_duration_ms")
+                if isinstance(duration, (int, float)):
+                    total_request_ms += float(duration)
 
     aggregate_stats["status"] = "ok"
     aggregate_stats["request_duration_ms"] = round(total_request_ms, 2)

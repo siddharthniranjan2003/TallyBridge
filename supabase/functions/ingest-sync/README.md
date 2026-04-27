@@ -1,6 +1,6 @@
 # ingest-sync
 
-Phase 3 direct ingest endpoint for TallyBridge.
+Phase 4 full direct-ingest endpoint for TallyBridge.
 
 What it does now:
 
@@ -12,30 +12,29 @@ What it does now:
   - company identity upsert
   - groups
   - ledgers
+  - vouchers
+  - voucher items
+  - voucher ledger entries
+  - purchases
   - stock items
   - outstanding
   - profit/loss
   - balance sheet
   - trial balance
 
-What it does not do yet:
-
-- no live voucher writes
-- no purchase graph writes
-- no replacement of the Render voucher route
-
 Recommended desktop mode:
 
 - use `hybrid`
-- masters and snapshots go direct
-- vouchers stay on Render
+- inbound sync goes direct to Supabase
+- keep `render` mode only as the emergency fallback
 
 Required setup before live writes:
 
 1. Deploy the Edge Function.
 2. Apply `supabase/migrations/20260427_phase3_direct_ingest.sql`.
-3. Set `SYNC_INGEST_KEY` for the function.
-4. Ensure the function can access `SUPABASE_URL` and a service-role key.
+3. Apply `supabase/migrations/20260428_phase4_voucher_ingest.sql`.
+4. Set `SYNC_INGEST_KEY` for the function.
+5. Ensure the function can access `SUPABASE_URL` and a service-role key.
 
 Health check:
 
@@ -63,5 +62,5 @@ curl -X POST https://<project>.supabase.co/functions/v1/ingest-sync \
 
 Live-write note:
 
-- if the payload includes `vouchers`, the function will reject it
-- use desktop `hybrid` mode for Phase 3
+- voucher uploads must be chunked to `2000` rows or fewer per request
+- the final voucher chunk finalizes reconciliation, updates `last_synced_at`, and writes `sync_log`

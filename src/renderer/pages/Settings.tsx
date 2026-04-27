@@ -439,15 +439,15 @@ export default function Settings() {
       </Section>
 
       <Section title="Direct Ingest">
-        <Field label="Sync Ingest Mode" hint="Use hybrid once the direct ingest endpoint is deployed. Keep render mode if you want the old behavior.">
+        <Field label="Sync Ingest Mode" hint="Use hybrid for the full direct path once the ingest endpoint is deployed. Keep render mode as the emergency fallback.">
           <select
             value={form.syncIngestMode}
             onChange={(e) => set("syncIngestMode", e.target.value as SettingsForm["syncIngestMode"])}
             style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: "1px solid #dee2e6", background: "#fff" }}
           >
             <option value="render">Render /api/sync (default)</option>
-            <option value="hybrid">Hybrid direct ingest (masters/snapshots direct, vouchers on Render)</option>
-            <option value="direct">Direct ingest only (advanced, vouchers not supported yet)</option>
+            <option value="hybrid">Hybrid direct ingest (full direct sync, Render fallback only)</option>
+            <option value="direct">Direct ingest alias (same path as hybrid)</option>
           </select>
         </Field>
 
