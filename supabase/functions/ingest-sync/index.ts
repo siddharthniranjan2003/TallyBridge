@@ -1,9 +1,11 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.100.1";
 
 import { INGEST_SKELETON_PHASE, SYNC_CONTRACT_VERSION } from "./contract.ts";
 
 type SyncPayload = {
   company_name?: unknown;
+  company_guid?: unknown;
   sync_contract_version?: unknown;
   company_info?: unknown;
   alter_ids?: unknown;
@@ -18,9 +20,11 @@ type SyncPayload = {
   sync_meta?: unknown;
 };
 
+const MAX_SECTION_ROWS = 100_000;
 const corsHeaders = {
   "access-control-allow-origin": "*",
-  "access-control-allow-headers": "authorization, x-client-info, apikey, content-type, x-sync-key, x-sync-contract-version, x-sync-dry-run",
+  "access-control-allow-headers":
+    "authorization, x-client-info, apikey, content-type, x-sync-key, x-sync-contract-version, x-sync-dry-run",
   "access-control-allow-methods": "GET,POST,OPTIONS",
 };
 
@@ -54,24 +58,44 @@ function summarizeRecords(payload: SyncPayload) {
 function summarizeDomains(payload: SyncPayload) {
   return {
     masters: Boolean(
-      payload.company_info
-      || countRows(payload.groups)
-      || countRows(payload.ledgers)
-      || countRows(payload.stock_items),
+      payload.company_info ||
+        countRows(payload.groups) ||
+        countRows(payload.ledgers) ||
+        countRows(payload.stock_items),
     ),
     snapshots: Boolean(
-      countRows(payload.outstanding)
-      || countRows(payload.profit_loss)
-      || countRows(payload.balance_sheet)
-      || countRows(payload.trial_balance),
+      countRows(payload.outstanding) ||
+        countRows(payload.profit_loss) ||
+        countRows(payload.balance_sheet) ||
+        countRows(payload.trial_balance),
     ),
-    vouchers: Boolean(countRows(payload.vouchers)),
+    vouchers: Boolean(payload.vouchers != null),
   };
 }
 
 function normalizeContractVersion(value: unknown) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function normalizeTrimmedString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function validateSectionArray(label: string, value: unknown) {
+  if (value == null) {
+    return null;
+  }
+
+  if (!Array.isArray(value)) {
+    return `${label} must be an array when provided.`;
+  }
+
+  if (value.length > MAX_SECTION_ROWS) {
+    return `${label} exceeds the maximum allowed size of ${MAX_SECTION_ROWS} rows.`;
+  }
+
+  return null;
 }
 
 function getSyncKey(request: Request) {
@@ -82,11 +106,195 @@ function isDryRun(request: Request, payload: SyncPayload) {
   if (request.headers.get("x-sync-dry-run") === "1") {
     return true;
   }
+
   return Boolean(
-    payload.sync_meta
-    && typeof payload.sync_meta === "object"
-    && (payload.sync_meta as Record<string, unknown>).dry_run === true,
+    payload.sync_meta &&
+      typeof payload.sync_meta === "object" &&
+      (payload.sync_meta as Record<string, unknown>).dry_run === true,
   );
+}
+
+function timingSafeEqualStrings(provided: string, expected: string) {
+  const encoder = new TextEncoder();
+  const providedBytes = encoder.encode(provided);
+  const expectedBytes = encoder.encode(expected);
+  const maxLength = Math.max(providedBytes.length, expectedBytes.length);
+  let diff = providedBytes.length ^ expectedBytes.length;
+
+  for (let index = 0; index < maxLength; index += 1) {
+    diff |= (providedBytes[index] ?? 0) ^ (expectedBytes[index] ?? 0);
+  }
+
+  return diff === 0;
+}
+
+function getSupabaseAdminConfig() {
+  const url = Deno.env.get("SUPABASE_URL")?.trim() || "";
+  const serviceRoleKey =
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")?.trim() ||
+    Deno.env.get("SUPABASE_SERVICE_KEY")?.trim() ||
+    "";
+
+  return {
+    url,
+    serviceRoleKey,
+    ready: Boolean(url && serviceRoleKey),
+  };
+}
+
+function getSupabaseAdminClient() {
+  const config = getSupabaseAdminConfig();
+  if (!config.ready) {
+    throw new Error(
+      "Supabase admin client is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY for the Edge Function.",
+    );
+  }
+
+  return createClient(config.url, config.serviceRoleKey, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+  });
+}
+
+function buildCompanyUpsertPayload(
+  companyName: string,
+  companyGuid: string | null,
+  companyInfo: unknown,
+  alterIds: unknown,
+) {
+  const payload: Record<string, unknown> = { name: companyName };
+  if (companyGuid) {
+    payload.guid = companyGuid;
+  }
+
+  if (companyInfo && typeof companyInfo === "object") {
+    const info = companyInfo as Record<string, unknown>;
+    for (const key of [
+      "books_from",
+      "books_to",
+      "books_from_raw",
+      "books_to_raw",
+      "gstin",
+      "address",
+      "guid",
+      "state",
+      "country",
+      "pincode",
+      "email",
+      "phone",
+      "gst_type",
+      "pan",
+    ]) {
+      if (key in info && info[key] !== "" && info[key] != null) {
+        if (key === "guid" && companyGuid) {
+          continue;
+        }
+        payload[key] = info[key];
+      }
+    }
+
+    if (typeof info.master_id === "number" && Number.isFinite(info.master_id)) {
+      payload.master_id = info.master_id;
+    }
+  }
+
+  if (alterIds && typeof alterIds === "object") {
+    const ids = alterIds as Record<string, unknown>;
+    for (const key of ["alter_id", "alt_vch_id", "alt_mst_id", "last_voucher_date"]) {
+      if (key in ids && ids[key] !== "" && ids[key] != null) {
+        payload[key] = ids[key];
+      }
+    }
+  }
+
+  return payload;
+}
+
+function withSchemaGuidance(message: string) {
+  return `${message} Apply supabase/migrations/20260427_phase3_direct_ingest.sql before using Phase 3 live writes.`;
+}
+
+async function upsertCompanyRecord(
+  supabase: ReturnType<typeof getSupabaseAdminClient>,
+  companyName: string,
+  companyGuid: string | null,
+  companyInfo: unknown,
+  alterIds: unknown,
+) {
+  const payload = buildCompanyUpsertPayload(companyName, companyGuid, companyInfo, alterIds);
+
+  if (companyGuid) {
+    const { data: existingByGuid, error: guidLookupError } = await supabase
+      .from("companies")
+      .select("id")
+      .eq("guid", companyGuid)
+      .maybeSingle();
+
+    if (guidLookupError) {
+      throw new Error(`Company GUID lookup failed: ${guidLookupError.message}`);
+    }
+
+    if (existingByGuid?.id) {
+      const { data: updatedCompany, error: updateError } = await supabase
+        .from("companies")
+        .update(payload)
+        .eq("id", existingByGuid.id)
+        .select("id")
+        .single();
+
+      if (updateError || !updatedCompany) {
+        throw new Error(`Company update failed: ${updateError?.message}`);
+      }
+
+      return updatedCompany;
+    }
+  }
+
+  const { data: nameMatches, error: nameLookupError } = await supabase
+    .from("companies")
+    .select("id, guid")
+    .eq("name", companyName)
+    .limit(2);
+
+  if (nameLookupError) {
+    throw new Error(`Company name lookup failed: ${nameLookupError.message}`);
+  }
+
+  if ((nameMatches || []).length > 1) {
+    throw new Error(
+      "Multiple companies already share this name. Re-add the company so sync can use the Tally GUID.",
+    );
+  }
+
+  const matchedCompany = nameMatches?.[0];
+  if (matchedCompany?.id && (!matchedCompany.guid || matchedCompany.guid === companyGuid)) {
+    const { data: updatedCompany, error: updateError } = await supabase
+      .from("companies")
+      .update(payload)
+      .eq("id", matchedCompany.id)
+      .select("id")
+      .single();
+
+    if (updateError || !updatedCompany) {
+      throw new Error(`Company update failed: ${updateError?.message}`);
+    }
+
+    return updatedCompany;
+  }
+
+  const { data: insertedCompany, error: insertError } = await supabase
+    .from("companies")
+    .insert(payload)
+    .select("id")
+    .single();
+
+  if (insertError || !insertedCompany) {
+    throw new Error(`Company insert failed: ${insertError?.message}`);
+  }
+
+  return insertedCompany;
 }
 
 serve(async (request) => {
@@ -95,13 +303,17 @@ serve(async (request) => {
   }
 
   if (request.method === "GET") {
+    const adminConfig = getSupabaseAdminConfig();
+    const hasSyncKey = Boolean(Deno.env.get("SYNC_INGEST_KEY")?.trim());
     return jsonResponse({
       ok: true,
       service: "TallyBridge Direct Ingest",
       phase: INGEST_SKELETON_PHASE,
       contract_version: SYNC_CONTRACT_VERSION,
-      direct_write_ready: false,
-      supported_modes: ["dry-run"],
+      direct_write_ready: adminConfig.ready && hasSyncKey,
+      supported_modes: ["dry-run", "live-write"],
+      supported_domains: ["masters", "snapshots"],
+      voucher_live_write_supported: false,
     });
   }
 
@@ -111,14 +323,20 @@ serve(async (request) => {
 
   const expectedSyncKey = Deno.env.get("SYNC_INGEST_KEY")?.trim() || "";
   if (!expectedSyncKey) {
-    return jsonResponse({
-      success: false,
-      error: "SYNC_INGEST_KEY is not configured for this function.",
-    }, 500);
+    return jsonResponse(
+      {
+        success: false,
+        error: "SYNC_INGEST_KEY is not configured for this function.",
+      },
+      500,
+    );
   }
 
   const providedSyncKey = getSyncKey(request);
-  if (!providedSyncKey || providedSyncKey !== expectedSyncKey) {
+  if (
+    !providedSyncKey ||
+    !timingSafeEqualStrings(providedSyncKey, expectedSyncKey)
+  ) {
     return jsonResponse({ success: false, error: "Unauthorized" }, 401);
   }
 
@@ -139,46 +357,148 @@ serve(async (request) => {
   const bodyVersion = normalizeContractVersion(payload.sync_contract_version);
   const effectiveVersion = headerVersion || bodyVersion;
 
-  if (effectiveVersion != SYNC_CONTRACT_VERSION) {
-    return jsonResponse({
-      success: false,
-      error: `Unsupported sync contract version ${effectiveVersion || "missing"}. Expected ${SYNC_CONTRACT_VERSION}.`,
-      expected_contract_version: SYNC_CONTRACT_VERSION,
-    }, 409);
+  if (effectiveVersion !== SYNC_CONTRACT_VERSION) {
+    return jsonResponse(
+      {
+        success: false,
+        error: `Unsupported sync contract version ${effectiveVersion || "missing"}. Expected ${SYNC_CONTRACT_VERSION}.`,
+        expected_contract_version: SYNC_CONTRACT_VERSION,
+      },
+      409,
+    );
   }
 
   if (typeof payload.company_name !== "string" || !payload.company_name.trim()) {
     return jsonResponse({ success: false, error: "company_name is required." }, 400);
   }
 
-  if (!payload.sync_meta || typeof payload.sync_meta !== "object" || Array.isArray(payload.sync_meta)) {
+  if (
+    !payload.sync_meta ||
+    typeof payload.sync_meta !== "object" ||
+    Array.isArray(payload.sync_meta)
+  ) {
     return jsonResponse({ success: false, error: "sync_meta must be an object." }, 400);
+  }
+
+  const validationError = [
+    validateSectionArray("groups", payload.groups),
+    validateSectionArray("ledgers", payload.ledgers),
+    validateSectionArray("vouchers", payload.vouchers),
+    validateSectionArray("stock_items", payload.stock_items),
+    validateSectionArray("outstanding", payload.outstanding),
+    validateSectionArray("profit_loss", payload.profit_loss),
+    validateSectionArray("balance_sheet", payload.balance_sheet),
+    validateSectionArray("trial_balance", payload.trial_balance),
+  ].find(Boolean);
+
+  if (validationError) {
+    return jsonResponse({ success: false, error: validationError }, 400);
   }
 
   const domainHints = summarizeDomains(payload);
   const records = summarizeRecords(payload);
+  const dryRun = isDryRun(request, payload);
 
-  if (!isDryRun(request, payload)) {
+  if (dryRun) {
     return jsonResponse({
-      success: false,
-      error: "Phase 2 direct ingest skeleton is deployed, but database ingestors are not enabled yet. Use dry-run mode for endpoint validation only.",
+      success: true,
+      dry_run: true,
       phase: INGEST_SKELETON_PHASE,
       contract_version: SYNC_CONTRACT_VERSION,
+      company_name: payload.company_name,
       domain_hints: domainHints,
       records,
-    }, 501);
+      warnings: domainHints.vouchers
+        ? [
+            "Voucher live writes are not supported in Phase 3. Use hybrid mode so vouchers stay on Render.",
+          ]
+        : [
+            "No database writes were performed. This is a dry-run validation response.",
+          ],
+    });
   }
 
-  return jsonResponse({
-    success: true,
-    dry_run: true,
-    phase: INGEST_SKELETON_PHASE,
-    contract_version: SYNC_CONTRACT_VERSION,
-    company_name: payload.company_name,
-    domain_hints: domainHints,
-    records,
-    warnings: [
-      "No database writes were performed. This is a Phase 2 dry-run validation response.",
-    ],
-  });
+  if (domainHints.vouchers) {
+    return jsonResponse(
+      {
+        success: false,
+        error:
+          "Phase 3 direct ingest supports masters and snapshots only. Use hybrid mode so vouchers continue through Render.",
+        phase: INGEST_SKELETON_PHASE,
+        contract_version: SYNC_CONTRACT_VERSION,
+        domain_hints: domainHints,
+        records,
+      },
+      409,
+    );
+  }
+
+  try {
+    const supabase = getSupabaseAdminClient();
+    const normalizedCompanyName = payload.company_name.trim();
+    const normalizedCompanyGuid =
+      normalizeTrimmedString(payload.company_guid) ||
+      (payload.company_info &&
+      typeof payload.company_info === "object"
+        ? normalizeTrimmedString(
+            (payload.company_info as Record<string, unknown>).guid,
+          )
+        : null);
+    const syncedAt = new Date().toISOString();
+
+    const company = await upsertCompanyRecord(
+      supabase,
+      normalizedCompanyName,
+      normalizedCompanyGuid,
+      payload.company_info,
+      payload.alter_ids,
+    );
+    const companyId = company.id as string;
+
+    let directRecords: Record<string, number> = {};
+    if (domainHints.masters || domainHints.snapshots) {
+      const { data, error } = await supabase.rpc("tb_ingest_phase3_hybrid", {
+        p_company_id: companyId,
+        p_synced_at: syncedAt,
+        p_groups: payload.groups ?? null,
+        p_ledgers: payload.ledgers ?? null,
+        p_stock_items: payload.stock_items ?? null,
+        p_outstanding: payload.outstanding ?? null,
+        p_profit_loss: payload.profit_loss ?? null,
+        p_balance_sheet: payload.balance_sheet ?? null,
+        p_trial_balance: payload.trial_balance ?? null,
+      });
+
+      if (error) {
+        throw new Error(withSchemaGuidance(error.message));
+      }
+
+      if (data && typeof data === "object" && !Array.isArray(data)) {
+        directRecords = data as Record<string, number>;
+      }
+    }
+
+    return jsonResponse({
+      success: true,
+      dry_run: false,
+      phase: INGEST_SKELETON_PHASE,
+      contract_version: SYNC_CONTRACT_VERSION,
+      company_name: normalizedCompanyName,
+      company_id: companyId,
+      domain_hints: domainHints,
+      records: directRecords,
+      synced_at: syncedAt,
+      direct_write_ready: true,
+      warnings:
+        domainHints.masters || domainHints.snapshots
+          ? []
+          : ["No direct-ingest sections were provided, so only company identity was refreshed."],
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Phase 3 direct ingest failed unexpectedly.";
+    return jsonResponse({ success: false, error: message }, 500);
+  }
 });

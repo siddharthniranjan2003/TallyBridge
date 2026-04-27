@@ -162,7 +162,7 @@ export class SyncEngine {
         company: companyName,
         line: `[TallyBridge] Control plane: ${controlPlaneUrl || "not configured"} | Ingest mode: ${syncIngestMode}`,
       });
-      if (syncIngestMode === "direct") {
+      if (syncIngestMode !== "render") {
         this.emit("sync-log", {
           company: companyName,
           line: `[TallyBridge] Direct ingest target: ${syncIngestUrl || "not configured"} | Contract v${syncContractVersion}`,

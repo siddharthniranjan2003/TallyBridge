@@ -18,7 +18,7 @@ type SettingsForm = {
   syncIntervalMinutes: number;
   controlPlaneUrl: string;
   controlPlaneApiKey: string;
-  syncIngestMode: "render" | "direct";
+  syncIngestMode: "render" | "hybrid" | "direct";
   syncIngestUrl: string;
   syncIngestKey: string;
   syncContractVersion: number;
@@ -168,7 +168,12 @@ export default function Settings() {
         syncIntervalMinutes: cfg.syncIntervalMinutes || DEFAULT_FORM.syncIntervalMinutes,
         controlPlaneUrl: cfg.controlPlaneUrl || cfg.backendUrl || "",
         controlPlaneApiKey: cfg.controlPlaneApiKey || cfg.apiKey || "",
-        syncIngestMode: cfg.syncIngestMode === "direct" ? "direct" : "render",
+        syncIngestMode:
+          cfg.syncIngestMode === "direct"
+            ? "direct"
+            : cfg.syncIngestMode === "hybrid"
+              ? "hybrid"
+              : "render",
         syncIngestUrl: cfg.syncIngestUrl || "",
         syncIngestKey: cfg.syncIngestKey || "",
         syncContractVersion: cfg.syncContractVersion || DEFAULT_FORM.syncContractVersion,
@@ -434,14 +439,15 @@ export default function Settings() {
       </Section>
 
       <Section title="Direct Ingest">
-        <Field label="Sync Ingest Mode" hint="Keep Render mode on until the direct ingest endpoint is deployed and tested.">
+        <Field label="Sync Ingest Mode" hint="Use hybrid once the direct ingest endpoint is deployed. Keep render mode if you want the old behavior.">
           <select
             value={form.syncIngestMode}
             onChange={(e) => set("syncIngestMode", e.target.value as SettingsForm["syncIngestMode"])}
             style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: "1px solid #dee2e6", background: "#fff" }}
           >
             <option value="render">Render /api/sync (default)</option>
-            <option value="direct">Direct ingest (Phase 2)</option>
+            <option value="hybrid">Hybrid direct ingest (masters/snapshots direct, vouchers on Render)</option>
+            <option value="direct">Direct ingest only (advanced, vouchers not supported yet)</option>
           </select>
         </Field>
 

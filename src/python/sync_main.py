@@ -119,7 +119,7 @@ CONTROL_PLANE_URL = (
     or os.environ.get("BACKEND_URL", "").strip()
 )
 SYNC_INGEST_MODE = (os.environ.get("SYNC_INGEST_MODE", "render") or "render").strip().lower()
-if SYNC_INGEST_MODE not in {"render", "direct"}:
+if SYNC_INGEST_MODE not in {"render", "hybrid", "direct"}:
     SYNC_INGEST_MODE = "render"
 SYNC_INGEST_URL = (os.environ.get("SYNC_INGEST_URL", "") or "").strip()
 try:
@@ -1333,7 +1333,7 @@ def main() -> int:
         f"[TallyBridge] Control plane: {CONTROL_PLANE_URL or 'not configured'} | "
         f"Ingest mode: {SYNC_INGEST_MODE} | Contract v{SYNC_CONTRACT_VERSION}"
     )
-    if SYNC_INGEST_MODE == "direct":
+    if SYNC_INGEST_MODE in {"hybrid", "direct"}:
         print(f"[TallyBridge] Direct ingest URL: {SYNC_INGEST_URL or 'not configured'}")
     product_info = detect_tally_product()
     if product_info.get("product_name"):
@@ -1461,7 +1461,7 @@ def main() -> int:
                                 "transport": {
                                     "control_plane_url": CONTROL_PLANE_URL,
                                     "ingest_mode": SYNC_INGEST_MODE,
-                                    "ingest_url": SYNC_INGEST_URL if SYNC_INGEST_MODE == "direct" else "",
+                                    "ingest_url": SYNC_INGEST_URL if SYNC_INGEST_MODE in {"hybrid", "direct"} else "",
                                     "contract_version": SYNC_CONTRACT_VERSION,
                                 },
                                 "total_sync_ms": round((time.perf_counter() - total_sync_started_at) * 1000, 2),
@@ -1805,7 +1805,7 @@ def main() -> int:
             "transport": {
                 "control_plane_url": CONTROL_PLANE_URL,
                 "ingest_mode": SYNC_INGEST_MODE,
-                "ingest_url": SYNC_INGEST_URL if SYNC_INGEST_MODE == "direct" else "",
+                "ingest_url": SYNC_INGEST_URL if SYNC_INGEST_MODE in {"hybrid", "direct"} else "",
                 "contract_version": SYNC_CONTRACT_VERSION,
             },
             "sections": section_metrics,

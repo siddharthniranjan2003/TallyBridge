@@ -26,7 +26,7 @@ export interface SyncRecordCounts {
   trial_balance: number;
 }
 
-export type SyncIngestMode = "render" | "direct";
+export type SyncIngestMode = "render" | "hybrid" | "direct";
 
 export interface AppConfig {
   tallyUrl: string;
@@ -133,7 +133,13 @@ function normalizeNonEmptyString(value: unknown) {
 }
 
 export function normalizeSyncIngestMode(value: unknown): SyncIngestMode {
-  return value === "direct" ? "direct" : "render";
+  if (value === "direct") {
+    return "direct";
+  }
+  if (value === "hybrid") {
+    return "hybrid";
+  }
+  return "render";
 }
 
 export function normalizeSyncContractVersion(value: unknown) {
