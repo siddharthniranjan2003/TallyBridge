@@ -1,7 +1,6 @@
 node_modules/
 dist/
 release/
-.env
 *.pyc
 __pycache__/
 src/python/__pycache__/
@@ -10,3 +9,4 @@ src/python/build/
 *.spec
 git_status*.txt
 out*.txt
+backend/.env
