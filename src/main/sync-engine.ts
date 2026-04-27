@@ -2,7 +2,18 @@ import { spawn } from "child_process";
 import { app, BrowserWindow } from "electron";
 import path from "path";
 import isDev from "electron-is-dev";
-import { Company, store, SyncRecordCounts, updateCompanyStatus } from "./store";
+import {
+  Company,
+  normalizeSyncContractVersion,
+  normalizeSyncIngestMode,
+  resolveControlPlaneApiKey,
+  resolveControlPlaneUrl,
+  resolveSyncIngestKey,
+  resolveSyncIngestUrl,
+  store,
+  SyncRecordCounts,
+  updateCompanyStatus,
+} from "./store";
 
 type SyncLifecycleCallbacks = {
   onSyncStart?: () => void;
@@ -127,6 +138,12 @@ export class SyncEngine {
       const odbcDsnOverride = config.odbcDsnOverride || process.env.TB_ODBC_DSN_OVERRIDE || "";
       const configuredSyncFromDate = (config.syncFromDate || process.env.TB_SYNC_FROM_DATE || "").trim();
       const configuredSyncToDate = (config.syncToDate || process.env.TB_SYNC_TO_DATE || "").trim();
+      const controlPlaneUrl = resolveControlPlaneUrl(config);
+      const controlPlaneApiKey = resolveControlPlaneApiKey(config);
+      const syncIngestMode = normalizeSyncIngestMode(config.syncIngestMode);
+      const syncIngestUrl = resolveSyncIngestUrl(config);
+      const syncIngestKey = resolveSyncIngestKey(config);
+      const syncContractVersion = normalizeSyncContractVersion(config.syncContractVersion);
       const backfillSignature = this.buildBackfillSignature(configuredSyncFromDate, configuredSyncToDate);
       const backfillPending = Boolean(
         backfillSignature
@@ -141,6 +158,16 @@ export class SyncEngine {
         company: companyName,
         line: `[TallyBridge] Sync trigger: ${trigger}`,
       });
+      this.emit("sync-log", {
+        company: companyName,
+        line: `[TallyBridge] Control plane: ${controlPlaneUrl || "not configured"} | Ingest mode: ${syncIngestMode}`,
+      });
+      if (syncIngestMode === "direct") {
+        this.emit("sync-log", {
+          company: companyName,
+          line: `[TallyBridge] Direct ingest target: ${syncIngestUrl || "not configured"} | Contract v${syncContractVersion}`,
+        });
+      }
       if (shouldUseManualBackfill && backfillSignature) {
         this.emit("sync-log", {
           company: companyName,
@@ -166,8 +193,14 @@ export class SyncEngine {
         TB_SYNC_TO_DATE: syncToDate,
         TB_SYNC_TRIGGER: trigger,
         TB_MANUAL_BACKFILL_PENDING: shouldUseManualBackfill ? "1" : "",
-        BACKEND_URL: config.backendUrl,
-        API_KEY: config.apiKey,
+        BACKEND_URL: controlPlaneUrl,
+        API_KEY: controlPlaneApiKey,
+        CONTROL_PLANE_URL: controlPlaneUrl,
+        CONTROL_PLANE_API_KEY: controlPlaneApiKey,
+        SYNC_INGEST_MODE: syncIngestMode,
+        SYNC_INGEST_URL: syncIngestUrl,
+        SYNC_INGEST_KEY: syncIngestKey,
+        SYNC_CONTRACT_VERSION: String(syncContractVersion),
         TB_USER_DATA_DIR: app.getPath("userData"),
       };
 

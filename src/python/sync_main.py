@@ -29,6 +29,7 @@ from cloud_pusher import (
     fetch_pending_push_vouchers,
     fetch_remote_alter_ids,
     get_last_push_error,
+    get_last_push_stats,
     mark_push_results,
     push,
 )
@@ -113,6 +114,18 @@ ENABLE_PUSH = os.environ.get(
 COMMAND = (os.environ.get("TB_COMMAND", "sync") or "sync").strip().lower()
 if COMMAND not in {"sync", "push_voucher", "poll_push_queue"}:
     COMMAND = "sync"
+CONTROL_PLANE_URL = (
+    os.environ.get("CONTROL_PLANE_URL", "").strip()
+    or os.environ.get("BACKEND_URL", "").strip()
+)
+SYNC_INGEST_MODE = (os.environ.get("SYNC_INGEST_MODE", "render") or "render").strip().lower()
+if SYNC_INGEST_MODE not in {"render", "direct"}:
+    SYNC_INGEST_MODE = "render"
+SYNC_INGEST_URL = (os.environ.get("SYNC_INGEST_URL", "") or "").strip()
+try:
+    SYNC_CONTRACT_VERSION = max(1, int(os.environ.get("SYNC_CONTRACT_VERSION", "1") or "1"))
+except ValueError:
+    SYNC_CONTRACT_VERSION = 1
 VOUCHER_OVERLAP_DAYS = 7
 ERP9_DETAIL_BATCH_SIZE = 25
 
@@ -1231,15 +1244,97 @@ def run_single_push_command() -> int:
         return 1
 
 
+def estimate_payload_bytes(value) -> int:
+    if value is None:
+        return 0
+    try:
+        return len(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        )
+    except Exception:
+        return 0
+
+
+def build_section_metric(
+    payload_value,
+    started_at: float,
+    source: str | None = None,
+    status: str = "fetched",
+    notes: str | None = None,
+) -> dict[str, object]:
+    row_count = len(payload_value) if isinstance(payload_value, list) else 0
+    return {
+        "status": status,
+        "rows": row_count,
+        "bytes": estimate_payload_bytes(payload_value),
+        "fetch_duration_ms": round((time.perf_counter() - started_at) * 1000, 2),
+        "source": source or "",
+        "notes": notes or "",
+    }
+
+
+def build_skipped_section_metric(reason: str) -> dict[str, object]:
+    return {
+        "status": "skipped",
+        "rows": 0,
+        "bytes": 0,
+        "fetch_duration_ms": 0,
+        "source": "",
+        "notes": reason,
+    }
+
+
+def log_section_metric(section_name: str, metric: dict[str, object]) -> None:
+    print(
+        "[Metrics] "
+        f"{section_name}: status={metric.get('status')} "
+        f"rows={metric.get('rows', 0)} "
+        f"bytes={metric.get('bytes', 0)} "
+        f"fetch_ms={metric.get('fetch_duration_ms', 0)} "
+        f"source={metric.get('source') or 'n/a'} "
+        f"notes={metric.get('notes') or 'n/a'}"
+    )
+
+
+def build_payload_section_sizes(payload: dict) -> dict[str, int]:
+    section_sizes: dict[str, int] = {}
+    for section_name in (
+        "company_info",
+        "alter_ids",
+        "groups",
+        "ledgers",
+        "vouchers",
+        "stock_items",
+        "outstanding",
+        "profit_loss",
+        "balance_sheet",
+        "trial_balance",
+    ):
+        section_sizes[section_name] = estimate_payload_bytes(payload.get(section_name))
+    return section_sizes
+
+
 def main() -> int:
     if COMMAND == "push_voucher":
         return run_single_push_command()
     if COMMAND == "poll_push_queue":
         return run_poll_push_queue_command()
 
+    total_sync_started_at = time.perf_counter()
     heartbeat_stop, heartbeat_thread = start_sync_heartbeat()
     print(f"[TallyBridge] Starting sync: {COMPANY}")
     print(f"[TallyBridge] Sync trigger: {SYNC_TRIGGER}")
+    print(
+        f"[TallyBridge] Control plane: {CONTROL_PLANE_URL or 'not configured'} | "
+        f"Ingest mode: {SYNC_INGEST_MODE} | Contract v{SYNC_CONTRACT_VERSION}"
+    )
+    if SYNC_INGEST_MODE == "direct":
+        print(f"[TallyBridge] Direct ingest URL: {SYNC_INGEST_URL or 'not configured'}")
     product_info = detect_tally_product()
     if product_info.get("product_name"):
         version_suffix = f" {product_info['product_version']}" if product_info.get("product_version") else ""
@@ -1248,6 +1343,7 @@ def main() -> int:
     transport_mode = "hybrid" if READ_MODE == "shadow" else READ_MODE
     shadow_mode = READ_MODE == "shadow"
     section_sources: dict[str, str] = {}
+    section_metrics: dict[str, dict[str, object]] = {}
     odbc_bridge = None
     odbc_status = {
         "state": "disabled" if transport_mode == "xml-only" else "not_configured",
@@ -1361,6 +1457,15 @@ def main() -> int:
                         "sync_meta": {
                             "change_detection_mode": SYNC_TRIGGER,
                             "manual_backfill_pending": MANUAL_BACKFILL_PENDING,
+                            "observability": {
+                                "transport": {
+                                    "control_plane_url": CONTROL_PLANE_URL,
+                                    "ingest_mode": SYNC_INGEST_MODE,
+                                    "ingest_url": SYNC_INGEST_URL if SYNC_INGEST_MODE == "direct" else "",
+                                    "contract_version": SYNC_CONTRACT_VERSION,
+                                },
+                                "total_sync_ms": round((time.perf_counter() - total_sync_started_at) * 1000, 2),
+                            },
                         },
                     }))
                     return 0
@@ -1401,8 +1506,13 @@ def main() -> int:
                 "trial_balance",
             ):
                 section_sources[section_name] = "skipped_tallyprime_safe_mode"
+                section_metrics[section_name] = build_skipped_section_metric(
+                    skip_voucher_reason or "voucher_family_skipped"
+                )
+                log_section_metric(section_name, section_metrics[section_name])
 
         if sync_plan.get("need_groups"):
+            groups_started_at = time.perf_counter()
             print("[Tally] Fetching groups...")
             used_odbc = False
             if transport_mode in {"auto", "hybrid"} and odbc_bridge:
@@ -1425,9 +1535,16 @@ def main() -> int:
             if used_odbc and shadow_mode:
                 print("[ODBC][Shadow] Groups compared against XML; XML remains authoritative.")
             record_updates["groups"] = len(groups)
+            section_metrics["groups"] = build_section_metric(
+                groups,
+                groups_started_at,
+                source=section_sources.get("groups"),
+            )
+            log_section_metric("groups", section_metrics["groups"])
             print(f"[Tally] Got {len(groups)} groups")
 
         if sync_plan.get("need_ledgers"):
+            ledgers_started_at = time.perf_counter()
             print("[Tally] Fetching ledgers...")
             used_odbc = False
             if transport_mode in {"auto", "hybrid"} and odbc_bridge:
@@ -1450,9 +1567,16 @@ def main() -> int:
             if used_odbc and shadow_mode:
                 print("[ODBC][Shadow] Ledgers compared against XML; XML remains authoritative.")
             record_updates["ledgers"] = len(ledgers)
+            section_metrics["ledgers"] = build_section_metric(
+                ledgers,
+                ledgers_started_at,
+                source=section_sources.get("ledgers"),
+            )
+            log_section_metric("ledgers", section_metrics["ledgers"])
             print(f"[Tally] Got {len(ledgers)} ledgers")
 
         if sync_plan.get("need_vouchers") and not voucher_family_skipped:
+            vouchers_started_at = time.perf_counter()
             voucher_from_date = sync_plan.get("voucher_from_date", from_date)
             voucher_to_date = sync_plan.get("voucher_to_date", to_date)
             # CHANGE 4 — detect TallyPrime, enable Day Book fallback for it too
@@ -1474,6 +1598,12 @@ def main() -> int:
                 )
                 section_sources["vouchers"] = voucher_source
                 record_updates["vouchers"] = len(vouchers)
+                section_metrics["vouchers"] = build_section_metric(
+                    vouchers,
+                    vouchers_started_at,
+                    source=section_sources.get("vouchers"),
+                )
+                log_section_metric("vouchers", section_metrics["vouchers"])
                 print(f"[Tally] Got {len(vouchers)} vouchers")
             except Exception as voucher_error:
                 voucher_family_skipped = True
@@ -1484,11 +1614,16 @@ def main() -> int:
                 warnings.append(warning)
                 print(f"[TallyBridge] {warning}")
                 section_sources["vouchers"] = "skipped_after_voucher_error"
+                section_metrics["vouchers"] = build_skipped_section_metric(str(voucher_error))
+                log_section_metric("vouchers", section_metrics["vouchers"])
                 for section_name in ("outstanding", "profit_loss", "balance_sheet", "trial_balance"):
                     section_sources[section_name] = "skipped_after_voucher_error"
+                    section_metrics[section_name] = build_skipped_section_metric("skipped_after_voucher_error")
+                    log_section_metric(section_name, section_metrics[section_name])
                 vouchers = None
 
         if sync_plan.get("need_stock"):
+            stock_started_at = time.perf_counter()
             print("[Tally] Fetching stock items...")
             used_odbc = False
             if transport_mode in {"auto", "hybrid"} and odbc_bridge:
@@ -1511,8 +1646,15 @@ def main() -> int:
             if used_odbc and shadow_mode:
                 print("[ODBC][Shadow] Stock compared against XML; XML remains authoritative.")
             record_updates["stock"] = len(stock)
+            section_metrics["stock_items"] = build_section_metric(
+                stock,
+                stock_started_at,
+                source=section_sources.get("stock_items"),
+            )
+            log_section_metric("stock_items", section_metrics["stock_items"])
 
         if sync_plan.get("need_outstanding") and not voucher_family_skipped:
+            outstanding_started_at = time.perf_counter()
             print("[Tally] Fetching outstanding...")
             try:
                 outstanding = (
@@ -1531,9 +1673,16 @@ def main() -> int:
                 )
             section_sources["outstanding"] = "xml"
             record_updates["outstanding"] = len(outstanding)
+            section_metrics["outstanding"] = build_section_metric(
+                outstanding,
+                outstanding_started_at,
+                source=section_sources.get("outstanding"),
+            )
+            log_section_metric("outstanding", section_metrics["outstanding"])
             print(f"[Tally] Got {len(outstanding)} outstanding entries")
 
         if sync_plan.get("need_reports") and not voucher_family_skipped:
+            profit_loss_started_at = time.perf_counter()
             print("[Tally] Fetching Profit & Loss...")
             try:
                 profit_loss = fetch_structured_section(
@@ -1551,8 +1700,15 @@ def main() -> int:
                 profit_loss = parse_profit_and_loss(get_profit_and_loss(from_date, to_date))
             section_sources["profit_loss"] = "xml"
             record_updates["profit_loss"] = len(profit_loss)
+            section_metrics["profit_loss"] = build_section_metric(
+                profit_loss,
+                profit_loss_started_at,
+                source=section_sources.get("profit_loss"),
+            )
+            log_section_metric("profit_loss", section_metrics["profit_loss"])
             print(f"[Tally] Got {len(profit_loss)} P&L line items")
 
+            balance_sheet_started_at = time.perf_counter()
             print("[Tally] Fetching Balance Sheet...")
             try:
                 balance_sheet = fetch_structured_section(
@@ -1570,8 +1726,15 @@ def main() -> int:
                 balance_sheet = parse_balance_sheet(get_balance_sheet(from_date, to_date))
             section_sources["balance_sheet"] = "xml"
             record_updates["balance_sheet"] = len(balance_sheet)
+            section_metrics["balance_sheet"] = build_section_metric(
+                balance_sheet,
+                balance_sheet_started_at,
+                source=section_sources.get("balance_sheet"),
+            )
+            log_section_metric("balance_sheet", section_metrics["balance_sheet"])
             print(f"[Tally] Got {len(balance_sheet)} Balance Sheet items")
 
+            trial_balance_started_at = time.perf_counter()
             print("[Tally] Fetching Trial Balance...")
             try:
                 trial_balance = fetch_structured_section(
@@ -1589,9 +1752,15 @@ def main() -> int:
                 trial_balance = parse_trial_balance(get_trial_balance(from_date, to_date))
             section_sources["trial_balance"] = "xml"
             record_updates["trial_balance"] = len(trial_balance)
+            section_metrics["trial_balance"] = build_section_metric(
+                trial_balance,
+                trial_balance_started_at,
+                source=section_sources.get("trial_balance"),
+            )
+            log_section_metric("trial_balance", section_metrics["trial_balance"])
             print(f"[Tally] Got {len(trial_balance)} Trial Balance items")
 
-        print("[Cloud] Pushing to backend...")
+        print("[Ingest] Preparing sync payload...")
         effective_voucher_sync_mode = (
             "none" if voucher_family_skipped else sync_plan.get("voucher_sync_mode", "full")
         )
@@ -1629,9 +1798,32 @@ def main() -> int:
                 "odbc_status": odbc_status,
             },
         }
+        payload_section_bytes = build_payload_section_sizes(payload)
+        payload_total_bytes = estimate_payload_bytes(payload)
+        total_extract_ms = round((time.perf_counter() - total_sync_started_at) * 1000, 2)
+        payload["sync_meta"]["observability"] = {
+            "transport": {
+                "control_plane_url": CONTROL_PLANE_URL,
+                "ingest_mode": SYNC_INGEST_MODE,
+                "ingest_url": SYNC_INGEST_URL if SYNC_INGEST_MODE == "direct" else "",
+                "contract_version": SYNC_CONTRACT_VERSION,
+            },
+            "sections": section_metrics,
+            "payload_section_bytes": payload_section_bytes,
+            "payload_total_bytes": payload_total_bytes,
+            "extract_duration_ms": total_extract_ms,
+        }
+        print(
+            "[Metrics] Payload total_bytes="
+            f"{payload_total_bytes} "
+            f"extract_ms={total_extract_ms} "
+            f"sections={payload_section_bytes}"
+        )
 
         if not push(payload):
             raise RuntimeError(get_last_push_error() or "Cloud push failed")
+        upload_stats = get_last_push_stats()
+        print(f"[Metrics] Upload stats: {upload_stats}")
 
         if current_ids and not voucher_family_skipped:
             if save_cached_ids(current_ids):
@@ -1647,12 +1839,20 @@ def main() -> int:
         if ENABLE_PUSH:
             run_pending_push_cycle(warnings)
 
+        total_sync_ms = round((time.perf_counter() - total_sync_started_at) * 1000, 2)
         print(json.dumps({
             "status": "success",
             "records": record_updates,
             "voucher_sync_mode": effective_voucher_sync_mode,
             "warnings": warnings,
             "sync_meta": payload["sync_meta"],
+            "observability": {
+                "sections": section_metrics,
+                "payload_section_bytes": payload_section_bytes,
+                "payload_total_bytes": payload_total_bytes,
+                "upload": upload_stats,
+                "total_sync_ms": total_sync_ms,
+            },
         }))
         return 0
     except Exception as error:

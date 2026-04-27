@@ -3,7 +3,19 @@ import { spawn } from "child_process";
 import axios from "axios";
 import isDev from "electron-is-dev";
 import path from "path";
-import { store, addCompany, removeCompany, resetStaleSyncStatuses, TallyCompanySelection } from "./store";
+import {
+  addCompany,
+  normalizeSyncContractVersion,
+  normalizeSyncIngestMode,
+  removeCompany,
+  resetStaleSyncStatuses,
+  resolveControlPlaneApiKey,
+  resolveControlPlaneUrl,
+  resolveSyncIngestKey,
+  resolveSyncIngestUrl,
+  store,
+  TallyCompanySelection,
+} from "./store";
 import { SyncEngine } from "./sync-engine";
 
 const TALLY_REQUEST_TIMEOUT_MS = 5000;
@@ -507,10 +519,33 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
   ipcMain.handle("get-companies", () => store.get("companies"));
 
   ipcMain.handle("save-settings", (_, s) => {
+    const legacyBackendUrl = typeof s.backendUrl === "string" ? s.backendUrl.trim() : "";
+    const legacyApiKey = typeof s.apiKey === "string" ? s.apiKey.trim() : "";
+    const controlPlaneUrl = resolveControlPlaneUrl({
+      controlPlaneUrl: s.controlPlaneUrl,
+      backendUrl: legacyBackendUrl,
+    });
+    const controlPlaneApiKey = resolveControlPlaneApiKey({
+      controlPlaneApiKey: s.controlPlaneApiKey,
+      apiKey: legacyApiKey,
+    });
+    const syncIngestUrl = resolveSyncIngestUrl({
+      syncIngestUrl: s.syncIngestUrl,
+    });
+    const syncIngestKey = resolveSyncIngestKey({
+      syncIngestKey: s.syncIngestKey,
+    });
+
     store.set("tallyUrl", s.tallyUrl);
     store.set("syncIntervalMinutes", Number(s.syncIntervalMinutes));
-    store.set("backendUrl", s.backendUrl);
-    store.set("apiKey", s.apiKey);
+    store.set("backendUrl", controlPlaneUrl);
+    store.set("apiKey", controlPlaneApiKey);
+    store.set("controlPlaneUrl", controlPlaneUrl);
+    store.set("controlPlaneApiKey", controlPlaneApiKey);
+    store.set("syncIngestMode", normalizeSyncIngestMode(s.syncIngestMode));
+    store.set("syncIngestUrl", syncIngestUrl);
+    store.set("syncIngestKey", syncIngestKey);
+    store.set("syncContractVersion", normalizeSyncContractVersion(s.syncContractVersion));
     store.set("accountEmail", s.accountEmail);
     store.set("readMode", s.readMode || "auto");
     store.set("odbcDsnOverride", s.odbcDsnOverride || "");

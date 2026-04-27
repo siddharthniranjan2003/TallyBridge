@@ -3,7 +3,7 @@ import { app, BrowserWindow } from "electron";
 import isDev from "electron-is-dev";
 import path from "path";
 
-import { Company, store } from "./store";
+import { Company, resolveControlPlaneApiKey, resolveControlPlaneUrl, store } from "./store";
 import { SyncEngine } from "./sync-engine";
 
 const DEFAULT_PUSH_QUEUE_POLL_INTERVAL_MS = 5000;
@@ -94,8 +94,10 @@ export class PushQueuePoller {
     try {
       const config = store.store;
       const companies = store.get("companies").filter((company) => company.enabled);
+      const controlPlaneUrl = resolveControlPlaneUrl(config);
+      const controlPlaneApiKey = resolveControlPlaneApiKey(config);
 
-      if (!config.backendUrl.trim() || !config.apiKey.trim() || !companies.length) {
+      if (!controlPlaneUrl || !controlPlaneApiKey || !companies.length) {
         return;
       }
 
@@ -110,8 +112,8 @@ export class PushQueuePoller {
 
         await this.pollCompanyQueue(company, {
           tallyUrl: config.tallyUrl,
-          backendUrl: config.backendUrl,
-          apiKey: config.apiKey,
+          controlPlaneUrl,
+          controlPlaneApiKey,
         });
       }
     } finally {
@@ -123,8 +125,8 @@ export class PushQueuePoller {
     company: Company,
     config: {
       tallyUrl: string;
-      backendUrl: string;
-      apiKey: string;
+      controlPlaneUrl: string;
+      controlPlaneApiKey: string;
     },
   ) {
     return new Promise<void>((resolve) => {
@@ -139,8 +141,10 @@ export class PushQueuePoller {
         TALLY_URL: config.tallyUrl,
         TALLY_COMPANY: company.name,
         TALLY_COMPANY_GUID: company.tallyGuid || "",
-        BACKEND_URL: config.backendUrl,
-        API_KEY: config.apiKey,
+        BACKEND_URL: config.controlPlaneUrl,
+        API_KEY: config.controlPlaneApiKey,
+        CONTROL_PLANE_URL: config.controlPlaneUrl,
+        CONTROL_PLANE_API_KEY: config.controlPlaneApiKey,
         TB_USER_DATA_DIR: app.getPath("userData"),
       };
 

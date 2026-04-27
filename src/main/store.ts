@@ -26,11 +26,19 @@ export interface SyncRecordCounts {
   trial_balance: number;
 }
 
+export type SyncIngestMode = "render" | "direct";
+
 export interface AppConfig {
   tallyUrl: string;
   syncIntervalMinutes: number;
   backendUrl: string;
   apiKey: string;
+  controlPlaneUrl: string;
+  controlPlaneApiKey: string;
+  syncIngestMode: SyncIngestMode;
+  syncIngestUrl: string;
+  syncIngestKey: string;
+  syncContractVersion: number;
   accountEmail: string;
   readMode: "auto" | "xml-only" | "hybrid";
   odbcDsnOverride: string;
@@ -53,6 +61,12 @@ export const store = new Store<AppConfig>({
     syncIntervalMinutes: 5,
     backendUrl: "",
     apiKey: "",
+    controlPlaneUrl: "",
+    controlPlaneApiKey: "",
+    syncIngestMode: "render",
+    syncIngestUrl: "",
+    syncIngestKey: "",
+    syncContractVersion: 1,
     accountEmail: "",
     readMode: "auto",
     odbcDsnOverride: "",
@@ -112,4 +126,39 @@ export function resetStaleSyncStatuses() {
   }
 
   return changed;
+}
+
+function normalizeNonEmptyString(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+export function normalizeSyncIngestMode(value: unknown): SyncIngestMode {
+  return value === "direct" ? "direct" : "render";
+}
+
+export function normalizeSyncContractVersion(value: unknown) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 1;
+}
+
+export function resolveControlPlaneUrl(config: Pick<AppConfig, "controlPlaneUrl" | "backendUrl">) {
+  return normalizeNonEmptyString(config.controlPlaneUrl)
+    || normalizeNonEmptyString(config.backendUrl);
+}
+
+export function resolveControlPlaneApiKey(config: Pick<AppConfig, "controlPlaneApiKey" | "apiKey">) {
+  return normalizeNonEmptyString(config.controlPlaneApiKey)
+    || normalizeNonEmptyString(config.apiKey);
+}
+
+export function resolveSyncIngestUrl(
+  config: Pick<AppConfig, "syncIngestUrl">,
+) {
+  return normalizeNonEmptyString(config.syncIngestUrl);
+}
+
+export function resolveSyncIngestKey(
+  config: Pick<AppConfig, "syncIngestKey">,
+) {
+  return normalizeNonEmptyString(config.syncIngestKey);
 }
