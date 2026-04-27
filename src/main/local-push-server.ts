@@ -1,5 +1,5 @@
 import { spawn } from "child_process";
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, dialog } from "electron";
 import { createServer, IncomingMessage, Server, ServerResponse } from "http";
 import path from "path";
 import isDev from "electron-is-dev";
@@ -148,6 +148,12 @@ export class LocalPushServer {
     this.server.on("error", (error) => {
       const message = error instanceof Error ? error.message : String(error);
       this.log(`[Push API] Local server error: ${message}`);
+      if ((error as NodeJS.ErrnoException).code === "EADDRINUSE") {
+        dialog.showErrorBox(
+          "TallyBridge Port Conflict",
+          `Port ${this.port} is already in use.\n\nAnother TallyBridge instance may be running. Close it and restart the app.`,
+        );
+      }
     });
 
     this.server.listen(this.port, DEFAULT_LOCAL_PUSH_HOST, () => {
