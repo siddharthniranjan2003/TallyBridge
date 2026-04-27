@@ -7,6 +7,7 @@
     "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
     "build:renderer": "vite build",
     "build:main": "tsc -p tsconfig.main.json",
+    "build:python": "cd src/python && pyinstaller --onefile --name tallybridge-engine --distpath ../../python-dist --workpath ../../python-build --specpath ../../python-build --add-data definitions;definitions --add-data tally_odbc_helper.ps1;. --collect-all xmltodict --collect-all requests --collect-all dotenv sync_main.py",
     "build": "npm run build:renderer && npm run build:main",
     "dist": "npm run build && electron-builder",
     "postinstall": "electron-builder install-app-deps"
@@ -30,6 +31,10 @@
       {
         "from": "assets/",
         "to": "assets/"
+      },
+      {
+        "from": "python-dist/tallybridge-engine.exe",
+        "to": "python-runtime/tallybridge-engine.exe"
       }
     ],
     "win": {
