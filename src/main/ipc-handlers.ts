@@ -1,8 +1,9 @@
-import { ipcMain, BrowserWindow } from "electron";
+import { ipcMain, BrowserWindow, app, shell } from "electron";
 import { spawn } from "child_process";
 import axios from "axios";
 import isDev from "electron-is-dev";
 import path from "path";
+import { logger } from "./logger";
 import {
   addCompany,
   normalizeSyncContractVersion,
@@ -678,6 +679,23 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
       console.error("get-tally-companies error:", e);
       return { success: false, companies: [], error: e?.message || "Could not read companies from Tally." };
     }
+  });
+
+  ipcMain.handle("open-log-file", () => {
+    const logPath = logger.getLogPath();
+    shell.showItemInFolder(logPath);
+  });
+
+  ipcMain.handle("get-startup-setting", () => {
+    return app.getLoginItemSettings().openAtLogin;
+  });
+
+  ipcMain.handle("set-startup-setting", (_, enable: boolean) => {
+    app.setLoginItemSettings({
+      openAtLogin: enable,
+      openAsHidden: true,
+    });
+    return { success: true };
   });
 
   ipcMain.handle("get-tally-company-date-ranges", async () => {

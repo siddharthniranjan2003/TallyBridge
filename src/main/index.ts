@@ -1,11 +1,16 @@
 import { app, BrowserWindow, ipcMain } from "electron";
 import path from "path";
 import isDev from "electron-is-dev";
+import { initLogger, logger } from "./logger";
 import { setupTray } from "./tray";
 import { setupIpcHandlers } from "./ipc-handlers";
 import { LocalPushServer } from "./local-push-server";
 import { PushQueuePoller } from "./push-queue-poller";
 import { SyncEngine } from "./sync-engine";
+
+if (!isDev) {
+  initLogger();
+}
 
 let mainWindow: BrowserWindow | null = null;
 let localPushServer: LocalPushServer | null = null;

@@ -28,6 +28,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getTallyCompanies: () => ipcRenderer.invoke("get-tally-companies"),
   getTallyCompanyDateRanges: () => ipcRenderer.invoke("get-tally-company-date-ranges"),
 
+  // Startup
+  getStartupSetting: () => ipcRenderer.invoke("get-startup-setting"),
+  setStartupSetting: (enable: boolean) => ipcRenderer.invoke("set-startup-setting", enable),
+
+  // Logs
+  openLogFile: () => ipcRenderer.invoke("open-log-file"),
+
   // Events from main → renderer
   on: (channel: string, callback: (...args: any[]) => void) => {
     if (!ALLOWED_CHANNELS.has(channel)) {

@@ -92,6 +92,7 @@ export default function Settings() {
   const [selectedRangeKey, setSelectedRangeKey] = useState("");
   const [loadingRanges, setLoadingRanges] = useState(false);
   const [rangeError, setRangeError] = useState<string | null>(null);
+  const [startOnLogin, setStartOnLogin] = useState(false);
 
   const selectedCompanyRange = useMemo(
     () => companyRanges.find((range) => getRangeKey(range) === selectedRangeKey) || null,
@@ -156,10 +157,14 @@ export default function Settings() {
   useEffect(() => {
     let active = true;
     (async () => {
-      const cfg = await window.electronAPI.getConfig();
+      const [cfg, startupEnabled] = await Promise.all([
+        window.electronAPI.getConfig(),
+        window.electronAPI.getStartupSetting(),
+      ]);
       if (!active) {
         return;
       }
+      setStartOnLogin(Boolean(startupEnabled));
 
       const companies = (cfg.companies || []) as CompanyRef[];
       setConfiguredCompanies(companies);
@@ -476,6 +481,32 @@ export default function Settings() {
             value={form.syncContractVersion}
             onChange={(e) => set("syncContractVersion", Number(e.target.value) || 1)}
           />
+        </Field>
+      </Section>
+
+      <Section title="App Behaviour">
+        <Field label="Start on Windows startup">
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <input
+              type="checkbox"
+              id="startOnLogin"
+              checked={startOnLogin}
+              onChange={async (e) => {
+                const next = e.target.checked;
+                setStartOnLogin(next);
+                await window.electronAPI.setStartupSetting(next);
+              }}
+              style={{ width: 16, height: 16, cursor: "pointer" }}
+            />
+            <label htmlFor="startOnLogin" style={{ fontSize: 13, color: "#374151", cursor: "pointer" }}>
+              Launch TallyBridge automatically when Windows starts
+            </label>
+          </div>
+        </Field>
+        <Field label="Error Logs" hint="Share this file when reporting issues">
+          <button onClick={() => window.electronAPI.openLogFile()} style={testBtn}>
+            Open Log File
+          </button>
         </Field>
       </Section>
 
