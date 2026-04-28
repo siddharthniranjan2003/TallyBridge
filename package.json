@@ -1,6 +1,6 @@
 {
   "name": "tallybridge",
-  "version": "1.0.0",
+  "version": "1.2.2",
   "description": "TallyPrime cloud sync desktop connector",
   "main": "dist/main/index.js",
   "scripts": {
@@ -58,7 +58,6 @@
   },
   "dependencies": {
     "axios": "^1.14.0",
-    "electron": "^41.0.4",
     "electron-is-dev": "^3.0.1",
     "electron-store": "^11.0.2",
     "react": "^19.2.4",
@@ -76,6 +75,7 @@
     "autoprefixer": "^10.4.27",
     "concurrently": "^9.2.1",
     "cross-env": "^10.1.0",
+    "electron": "^41.0.4",
     "electron-builder": "^26.8.1",
     "esbuild": "^0.27.7",
     "postcss": "^8.5.8",
@@ -85,6 +85,6 @@
     "wait-on": "^9.0.4"
   },
   "keywords": [],
-  "author": "",
+  "author": "Siddharth Niranjan",
   "license": "ISC"
 }

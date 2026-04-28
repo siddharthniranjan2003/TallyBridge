@@ -100,7 +100,7 @@ export default function Settings() {
   );
   const syncFromOptions = selectedCompanyRange?.availableFromDates || [];
   const syncToMin = form.syncFromDate || selectedCompanyRange?.booksFrom || "";
-  const syncToMax = selectedCompanyRange?.booksTo || "";
+  const syncToMax = new Date().toISOString().slice(0, 10);
 
   const set = <K extends keyof SettingsForm>(key: K, val: SettingsForm[K]) =>
     setForm((current) => ({ ...current, [key]: val }));
@@ -256,16 +256,11 @@ export default function Settings() {
     }
 
     const nextFrom = selectedCompanyRange.availableFromDates[0] || selectedCompanyRange.booksFrom || "";
-    const nextTo = clampIsoDate(
-      selectedCompanyRange.booksTo || "",
-      nextFrom || selectedCompanyRange.booksFrom,
-      selectedCompanyRange.booksTo,
-    );
 
     setForm((current) => ({
       ...current,
       syncFromDate: nextFrom,
-      syncToDate: nextTo,
+      syncToDate: new Date().toISOString().slice(0, 10),
     }));
   };
 

@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import net from "net";
 import { app, BrowserWindow } from "electron";
 import path from "path";
 import isDev from "electron-is-dev";
@@ -33,9 +34,46 @@ export class SyncEngine {
   }
 
   start() {
-    console.log("[SyncEngine] Starting...");
-    // Run one sync immediately. Later runs are scheduled after each sync completes.
-    setTimeout(() => this.runAllCompanies("startup"), 3000);
+    console.log("[SyncEngine] Starting — polling for TallyPrime on port 9000...");
+    this.waitForTallyThenSync();
+  }
+
+  private waitForTallyThenSync() {
+    void this.checkTallyPort().then((up) => {
+      if (up) {
+        console.log("[SyncEngine] TallyPrime reachable — beginning startup sync.");
+        void this.runAllCompanies("startup");
+      } else {
+        console.log("[SyncEngine] TallyPrime not reachable yet, retrying in 60s...");
+        this.emit("sync-log", {
+          company: "System",
+          line: "[TallyBridge] Waiting for TallyPrime to start (checking port 9000 every 60s)...",
+        });
+        this.timer = setTimeout(() => this.waitForTallyThenSync(), 60_000);
+      }
+    });
+  }
+
+  private checkTallyPort(): Promise<boolean> {
+    const tallyUrl = store.get("tallyUrl") || "http://localhost:9000";
+    let host = "127.0.0.1";
+    let port = 9000;
+    try {
+      const parsed = new URL(tallyUrl);
+      host = parsed.hostname || "127.0.0.1";
+      port = Number(parsed.port) || (parsed.protocol === "https:" ? 443 : 80);
+    } catch {
+      // use defaults
+    }
+    return new Promise((resolve) => {
+      const socket = new net.Socket();
+      const done = (result: boolean) => { socket.destroy(); resolve(result); };
+      socket.setTimeout(3000);
+      socket.once("connect", () => done(true));
+      socket.once("timeout", () => done(false));
+      socket.once("error", () => done(false));
+      socket.connect(port, host);
+    });
   }
 
   stop() {
@@ -92,6 +130,17 @@ export class SyncEngine {
     const companies = store.get("companies").filter((c) => c.enabled);
     if (!companies.length) {
       this.emit("sync-log", { company: "System", line: "No companies to sync. Add a company first." });
+      return;
+    }
+
+    // Pre-flight: confirm TallyPrime's port is open before spawning any Python process
+    const tallyUp = await this.checkTallyPort();
+    if (!tallyUp) {
+      this.emit("sync-log", {
+        company: "System",
+        line: "[TallyBridge] TallyPrime not reachable — sync skipped. Will retry next interval.",
+      });
+      this.scheduleNext();
       return;
     }
 
