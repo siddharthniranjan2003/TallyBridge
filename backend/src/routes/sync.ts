@@ -913,7 +913,15 @@ function isIsoDateString(value: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
 
-function shiftIsoDate(value: string, days: number) {
+function getTodayIsoDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function getDaysInMonth(year: number, month: number) {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+function subtractCalendarMonthsIsoDate(value: string, months: number) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   if (!match) {
     throw new Error(`Invalid ISO date: ${value}`);
@@ -923,9 +931,17 @@ function shiftIsoDate(value: string, days: number) {
   const year = Number(yearRaw);
   const month = Number(monthRaw);
   const day = Number(dayRaw);
-  const date = new Date(Date.UTC(year, month - 1, day));
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
+  const totalMonths = (year * 12) + (month - 1) - months;
+  const targetYear = Math.floor(totalMonths / 12);
+  const targetMonthIndex = totalMonths % 12;
+  const targetMonth = targetMonthIndex + 1;
+  const targetDay = Math.min(day, getDaysInMonth(targetYear, targetMonth));
+
+  return [
+    String(targetYear).padStart(4, "0"),
+    String(targetMonth).padStart(2, "0"),
+    String(targetDay).padStart(2, "0"),
+  ].join("-");
 }
 
 function toMoney(value: unknown) {
@@ -1054,25 +1070,6 @@ function normalizeInventoryReportKey(value: unknown) {
   return INVENTORY_REPORT_FILTER_ALIASES.get(normalizeReportFilterToken(normalized)) ?? null;
 }
 
-async function getLatestCompanyVoucherDate(companyId: string) {
-  const { data, error } = await supabase
-    .from("vouchers")
-    .select("date, id")
-    .eq("company_id", companyId)
-    .not("date", "is", null)
-    .order("date", { ascending: false })
-    .order("id", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (error) {
-    throw new Error(`Latest voucher date lookup failed: ${error.message}`);
-  }
-
-  const latestDate = normalizeTrimmedString(data?.date);
-  return latestDate && isIsoDateString(latestDate) ? latestDate : null;
-}
-
 type VoucherItemMetrics = {
   amountRaw: number;
   quantityRaw: number;
@@ -1184,7 +1181,6 @@ async function buildInventoryIntelligenceReport(
     companyId,
     companyGuid,
     companyName,
-    asOfDateInput,
     thresholdInput,
     limitInput,
     reportKeyFilter,
@@ -1192,28 +1188,18 @@ async function buildInventoryIntelligenceReport(
     companyId: string;
     companyGuid: string | null;
     companyName: string | null;
-    asOfDateInput: unknown;
     thresholdInput: unknown;
     limitInput: unknown;
     reportKeyFilter?: InventoryReportKey | null;
   },
 ) {
-  const requestedAsOfDate = normalizeTrimmedString(asOfDateInput);
-  if (requestedAsOfDate && !isIsoDateString(requestedAsOfDate)) {
-    throw new Error("as_of_date must be in YYYY-MM-DD format");
-  }
-
-  const asOfDate = requestedAsOfDate ?? await getLatestCompanyVoucherDate(companyId);
-  if (!asOfDate) {
-    throw new Error("No voucher date available for this company");
-  }
-
+  const asOfDate = getTodayIsoDate();
   const threshold = parseThresholdValue(thresholdInput);
   const limit = parseLimitValue(limitInput);
 
-  const saleWindowFrom = shiftIsoDate(asOfDate, -179);
+  const saleWindowFrom = subtractCalendarMonthsIsoDate(asOfDate, 6);
   const saleWindowTo = asOfDate;
-  const purchaseWindowFrom = shiftIsoDate(asOfDate, -29);
+  const purchaseWindowFrom = subtractCalendarMonthsIsoDate(asOfDate, 1);
   const purchaseWindowTo = asOfDate;
 
   const saleVoucherRows = await fetchAllPages("Inventory GST SALE vouchers", (from, to) =>
@@ -2623,18 +2609,11 @@ router.get("/reorder-levels", requireApiKey, async (req, res) => {
       companyId: companyLookup.companyId,
       companyGuid: companyLookup.companyGuid,
       companyName: companyLookup.companyName,
-      asOfDateInput: req.query.as_of_date,
       thresholdInput: req.query.threshold,
       limitInput: req.query.limit,
     });
 
     return sendInventoryIntelligenceResponse(res, report, format);
-
-
-    // Parse as_of_date — default 2019-03-31 (FY end for K.V. ENTERPRISES 18-19)
-
-
-
   } catch (err: any) {
     console.error("[ReorderLevels] Error:", err.message);
     res.status(500).json({ error: err.message });
@@ -2666,7 +2645,6 @@ router.get("/reorder-levels/:reportKey", requireApiKey, async (req, res) => {
       companyId: companyLookup.companyId,
       companyGuid: companyLookup.companyGuid,
       companyName: companyLookup.companyName,
-      asOfDateInput: req.query.as_of_date,
       thresholdInput: req.query.threshold,
       limitInput: req.query.limit,
       reportKeyFilter: reportKey,
