@@ -900,7 +900,13 @@ type InventoryIntelligenceItem = {
   avg_sale_6m: number;
   last_month_purchase: number;
   closing_stock_value: number;
-  current_quantity: number;
+  sales_qty_6m_avg: number;
+  purchase_qty_1m: number;
+  closing_stock_qty: number;
+  purchase_rate: number | null;
+  sales_amount: number | null;
+  purchase_amount: number | null;
+  closing_stock_amount: number | null;
 };
 
 function isIsoDateString(value: string) {
@@ -1008,17 +1014,22 @@ async function getLatestCompanyVoucherDate(companyId: string) {
   return latestDate && isIsoDateString(latestDate) ? latestDate : null;
 }
 
-async function aggregateVoucherItemAmountsByName(voucherIds: string[], label: string) {
-  const amountsByItem = new Map<string, number>();
+type VoucherItemMetrics = {
+  amountRaw: number;
+  quantityRaw: number;
+};
+
+async function aggregateVoucherItemMetricsByName(voucherIds: string[], label: string) {
+  const metricsByItem = new Map<string, VoucherItemMetrics>();
   if (!voucherIds.length) {
-    return amountsByItem;
+    return metricsByItem;
   }
 
   for (const chunk of chunkArray(voucherIds, 100)) {
     const rows = await fetchAllPages(`${label} rows`, (from, to) =>
       supabase
         .from("voucher_items")
-        .select("id, stock_item_name, amount")
+        .select("id, stock_item_name, amount, quantity")
         .in("voucher_id", chunk)
         .order("id", { ascending: true })
         .range(from, to),
@@ -1031,11 +1042,16 @@ async function aggregateVoucherItemAmountsByName(voucherIds: string[], label: st
       }
 
       const amount = Math.abs(Number((row as any).amount) || 0);
-      amountsByItem.set(stockItemName, (amountsByItem.get(stockItemName) ?? 0) + amount);
+      const quantity = Math.abs(Number((row as any).quantity) || 0);
+      const current = metricsByItem.get(stockItemName) ?? { amountRaw: 0, quantityRaw: 0 };
+      metricsByItem.set(stockItemName, {
+        amountRaw: current.amountRaw + amount,
+        quantityRaw: current.quantityRaw + quantity,
+      });
     }
   }
 
-  return amountsByItem;
+  return metricsByItem;
 }
 
 function classifyInventoryScenarioV2(
@@ -1170,14 +1186,14 @@ async function buildInventoryIntelligenceReport(
     .filter((row: any) => typeof row?.id === "string" && isPurchaseVoucherType(row?.voucher_type))
     .map((row: any) => row.id as string);
 
-  const [saleAmountsByItem, purchaseAmountsByItem, stockItems] = await Promise.all([
-    aggregateVoucherItemAmountsByName(
+  const [saleMetricsByItem, purchaseMetricsByItem, stockItems] = await Promise.all([
+    aggregateVoucherItemMetricsByName(
       saleVoucherRows
         .map((row: any) => row?.id)
         .filter((value: unknown): value is string => typeof value === "string" && value.length > 0),
       "Inventory GST SALE voucher items",
     ),
-    aggregateVoucherItemAmountsByName(purchaseVoucherIds, "Inventory purchase voucher items"),
+    aggregateVoucherItemMetricsByName(purchaseVoucherIds, "Inventory purchase voucher items"),
     fetchAllPages("Inventory stock items", (from, to) =>
       supabase
         .from("stock_items")
@@ -1210,8 +1226,8 @@ async function buildInventoryIntelligenceReport(
 
   const allItemNames = new Set<string>([
     ...stockItemsByName.keys(),
-    ...saleAmountsByItem.keys(),
-    ...purchaseAmountsByItem.keys(),
+    ...saleMetricsByItem.keys(),
+    ...purchaseMetricsByItem.keys(),
   ]);
 
   const allClassifiedItems: InventoryIntelligenceItem[] = [];
@@ -1219,11 +1235,22 @@ async function buildInventoryIntelligenceReport(
 
   for (const stockItemName of allItemNames) {
     const stockSnapshot = stockItemsByName.get(stockItemName);
-    const totalSaleAmountRaw = saleAmountsByItem.get(stockItemName) ?? 0;
+    const saleMetrics = saleMetricsByItem.get(stockItemName) ?? { amountRaw: 0, quantityRaw: 0 };
+    const purchaseMetrics = purchaseMetricsByItem.get(stockItemName) ?? { amountRaw: 0, quantityRaw: 0 };
+    const totalSaleAmountRaw = saleMetrics.amountRaw;
+    const totalSaleQuantityRaw = saleMetrics.quantityRaw;
     const avgSale6mRaw = totalSaleAmountRaw / 6;
-    const lastMonthPurchaseRaw = purchaseAmountsByItem.get(stockItemName) ?? 0;
+    const avgSaleQuantity6mRaw = totalSaleQuantityRaw / 6;
+    const lastMonthPurchaseRaw = purchaseMetrics.amountRaw;
+    const purchaseQuantity1mRaw = purchaseMetrics.quantityRaw;
     const closingQuantityRaw = stockSnapshot?.closingQuantityRaw ?? 0;
     const closingStockRaw = stockSnapshot?.closingStockRaw ?? 0;
+    const purchaseRateRaw = purchaseQuantity1mRaw > 0
+      ? lastMonthPurchaseRaw / purchaseQuantity1mRaw
+      : null;
+    const salesAmountRaw = purchaseRateRaw == null ? null : avgSaleQuantity6mRaw * purchaseRateRaw;
+    const purchaseAmountRaw = purchaseRateRaw == null ? null : purchaseQuantity1mRaw * purchaseRateRaw;
+    const closingStockAmountRaw = purchaseRateRaw == null ? null : closingQuantityRaw * purchaseRateRaw;
     const avgSale6mPaise = toPaise(avgSale6mRaw);
     const lastMonthPurchasePaise = toPaise(lastMonthPurchaseRaw);
     const closingStockPaise = toPaise(closingStockRaw);
@@ -1256,7 +1283,13 @@ async function buildInventoryIntelligenceReport(
       avg_sale_6m: toMoney(avgSale6mRaw),
       last_month_purchase: toMoney(lastMonthPurchaseRaw),
       closing_stock_value: toMoney(closingStockRaw),
-      current_quantity: toMoney(closingQuantityRaw),
+      sales_qty_6m_avg: toMoney(avgSaleQuantity6mRaw),
+      purchase_qty_1m: toMoney(purchaseQuantity1mRaw),
+      closing_stock_qty: toMoney(closingQuantityRaw),
+      purchase_rate: purchaseRateRaw == null ? null : toMoney(purchaseRateRaw),
+      sales_amount: salesAmountRaw == null ? null : toMoney(salesAmountRaw),
+      purchase_amount: purchaseAmountRaw == null ? null : toMoney(purchaseAmountRaw),
+      closing_stock_amount: closingStockAmountRaw == null ? null : toMoney(closingStockAmountRaw),
     });
   }
 
