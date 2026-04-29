@@ -1145,7 +1145,6 @@ async function buildInventoryIntelligenceReport(
 
   const threshold = parseThresholdValue(thresholdInput);
   const limit = parseLimitValue(limitInput);
-  const thresholdPaise = Math.round(threshold * 100);
 
   const saleWindowFrom = shiftIsoDate(asOfDate, -179);
   const saleWindowTo = asOfDate;
@@ -1228,7 +1227,6 @@ async function buildInventoryIntelligenceReport(
   ]);
 
   const allClassifiedItems: InventoryIntelligenceItem[] = [];
-  let itemsAboveThreshold = 0;
   let unclassifiedCount = 0;
 
   for (const stockItemName of allItemNames) {
@@ -1241,16 +1239,6 @@ async function buildInventoryIntelligenceReport(
     const avgSale6mPaise = toPaise(avgSale6mRaw);
     const lastMonthPurchasePaise = toPaise(lastMonthPurchaseRaw);
     const closingStockPaise = toPaise(closingStockRaw);
-
-    if (
-      avgSale6mPaise < thresholdPaise
-      && lastMonthPurchasePaise < thresholdPaise
-      && closingStockPaise < thresholdPaise
-    ) {
-      continue;
-    }
-
-    itemsAboveThreshold += 1;
 
     const scenario = classifyInventoryScenarioV2(
       avgSale6mPaise,
@@ -1350,7 +1338,6 @@ async function buildInventoryIntelligenceReport(
     threshold,
     limit,
     total_items_scanned: allItemNames.size,
-    items_above_threshold: itemsAboveThreshold,
     total_classified_count: allClassifiedItems.length,
     classified_count: filteredItems.length,
     unclassified_count: unclassifiedCount,
