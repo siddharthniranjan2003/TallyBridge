@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Response } from "express";
 import { supabase } from "../db/supabase.js";
 import { requireApiKey } from "../middleware/auth.js";
 
@@ -940,10 +940,10 @@ function toPaise(value: unknown) {
   return Math.round(toMoney(value) * 100);
 }
 
-function parseThresholdValue(value: unknown, fallback = 500_000) {
+function parseThresholdValue(value: unknown) {
   const normalized = normalizeTrimmedString(value);
   if (!normalized) {
-    return fallback;
+    return null;
   }
 
   const parsed = Number(normalized);
@@ -966,6 +966,63 @@ function parseLimitValue(value: unknown) {
   }
 
   return parsed;
+}
+
+type InventoryResponseFormat = "json" | "csv";
+
+function parseInventoryResponseFormat(value: unknown): InventoryResponseFormat {
+  const normalized = normalizeTrimmedString(value);
+  if (!normalized) {
+    return "json";
+  }
+
+  const format = normalized.toLowerCase();
+  if (format === "json" || format === "csv") {
+    return format;
+  }
+
+  throw new Error("format must be either json or csv");
+}
+
+const INVENTORY_CSV_COLUMNS = [
+  "sales_qty_6m_avg",
+  "purchase_qty_1m",
+  "closing_stock_qty",
+  "purchase_rate",
+  "sales_amount",
+  "purchase_amount",
+  "closing_stock_amount",
+] as const;
+
+function escapeCsvValue(value: unknown) {
+  if (value == null) {
+    return "";
+  }
+
+  const text = String(value);
+  if (!/[",\r\n]/.test(text)) {
+    return text;
+  }
+
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function serializeInventoryItemsToCsv(items: InventoryIntelligenceItem[]) {
+  const header = INVENTORY_CSV_COLUMNS.join(",");
+  const rows = items.map((item) => INVENTORY_CSV_COLUMNS
+    .map((column) => escapeCsvValue(item[column]))
+    .join(","));
+
+  return [header, ...rows].join("\r\n");
+}
+
+function sanitizeCsvToken(value: string | null) {
+  const normalized = normalizeTrimmedString(value);
+  if (!normalized) {
+    return "all";
+  }
+
+  return normalized.replace(/[^A-Z0-9]+/gi, "_").replace(/^_+|_+$/g, "") || "all";
 }
 
 function normalizeReportFilterToken(value: string) {
@@ -1300,19 +1357,28 @@ async function buildInventoryIntelligenceReport(
     return left.stock_item_name.localeCompare(right.stock_item_name);
   });
 
+  const thresholdPaise = threshold == null ? null : toPaise(threshold);
+  const thresholdFilteredItems = thresholdPaise == null
+    ? allClassifiedItems
+    : allClassifiedItems.filter((item) => (
+      toPaise(item.sales_amount ?? 0) >= thresholdPaise
+      || toPaise(item.purchase_amount ?? 0) >= thresholdPaise
+      || toPaise(item.closing_stock_amount ?? 0) >= thresholdPaise
+    ));
+
   const reportCounts = Object.fromEntries(
     INVENTORY_REPORT_KEYS.map((reportKey) => [reportKey, 0]),
   ) as Record<InventoryReportKey, number>;
 
-  for (const item of allClassifiedItems) {
+  for (const item of thresholdFilteredItems) {
     for (const reportKey of item.report_keys) {
       reportCounts[reportKey] += 1;
     }
   }
 
   const filteredItems = reportKeyFilter
-    ? allClassifiedItems.filter((item) => item.report_keys.includes(reportKeyFilter))
-    : allClassifiedItems;
+    ? thresholdFilteredItems.filter((item) => item.report_keys.includes(reportKeyFilter))
+    : thresholdFilteredItems;
   const limitedItems = limit ? filteredItems.slice(0, limit) : filteredItems;
   const activeReportMeta = reportKeyFilter ? INVENTORY_REPORT_META[reportKeyFilter] : null;
 
@@ -1331,7 +1397,7 @@ async function buildInventoryIntelligenceReport(
     threshold,
     limit,
     total_items_scanned: allItemNames.size,
-    total_classified_count: allClassifiedItems.length,
+    total_classified_count: thresholdFilteredItems.length,
     classified_count: filteredItems.length,
     unclassified_count: unclassifiedCount,
     needs_reorder_count: filteredItems.filter((item) =>
@@ -1346,6 +1412,27 @@ async function buildInventoryIntelligenceReport(
     })),
     items: limitedItems,
   };
+}
+
+type InventoryIntelligenceReport = Awaited<ReturnType<typeof buildInventoryIntelligenceReport>>;
+
+function sendInventoryIntelligenceResponse(
+  res: Response,
+  report: InventoryIntelligenceReport,
+  format: InventoryResponseFormat,
+) {
+  if (format === "csv") {
+    const reportToken = sanitizeCsvToken(report.report_filter_id ?? report.report_filter ?? null);
+    const companyToken = sanitizeCsvToken(report.company_name);
+    const dateToken = sanitizeCsvToken(report.as_of_date);
+    const filename = `reorder-levels-${reportToken}-${companyToken}-${dateToken}.csv`;
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    return res.status(200).send(serializeInventoryItemsToCsv(report.items));
+  }
+
+  return res.json(report);
 }
 
 async function selectPurchasesForReconciliation(companyId: string, syncMeta: SyncMeta) {
@@ -2520,6 +2607,7 @@ router.get("/parties", requireApiKey, async (req, res) => {
 // Returns the direct amount-based inventory intelligence report.
 router.get("/reorder-levels", requireApiKey, async (req, res) => {
   try {
+    const format = parseInventoryResponseFormat(req.query.format);
     const companyLookup = await resolveCompanyLookup({
       companyId: req.query.company_id,
       companyGuid: req.query.company_guid,
@@ -2538,7 +2626,7 @@ router.get("/reorder-levels", requireApiKey, async (req, res) => {
       limitInput: req.query.limit,
     });
 
-    return res.json(report);
+    return sendInventoryIntelligenceResponse(res, report, format);
 
 
     // Parse as_of_date — default 2019-03-31 (FY end for K.V. ENTERPRISES 18-19)
@@ -2553,6 +2641,7 @@ router.get("/reorder-levels", requireApiKey, async (req, res) => {
 
 router.get("/reorder-levels/:reportKey", requireApiKey, async (req, res) => {
   try {
+    const format = parseInventoryResponseFormat(req.query.format);
     const reportKey = normalizeInventoryReportKey(req.params.reportKey);
     if (!reportKey) {
       return res.status(400).json({
@@ -2581,7 +2670,7 @@ router.get("/reorder-levels/:reportKey", requireApiKey, async (req, res) => {
       reportKeyFilter: reportKey,
     });
 
-    res.json(report);
+    return sendInventoryIntelligenceResponse(res, report, format);
   } catch (err: any) {
     console.error("[ReorderLevels] Report Filter Error:", err.message);
     res.status(500).json({ error: err.message });
