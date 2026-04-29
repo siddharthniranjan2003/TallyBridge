@@ -887,10 +887,6 @@ const INVENTORY_REORDER_SCENARIOS = new Set<InventoryScenarioKey>([
   "STARVE_WATCH",
 ]);
 
-type ReorderQuantityStatus =
-  | "not_needed"
-  | "pending_reorder_logic";
-
 type InventoryIntelligenceItem = {
   stock_item_name: string;
   unit: string | null;
@@ -905,9 +901,6 @@ type InventoryIntelligenceItem = {
   last_month_purchase: number;
   closing_stock_value: number;
   current_quantity: number;
-  reorder_quantity: number | null;
-  reorder_quantity_status: ReorderQuantityStatus;
-  needs_reorder: boolean;
 };
 
 function isIsoDateString(value: string) {
@@ -1249,13 +1242,6 @@ async function buildInventoryIntelligenceReport(
     const reportKeys = [...meta.reportKeys];
     const reportIds = reportKeys.map((reportKey) => INVENTORY_REPORT_META[reportKey].id);
     const reportNames = reportKeys.map((reportKey) => INVENTORY_REPORT_META[reportKey].name);
-    const needsReorder = INVENTORY_REORDER_SCENARIOS.has(scenario);
-    let reorderQuantity: number | null = null;
-    let reorderQuantityStatus: ReorderQuantityStatus = "not_needed";
-
-    if (needsReorder) {
-      reorderQuantityStatus = "pending_reorder_logic";
-    }
 
     allClassifiedItems.push({
       stock_item_name: stockItemName,
@@ -1271,9 +1257,6 @@ async function buildInventoryIntelligenceReport(
       last_month_purchase: toMoney(lastMonthPurchaseRaw),
       closing_stock_value: toMoney(closingStockRaw),
       current_quantity: toMoney(closingQuantityRaw),
-      reorder_quantity: reorderQuantity,
-      reorder_quantity_status: reorderQuantityStatus,
-      needs_reorder: needsReorder,
     });
   }
 
@@ -1318,7 +1301,9 @@ async function buildInventoryIntelligenceReport(
     total_classified_count: allClassifiedItems.length,
     classified_count: filteredItems.length,
     unclassified_count: unclassifiedCount,
-    needs_reorder_count: filteredItems.filter((item) => item.needs_reorder).length,
+    needs_reorder_count: filteredItems.filter((item) =>
+      INVENTORY_REORDER_SCENARIOS.has(item.scenario)
+    ).length,
     returned_count: limitedItems.length,
     available_reports: INVENTORY_REPORT_KEYS.map((reportKey) => ({
       report_key: reportKey,
