@@ -889,8 +889,7 @@ const INVENTORY_REORDER_SCENARIOS = new Set<InventoryScenarioKey>([
 
 type ReorderQuantityStatus =
   | "not_needed"
-  | "computed"
-  | "manual_rate_required";
+  | "pending_reorder_logic";
 
 type InventoryIntelligenceItem = {
   stock_item_name: string;
@@ -905,8 +904,6 @@ type InventoryIntelligenceItem = {
   avg_sale_6m: number;
   last_month_purchase: number;
   closing_stock_value: number;
-  reorder_level: number;
-  reorder_at: number;
   current_quantity: number;
   reorder_quantity: number | null;
   reorder_quantity_status: ReorderQuantityStatus;
@@ -1191,7 +1188,7 @@ async function buildInventoryIntelligenceReport(
     fetchAllPages("Inventory stock items", (from, to) =>
       supabase
         .from("stock_items")
-        .select("id, name, unit, closing_qty, closing_value, rate")
+        .select("id, name, unit, closing_qty, closing_value")
         .eq("company_id", companyId)
         .order("name", { ascending: true })
         .order("id", { ascending: true })
@@ -1203,7 +1200,6 @@ async function buildInventoryIntelligenceReport(
     unit: string | null;
     closingQuantityRaw: number;
     closingStockRaw: number;
-    configuredRate: number;
   }>();
 
   for (const stockItem of stockItems) {
@@ -1216,7 +1212,6 @@ async function buildInventoryIntelligenceReport(
       unit: normalizeTrimmedString((stockItem as any).unit),
       closingQuantityRaw: Number((stockItem as any).closing_qty) || 0,
       closingStockRaw: Math.abs(Number((stockItem as any).closing_value) || 0),
-      configuredRate: Math.abs(Number((stockItem as any).rate) || 0),
     });
   }
 
@@ -1254,28 +1249,12 @@ async function buildInventoryIntelligenceReport(
     const reportKeys = [...meta.reportKeys];
     const reportIds = reportKeys.map((reportKey) => INVENTORY_REPORT_META[reportKey].id);
     const reportNames = reportKeys.map((reportKey) => INVENTORY_REPORT_META[reportKey].name);
-    const reorderLevel = avgSale6mRaw * 2;
-    const reorderAt = reorderLevel;
     const needsReorder = INVENTORY_REORDER_SCENARIOS.has(scenario);
-    const reorderValueGap = needsReorder ? Math.max(reorderLevel - closingStockRaw, 0) : 0;
-    const configuredRate = stockSnapshot?.configuredRate ?? 0;
-    const fallbackRate = closingQuantityRaw > 0 && closingStockRaw > 0
-      ? closingStockRaw / closingQuantityRaw
-      : 0;
-    let reorderQuantity: number | null = 0;
+    let reorderQuantity: number | null = null;
     let reorderQuantityStatus: ReorderQuantityStatus = "not_needed";
 
-    if (needsReorder && toPaise(reorderValueGap) > 0) {
-      if (configuredRate > 0) {
-        reorderQuantity = Math.ceil(reorderValueGap / configuredRate);
-        reorderQuantityStatus = "computed";
-      } else if (fallbackRate > 0) {
-        reorderQuantity = Math.ceil(reorderValueGap / fallbackRate);
-        reorderQuantityStatus = "computed";
-      } else {
-        reorderQuantity = null;
-        reorderQuantityStatus = "manual_rate_required";
-      }
+    if (needsReorder) {
+      reorderQuantityStatus = "pending_reorder_logic";
     }
 
     allClassifiedItems.push({
@@ -1291,8 +1270,6 @@ async function buildInventoryIntelligenceReport(
       avg_sale_6m: toMoney(avgSale6mRaw),
       last_month_purchase: toMoney(lastMonthPurchaseRaw),
       closing_stock_value: toMoney(closingStockRaw),
-      reorder_level: toMoney(reorderLevel),
-      reorder_at: toMoney(reorderAt),
       current_quantity: toMoney(closingQuantityRaw),
       reorder_quantity: reorderQuantity,
       reorder_quantity_status: reorderQuantityStatus,
