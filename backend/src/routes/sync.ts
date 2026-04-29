@@ -993,6 +993,7 @@ const INVENTORY_CSV_COLUMNS = [
   "sales_amount",
   "purchase_amount",
   "closing_stock_amount",
+  "scenario_name",
 ] as const;
 
 function escapeCsvValue(value: unknown) {
