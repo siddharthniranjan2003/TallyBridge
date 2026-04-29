@@ -1012,6 +1012,16 @@ const INVENTORY_CSV_COLUMNS = [
   "scenario_name",
 ] as const;
 
+const INVENTORY_CSV_NUMERIC_COLUMNS = new Set<typeof INVENTORY_CSV_COLUMNS[number]>([
+  "sales_qty_6m_avg",
+  "purchase_qty_1m",
+  "closing_stock_qty",
+  "purchase_rate",
+  "sales_amount",
+  "purchase_amount",
+  "closing_stock_amount",
+]);
+
 function escapeCsvValue(value: unknown) {
   if (value == null) {
     return "";
@@ -1025,10 +1035,26 @@ function escapeCsvValue(value: unknown) {
   return `"${text.replace(/"/g, '""')}"`;
 }
 
+function formatInventoryCsvNumber(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return value;
+  }
+
+  return Math.round(numeric).toLocaleString("en-IN");
+}
+
 function serializeInventoryItemsToCsv(items: InventoryIntelligenceItem[]) {
   const header = INVENTORY_CSV_COLUMNS.join(",");
   const rows = items.map((item) => INVENTORY_CSV_COLUMNS
-    .map((column) => escapeCsvValue(item[column]))
+    .map((column) => {
+      const value = item[column];
+      return escapeCsvValue(
+        INVENTORY_CSV_NUMERIC_COLUMNS.has(column)
+          ? formatInventoryCsvNumber(value)
+          : value
+      );
+    })
     .join(","));
 
   return [header, ...rows].join("\r\n");
