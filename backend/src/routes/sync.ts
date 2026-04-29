@@ -763,20 +763,130 @@ function isPurchaseVoucherType(value: unknown) {
   return normalised.includes("purchase") && !normalised.includes("order");
 }
 
-const INVENTORY_TRIGGER_META = {
-  A: { triggerWord: "INERT", color: "orange", priority: 4 },
-  B: { triggerWord: "ONSET", color: "green", priority: 5 },
-  C: { triggerWord: "GHOST", color: "red", priority: 2 },
-  D: { triggerWord: "BLOAT", color: "red", priority: 3 },
-  E: { triggerWord: "BLAZE", color: "green", priority: 7 },
-  F: { triggerWord: "TAPER", color: "orange", priority: 6 },
-  G: { triggerWord: "SURGE", color: "green", priority: 4 },
-  H: { triggerWord: "DRAIN", color: "orange", priority: 8 },
-  I: { triggerWord: "STARVE", color: "green", priority: 1 },
+const INVENTORY_REPORT_META = {
+  ACT_NOW: { id: "R1", name: "ACT NOW" },
+  HERO_SKU_HEALTH: { id: "R2", name: "HERO SKU HEALTH" },
+  DEAD_CAPITAL: { id: "R3", name: "DEAD CAPITAL" },
+  BUYING_MISTAKES: { id: "R4", name: "BUYING MISTAKES" },
+  WIND_DOWN: { id: "R5", name: "WIND-DOWN" },
+  RISK_WATCH: { id: "R6", name: "RISK WATCH" },
+  FULL_PORTFOLIO_HEALTH: { id: "R7", name: "FULL PORTFOLIO HEALTH" },
 } as const;
 
-type InventoryScenarioCode = keyof typeof INVENTORY_TRIGGER_META;
-type InventoryTriggerWord = (typeof INVENTORY_TRIGGER_META)[InventoryScenarioCode]["triggerWord"];
+type InventoryReportKey = keyof typeof INVENTORY_REPORT_META;
+type InventoryReportId = (typeof INVENTORY_REPORT_META)[InventoryReportKey]["id"];
+
+const INVENTORY_REPORT_KEYS = Object.keys(INVENTORY_REPORT_META) as InventoryReportKey[];
+
+const INVENTORY_SCENARIO_META = {
+  GHOST_ZERO: {
+    name: "GHOST ZERO",
+    color: "red",
+    priority: 15,
+    reportKeys: ["DEAD_CAPITAL", "FULL_PORTFOLIO_HEALTH"],
+  },
+  INERT: {
+    name: "INERT",
+    color: "orange",
+    priority: 14,
+    reportKeys: ["DEAD_CAPITAL", "RISK_WATCH", "FULL_PORTFOLIO_HEALTH"],
+  },
+  ONSET: {
+    name: "ONSET",
+    color: "green",
+    priority: 10,
+    reportKeys: ["BUYING_MISTAKES", "FULL_PORTFOLIO_HEALTH"],
+  },
+  OFF_BOOK: {
+    name: "OFF-BOOK",
+    color: "red",
+    priority: 13,
+    reportKeys: ["DEAD_CAPITAL", "BUYING_MISTAKES", "FULL_PORTFOLIO_HEALTH"],
+  },
+  DEAD: {
+    name: "DEAD",
+    color: "red",
+    priority: 11,
+    reportKeys: ["DEAD_CAPITAL", "BUYING_MISTAKES", "FULL_PORTFOLIO_HEALTH"],
+  },
+  BLAZE: {
+    name: "BLAZE",
+    color: "green",
+    priority: 6,
+    reportKeys: ["HERO_SKU_HEALTH", "FULL_PORTFOLIO_HEALTH"],
+  },
+  TAPER: {
+    name: "TAPER",
+    color: "orange",
+    priority: 8,
+    reportKeys: ["WIND_DOWN", "FULL_PORTFOLIO_HEALTH"],
+  },
+  SURGE: {
+    name: "SURGE",
+    color: "green",
+    priority: 3,
+    reportKeys: ["ACT_NOW", "HERO_SKU_HEALTH", "FULL_PORTFOLIO_HEALTH"],
+  },
+  DRAIN: {
+    name: "DRAIN",
+    color: "orange",
+    priority: 9,
+    reportKeys: ["WIND_DOWN", "RISK_WATCH", "FULL_PORTFOLIO_HEALTH"],
+  },
+  STARVE_ZERO: {
+    name: "STARVE ZERO",
+    color: "red",
+    priority: 1,
+    reportKeys: ["ACT_NOW", "FULL_PORTFOLIO_HEALTH"],
+  },
+  STARVE_CRITICAL: {
+    name: "STARVE CRITICAL",
+    color: "red",
+    priority: 2,
+    reportKeys: ["ACT_NOW", "FULL_PORTFOLIO_HEALTH"],
+  },
+  STARVE_WATCH: {
+    name: "STARVE WATCH",
+    color: "orange",
+    priority: 5,
+    reportKeys: ["ACT_NOW", "FULL_PORTFOLIO_HEALTH"],
+  },
+  BLOAT: {
+    name: "BLOAT",
+    color: "red",
+    priority: 12,
+    reportKeys: ["DEAD_CAPITAL", "BUYING_MISTAKES", "RISK_WATCH", "FULL_PORTFOLIO_HEALTH"],
+  },
+  FLOW: {
+    name: "FLOW",
+    color: "green",
+    priority: 7,
+    reportKeys: ["HERO_SKU_HEALTH", "FULL_PORTFOLIO_HEALTH"],
+  },
+  PINCH: {
+    name: "PINCH",
+    color: "orange",
+    priority: 4,
+    reportKeys: ["ACT_NOW", "RISK_WATCH", "FULL_PORTFOLIO_HEALTH"],
+  },
+} as const satisfies Record<string, {
+  name: string;
+  color: string;
+  priority: number;
+  reportKeys: readonly InventoryReportKey[];
+}>;
+
+type InventoryScenarioKey = keyof typeof INVENTORY_SCENARIO_META;
+
+const INVENTORY_REORDER_SCENARIOS = new Set<InventoryScenarioKey>([
+  "BLAZE",
+  "SURGE",
+  "PINCH",
+  "STARVE_ZERO",
+  "STARVE_CRITICAL",
+  "STARVE_WATCH",
+]);
+
 type ReorderQuantityStatus =
   | "not_needed"
   | "computed"
@@ -785,10 +895,13 @@ type ReorderQuantityStatus =
 type InventoryIntelligenceItem = {
   stock_item_name: string;
   unit: string | null;
-  scenario: InventoryScenarioCode;
-  trigger_word: InventoryTriggerWord;
+  scenario: InventoryScenarioKey;
+  scenario_name: string;
   color: string;
   priority: number;
+  report_ids: InventoryReportId[];
+  report_keys: InventoryReportKey[];
+  report_names: string[];
   avg_sale_6m: number;
   last_month_purchase: number;
   closing_stock_value: number;
@@ -799,13 +912,6 @@ type InventoryIntelligenceItem = {
   reorder_quantity_status: ReorderQuantityStatus;
   needs_reorder: boolean;
 };
-
-const INVENTORY_TRIGGER_WORDS = new Set<InventoryTriggerWord>(
-  Object.values(INVENTORY_TRIGGER_META).map((entry) => entry.triggerWord),
-);
-const INVENTORY_TRIGGER_TO_SCENARIO = Object.fromEntries(
-  Object.entries(INVENTORY_TRIGGER_META).map(([scenario, entry]) => [entry.triggerWord, scenario]),
-) as Record<InventoryTriggerWord, InventoryScenarioCode>;
 
 function isIsoDateString(value: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value);
@@ -866,14 +972,31 @@ function parseLimitValue(value: unknown) {
   return parsed;
 }
 
-function normalizeTriggerWord(value: unknown) {
+function normalizeReportFilterToken(value: string) {
+  return value
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+const INVENTORY_REPORT_FILTER_ALIASES = new Map<string, InventoryReportKey>(
+  (Object.entries(INVENTORY_REPORT_META) as Array<
+    [InventoryReportKey, (typeof INVENTORY_REPORT_META)[InventoryReportKey]]
+  >).flatMap(([reportKey, meta]) => ([
+    [normalizeReportFilterToken(reportKey), reportKey],
+    [normalizeReportFilterToken(meta.id), reportKey],
+    [normalizeReportFilterToken(meta.name), reportKey],
+  ])),
+);
+
+function normalizeInventoryReportKey(value: unknown) {
   const normalized = normalizeTrimmedString(value);
   if (!normalized) {
     return null;
   }
 
-  const upper = normalized.toUpperCase() as InventoryTriggerWord;
-  return INVENTORY_TRIGGER_WORDS.has(upper) ? upper : null;
+  return INVENTORY_REPORT_FILTER_ALIASES.get(normalizeReportFilterToken(normalized)) ?? null;
 }
 
 async function getLatestCompanyVoucherDate(companyId: string) {
@@ -925,33 +1048,54 @@ async function aggregateVoucherItemAmountsByName(voucherIds: string[], label: st
   return amountsByItem;
 }
 
-function classifyInventoryScenario(
+function classifyInventoryScenarioV2(
   avgSale6mPaise: number,
   lastMonthPurchasePaise: number,
   closingStockPaise: number,
-): InventoryScenarioCode | null {
+): InventoryScenarioKey | null {
   if (avgSale6mPaise === 0) {
     if (lastMonthPurchasePaise === 0) {
-      return closingStockPaise > 0 ? "A" : null;
+      return closingStockPaise === 0 ? "GHOST_ZERO" : "INERT";
     }
-    if (lastMonthPurchasePaise === closingStockPaise) {
-      return "B";
+    if (closingStockPaise < lastMonthPurchasePaise) {
+      return "OFF_BOOK";
     }
-    return closingStockPaise < lastMonthPurchasePaise ? "C" : "D";
-  }
-
-  if (closingStockPaise === 0) {
-    if (lastMonthPurchasePaise === avgSale6mPaise) {
-      return "E";
+    if (closingStockPaise <= lastMonthPurchasePaise * 2) {
+      return "ONSET";
     }
-    return lastMonthPurchasePaise < avgSale6mPaise ? "F" : "G";
+    return "DEAD";
   }
 
   if (lastMonthPurchasePaise === 0) {
-    return closingStockPaise <= avgSale6mPaise ? "I" : "H";
+    if (closingStockPaise === 0) {
+      return "STARVE_ZERO";
+    }
+    if (closingStockPaise <= avgSale6mPaise) {
+      return closingStockPaise * 2 < avgSale6mPaise ? "STARVE_CRITICAL" : "STARVE_WATCH";
+    }
+    return "DRAIN";
   }
 
-  return null;
+  if (closingStockPaise === 0) {
+    if (lastMonthPurchasePaise < avgSale6mPaise && avgSale6mPaise < lastMonthPurchasePaise * 2) {
+      return "BLAZE";
+    }
+    if (lastMonthPurchasePaise * 2 < avgSale6mPaise) {
+      return "TAPER";
+    }
+    if (lastMonthPurchasePaise * 2 > avgSale6mPaise * 3 && lastMonthPurchasePaise < avgSale6mPaise * 3) {
+      return "SURGE";
+    }
+    return null;
+  }
+
+  if (closingStockPaise > avgSale6mPaise * 4) {
+    return "BLOAT";
+  }
+  if (closingStockPaise >= avgSale6mPaise * 2) {
+    return "FLOW";
+  }
+  return "PINCH";
 }
 
 function withSupabaseSchemaGuidance(message: string) {
@@ -978,7 +1122,7 @@ async function buildInventoryIntelligenceReport(
     asOfDateInput,
     thresholdInput,
     limitInput,
-    triggerWordFilter,
+    reportKeyFilter,
   }: {
     companyId: string;
     companyGuid: string | null;
@@ -986,7 +1130,7 @@ async function buildInventoryIntelligenceReport(
     asOfDateInput: unknown;
     thresholdInput: unknown;
     limitInput: unknown;
-    triggerWordFilter?: InventoryTriggerWord | null;
+    reportKeyFilter?: InventoryReportKey | null;
   },
 ) {
   const requestedAsOfDate = normalizeTrimmedString(asOfDateInput);
@@ -1056,9 +1200,12 @@ async function buildInventoryIntelligenceReport(
     ),
   ]);
 
-  const allClassifiedItems: InventoryIntelligenceItem[] = [];
-  let itemsAboveThreshold = 0;
-  let unclassifiedCount = 0;
+  const stockItemsByName = new Map<string, {
+    unit: string | null;
+    closingQuantityRaw: number;
+    closingStockRaw: number;
+    configuredRate: number;
+  }>();
 
   for (const stockItem of stockItems) {
     const stockItemName = normalizeTrimmedString((stockItem as any).name);
@@ -1066,11 +1213,31 @@ async function buildInventoryIntelligenceReport(
       continue;
     }
 
+    stockItemsByName.set(stockItemName, {
+      unit: normalizeTrimmedString((stockItem as any).unit),
+      closingQuantityRaw: Number((stockItem as any).closing_qty) || 0,
+      closingStockRaw: Math.abs(Number((stockItem as any).closing_value) || 0),
+      configuredRate: Math.abs(Number((stockItem as any).rate) || 0),
+    });
+  }
+
+  const allItemNames = new Set<string>([
+    ...stockItemsByName.keys(),
+    ...saleAmountsByItem.keys(),
+    ...purchaseAmountsByItem.keys(),
+  ]);
+
+  const allClassifiedItems: InventoryIntelligenceItem[] = [];
+  let itemsAboveThreshold = 0;
+  let unclassifiedCount = 0;
+
+  for (const stockItemName of allItemNames) {
+    const stockSnapshot = stockItemsByName.get(stockItemName);
     const totalSaleAmountRaw = saleAmountsByItem.get(stockItemName) ?? 0;
     const avgSale6mRaw = totalSaleAmountRaw / 6;
     const lastMonthPurchaseRaw = purchaseAmountsByItem.get(stockItemName) ?? 0;
-    const closingQuantityRaw = Number((stockItem as any).closing_qty) || 0;
-    const closingStockRaw = Math.abs(Number((stockItem as any).closing_value) || 0);
+    const closingQuantityRaw = stockSnapshot?.closingQuantityRaw ?? 0;
+    const closingStockRaw = stockSnapshot?.closingStockRaw ?? 0;
     const avgSale6mPaise = toPaise(avgSale6mRaw);
     const lastMonthPurchasePaise = toPaise(lastMonthPurchaseRaw);
     const closingStockPaise = toPaise(closingStockRaw);
@@ -1085,7 +1252,7 @@ async function buildInventoryIntelligenceReport(
 
     itemsAboveThreshold += 1;
 
-    const scenario = classifyInventoryScenario(
+    const scenario = classifyInventoryScenarioV2(
       avgSale6mPaise,
       lastMonthPurchasePaise,
       closingStockPaise,
@@ -1095,18 +1262,22 @@ async function buildInventoryIntelligenceReport(
       continue;
     }
 
-    const meta = INVENTORY_TRIGGER_META[scenario];
+    const meta = INVENTORY_SCENARIO_META[scenario];
+    const reportKeys = [...meta.reportKeys];
+    const reportIds = reportKeys.map((reportKey) => INVENTORY_REPORT_META[reportKey].id);
+    const reportNames = reportKeys.map((reportKey) => INVENTORY_REPORT_META[reportKey].name);
     const reorderLevel = avgSale6mRaw * 2;
     const reorderAt = reorderLevel;
-    const reorderValueGap = Math.max(reorderLevel - closingStockRaw, 0);
-    const configuredRate = Math.abs(Number((stockItem as any).rate) || 0);
+    const needsReorder = INVENTORY_REORDER_SCENARIOS.has(scenario);
+    const reorderValueGap = needsReorder ? Math.max(reorderLevel - closingStockRaw, 0) : 0;
+    const configuredRate = stockSnapshot?.configuredRate ?? 0;
     const fallbackRate = closingQuantityRaw > 0 && closingStockRaw > 0
       ? closingStockRaw / closingQuantityRaw
       : 0;
     let reorderQuantity: number | null = 0;
     let reorderQuantityStatus: ReorderQuantityStatus = "not_needed";
 
-    if (toPaise(reorderValueGap) > 0) {
+    if (needsReorder && toPaise(reorderValueGap) > 0) {
       if (configuredRate > 0) {
         reorderQuantity = Math.ceil(reorderValueGap / configuredRate);
         reorderQuantityStatus = "computed";
@@ -1121,11 +1292,14 @@ async function buildInventoryIntelligenceReport(
 
     allClassifiedItems.push({
       stock_item_name: stockItemName,
-      unit: normalizeTrimmedString((stockItem as any).unit),
+      unit: stockSnapshot?.unit ?? null,
       scenario,
-      trigger_word: meta.triggerWord,
+      scenario_name: meta.name,
       color: meta.color,
       priority: meta.priority,
+      report_ids: reportIds,
+      report_keys: reportKeys,
+      report_names: reportNames,
       avg_sale_6m: toMoney(avgSale6mRaw),
       last_month_purchase: toMoney(lastMonthPurchaseRaw),
       closing_stock_value: toMoney(closingStockRaw),
@@ -1134,7 +1308,7 @@ async function buildInventoryIntelligenceReport(
       current_quantity: toMoney(closingQuantityRaw),
       reorder_quantity: reorderQuantity,
       reorder_quantity_status: reorderQuantityStatus,
-      needs_reorder: closingStockPaise <= toPaise(reorderAt),
+      needs_reorder: needsReorder,
     });
   }
 
@@ -1145,16 +1319,29 @@ async function buildInventoryIntelligenceReport(
     return left.stock_item_name.localeCompare(right.stock_item_name);
   });
 
-  const filteredItems = triggerWordFilter
-    ? allClassifiedItems.filter((item) => item.trigger_word === triggerWordFilter)
+  const reportCounts = Object.fromEntries(
+    INVENTORY_REPORT_KEYS.map((reportKey) => [reportKey, 0]),
+  ) as Record<InventoryReportKey, number>;
+
+  for (const item of allClassifiedItems) {
+    for (const reportKey of item.report_keys) {
+      reportCounts[reportKey] += 1;
+    }
+  }
+
+  const filteredItems = reportKeyFilter
+    ? allClassifiedItems.filter((item) => item.report_keys.includes(reportKeyFilter))
     : allClassifiedItems;
   const limitedItems = limit ? filteredItems.slice(0, limit) : filteredItems;
+  const activeReportMeta = reportKeyFilter ? INVENTORY_REPORT_META[reportKeyFilter] : null;
 
   return {
     company_id: companyId,
     company_guid: companyGuid,
     company_name: companyName,
-    trigger_word_filter: triggerWordFilter ?? null,
+    report_filter: reportKeyFilter ?? null,
+    report_filter_id: activeReportMeta?.id ?? null,
+    report_filter_name: activeReportMeta?.name ?? null,
     as_of_date: asOfDate,
     sale_window_from: saleWindowFrom,
     sale_window_to: saleWindowTo,
@@ -1162,13 +1349,19 @@ async function buildInventoryIntelligenceReport(
     purchase_window_to: purchaseWindowTo,
     threshold,
     limit,
-    total_items_scanned: stockItems.length,
+    total_items_scanned: allItemNames.size,
     items_above_threshold: itemsAboveThreshold,
     total_classified_count: allClassifiedItems.length,
     classified_count: filteredItems.length,
     unclassified_count: unclassifiedCount,
     needs_reorder_count: filteredItems.filter((item) => item.needs_reorder).length,
     returned_count: limitedItems.length,
+    available_reports: INVENTORY_REPORT_KEYS.map((reportKey) => ({
+      report_key: reportKey,
+      report_id: INVENTORY_REPORT_META[reportKey].id,
+      report_name: INVENTORY_REPORT_META[reportKey].name,
+      count: reportCounts[reportKey],
+    })),
     items: limitedItems,
   };
 }
@@ -2376,12 +2569,14 @@ router.get("/reorder-levels", requireApiKey, async (req, res) => {
   }
 });
 
-router.get("/reorder-levels/:triggerWord", requireApiKey, async (req, res) => {
+router.get("/reorder-levels/:reportKey", requireApiKey, async (req, res) => {
   try {
-    const triggerWord = normalizeTriggerWord(req.params.triggerWord);
-    if (!triggerWord) {
+    const reportKey = normalizeInventoryReportKey(req.params.reportKey);
+    if (!reportKey) {
       return res.status(400).json({
-        error: `triggerWord must be one of: ${[...INVENTORY_TRIGGER_WORDS].join(", ")}`,
+        error: `reportKey must be one of: ${INVENTORY_REPORT_KEYS.map(
+          (key) => `${INVENTORY_REPORT_META[key].id}/${key}`,
+        ).join(", ")}`,
       });
     }
 
@@ -2401,16 +2596,12 @@ router.get("/reorder-levels/:triggerWord", requireApiKey, async (req, res) => {
       asOfDateInput: req.query.as_of_date,
       thresholdInput: req.query.threshold,
       limitInput: req.query.limit,
-      triggerWordFilter: triggerWord,
+      reportKeyFilter: reportKey,
     });
 
-    res.json({
-      ...report,
-      trigger_word_filter: triggerWord,
-      scenario: INVENTORY_TRIGGER_TO_SCENARIO[triggerWord],
-    });
+    res.json(report);
   } catch (err: any) {
-    console.error("[ReorderLevels] Trigger Error:", err.message);
+    console.error("[ReorderLevels] Report Filter Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
