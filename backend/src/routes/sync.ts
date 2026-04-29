@@ -985,6 +985,7 @@ function parseInventoryResponseFormat(value: unknown): InventoryResponseFormat {
 }
 
 const INVENTORY_CSV_COLUMNS = [
+  "stock_item_name",
   "sales_qty_6m_avg",
   "purchase_qty_1m",
   "closing_stock_qty",
