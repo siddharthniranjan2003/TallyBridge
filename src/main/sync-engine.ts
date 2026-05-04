@@ -28,18 +28,27 @@ export class SyncEngine {
   private isSyncing = false;
   private hadCompanyError = false;
   private lifecycleCallbacks: SyncLifecycleCallbacks = {};
+  private paused = false;
+  private currentProc: ReturnType<typeof spawn> | null = null;
 
   constructor(window: BrowserWindow) {
     this.mainWindow = window;
+    this.paused = store.get("syncPaused") ?? false;
   }
 
   start() {
     console.log("[SyncEngine] Starting — polling for TallyPrime on port 9000...");
+    if (this.paused) {
+      this.emit("sync-log", { company: "System", line: "[TallyBridge] Sync is paused. Click Resume Sync to start." });
+      return;
+    }
     this.waitForTallyThenSync();
   }
 
   private waitForTallyThenSync() {
+    if (this.paused) return;
     void this.checkTallyPort().then((up) => {
+      if (this.paused) return;
       if (up) {
         console.log("[SyncEngine] TallyPrime reachable — beginning startup sync.");
         void this.runAllCompanies("startup");
@@ -83,6 +92,34 @@ export class SyncEngine {
     }
   }
 
+  pause() {
+    this.paused = true;
+    store.set("syncPaused", true);
+    this.stop();
+    if (this.currentProc?.pid) {
+      if (process.platform === "win32") {
+        spawn("taskkill", ["/pid", String(this.currentProc.pid), "/f", "/t"]);
+      } else {
+        this.currentProc.kill("SIGKILL");
+      }
+      this.currentProc = null;
+    }
+    this.isSyncing = false;
+    this.emit("sync-complete", { at: new Date().toISOString() });
+    this.emit("sync-paused", { paused: true });
+  }
+
+  resume() {
+    this.paused = false;
+    store.set("syncPaused", false);
+    this.emit("sync-paused", { paused: false });
+    this.scheduleNext(0);
+  }
+
+  isPaused() {
+    return this.paused;
+  }
+
   reschedule() {
     this.stop();
     this.scheduleNext();
@@ -97,6 +134,10 @@ export class SyncEngine {
   }
 
   async syncNow() {
+    if (this.paused) {
+      this.emit("sync-log", { company: "System", line: "Sync is paused. Resume sync first." });
+      return;
+    }
     if (this.isSyncing) {
       this.emit("sync-log", { company: "System", line: "Sync already in progress..." });
       return;
@@ -106,6 +147,7 @@ export class SyncEngine {
   }
 
   private scheduleNext(delayMs?: number) {
+    if (this.paused) return;
     const minutes = store.get("syncIntervalMinutes", 5);
     if (this.timer) {
       clearTimeout(this.timer);
@@ -122,6 +164,7 @@ export class SyncEngine {
   }
 
   private async runAllCompanies(trigger: "startup" | "manual" | "heartbeat") {
+    if (this.paused) return;
     if (this.isSyncing) {
       this.emit("sync-log", { company: "System", line: "Sync already in progress..." });
       return;
@@ -345,6 +388,7 @@ export class SyncEngine {
       let proc: ReturnType<typeof spawn> | null = null;
       try {
         proc = spawn(pythonBin, args, { env });
+        this.currentProc = proc;
       } catch (error) {
         finalize(1, error instanceof Error ? error.message : "Failed to start sync process");
         return;
@@ -411,6 +455,7 @@ export class SyncEngine {
       });
 
       proc.on("close", (code) => {
+        this.currentProc = null;
         finalize(code);
       });
     });

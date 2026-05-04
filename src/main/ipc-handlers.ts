@@ -618,6 +618,16 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
     return { success: true };
   });
 
+  ipcMain.handle("pause-sync", () => {
+    engine.pause();
+    return { paused: true };
+  });
+
+  ipcMain.handle("resume-sync", () => {
+    engine.resume();
+    return { paused: false };
+  });
+
   ipcMain.handle("check-tally", async () => {
     try {
       const tallyUrl = store.get("tallyUrl");

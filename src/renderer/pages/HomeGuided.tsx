@@ -6,34 +6,51 @@ import CompanyCardStable from "../components/CompanyCardStable";
 export default function HomeGuided() {
   const [companies, setCompanies] = useState<Company[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const navigate = useNavigate();
 
-  const loadCompanies = async () => {
-    const cfg = await window.electronAPI.getConfig();
-    setCompanies(cfg.companies || []);
-  };
-
   useEffect(() => {
-    void loadCompanies();
+    void (async () => {
+      const cfg = await window.electronAPI.getConfig();
+      setCompanies(cfg.companies || []);
+      setIsPaused(Boolean(cfg.syncPaused));
+    })();
 
     const onUpdated = (_: unknown, updated: Company[]) => setCompanies(updated);
     const onSyncStart = () => setIsSyncing(true);
     const onSyncComplete = () => setIsSyncing(false);
+    const onSyncPaused = (_: unknown, { paused }: { paused: boolean }) => {
+      setIsPaused(paused);
+      if (paused) setIsSyncing(false);
+    };
 
     window.electronAPI.on("companies-updated", onUpdated);
     window.electronAPI.on("sync-start", onSyncStart);
     window.electronAPI.on("sync-complete", onSyncComplete);
+    window.electronAPI.on("sync-paused", onSyncPaused);
 
     return () => {
       window.electronAPI.off("companies-updated", onUpdated);
       window.electronAPI.off("sync-start", onSyncStart);
       window.electronAPI.off("sync-complete", onSyncComplete);
+      window.electronAPI.off("sync-paused", onSyncPaused);
     };
   }, []);
 
   const handleSyncNow = async () => {
     setIsSyncing(true);
     await window.electronAPI.syncNow();
+  };
+
+  const handlePauseResume = async () => {
+    if (isPaused) {
+      await (window.electronAPI.resumeSync as any)?.();
+      setIsPaused(false);
+    } else {
+      await (window.electronAPI.pauseSync as any)?.();
+      setIsPaused(true);
+      setIsSyncing(false);
+    }
   };
 
   const handleRemove = async (id: string) => {
@@ -67,9 +84,19 @@ export default function HomeGuided() {
             + Add Company
           </button>
           <button
+            onClick={handlePauseResume}
+            style={{
+              ...outlineBtn,
+              color: isPaused ? "#22c55e" : "#ef4444",
+              borderColor: isPaused ? "#22c55e" : "#ef4444",
+            }}
+          >
+            {isPaused ? "▶ Resume Sync" : "⏸ Pause Sync"}
+          </button>
+          <button
             onClick={handleSyncNow}
-            disabled={isSyncing}
-            style={{ ...primaryBtn, opacity: isSyncing ? 0.7 : 1 }}
+            disabled={isSyncing || isPaused}
+            style={{ ...primaryBtn, opacity: (isSyncing || isPaused) ? 0.5 : 1 }}
           >
             {isSyncing ? "Syncing..." : "Sync All Now"}
           </button>

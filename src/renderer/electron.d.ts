@@ -23,6 +23,8 @@ declare global {
       removeCompany: (id: string) => Promise<any>;
       getCompanies: () => Promise<any[]>;
       syncNow: () => Promise<any>;
+      pauseSync: () => Promise<{ paused: boolean }>;
+      resumeSync: () => Promise<{ paused: boolean }>;
       checkTally: () => Promise<{ connected: boolean }>;
       checkTallyCapabilities: () => Promise<any>;
       getTallyCompanies: () => Promise<{ success: boolean; companies: TallyCompanySelection[] }>;

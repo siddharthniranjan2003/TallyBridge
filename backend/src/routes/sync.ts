@@ -789,7 +789,8 @@ const INVENTORY_SCENARIO_META = {
     name: "INERT",
     color: "orange",
     priority: 14,
-    reportKeys: ["DEAD_CAPITAL", "RISK_WATCH", "FULL_PORTFOLIO_HEALTH"],
+    // Workbook-aligned report coverage from Scenario_Classification_final.xlsx.
+    reportKeys: ["DEAD_CAPITAL", "FULL_PORTFOLIO_HEALTH"],
   },
   ONSET: {
     name: "ONSET",
@@ -801,13 +802,13 @@ const INVENTORY_SCENARIO_META = {
     name: "OFF-BOOK",
     color: "red",
     priority: 13,
-    reportKeys: ["DEAD_CAPITAL", "BUYING_MISTAKES", "FULL_PORTFOLIO_HEALTH"],
+    reportKeys: ["RISK_WATCH", "FULL_PORTFOLIO_HEALTH"],
   },
   DEAD: {
     name: "DEAD",
     color: "red",
     priority: 11,
-    reportKeys: ["DEAD_CAPITAL", "BUYING_MISTAKES", "FULL_PORTFOLIO_HEALTH"],
+    reportKeys: ["BUYING_MISTAKES", "FULL_PORTFOLIO_HEALTH"],
   },
   BLAZE: {
     name: "BLAZE",
@@ -825,13 +826,13 @@ const INVENTORY_SCENARIO_META = {
     name: "SURGE",
     color: "green",
     priority: 3,
-    reportKeys: ["ACT_NOW", "HERO_SKU_HEALTH", "FULL_PORTFOLIO_HEALTH"],
+    reportKeys: ["HERO_SKU_HEALTH", "FULL_PORTFOLIO_HEALTH"],
   },
   DRAIN: {
     name: "DRAIN",
     color: "orange",
     priority: 9,
-    reportKeys: ["WIND_DOWN", "RISK_WATCH", "FULL_PORTFOLIO_HEALTH"],
+    reportKeys: ["WIND_DOWN", "FULL_PORTFOLIO_HEALTH"],
   },
   STARVE_ZERO: {
     name: "STARVE ZERO",
@@ -855,7 +856,7 @@ const INVENTORY_SCENARIO_META = {
     name: "BLOAT",
     color: "red",
     priority: 12,
-    reportKeys: ["DEAD_CAPITAL", "BUYING_MISTAKES", "RISK_WATCH", "FULL_PORTFOLIO_HEALTH"],
+    reportKeys: ["BUYING_MISTAKES", "FULL_PORTFOLIO_HEALTH"],
   },
   FLOW: {
     name: "FLOW",
@@ -867,7 +868,7 @@ const INVENTORY_SCENARIO_META = {
     name: "PINCH",
     color: "orange",
     priority: 4,
-    reportKeys: ["ACT_NOW", "RISK_WATCH", "FULL_PORTFOLIO_HEALTH"],
+    reportKeys: ["ACT_NOW", "FULL_PORTFOLIO_HEALTH"],
   },
 } as const satisfies Record<string, {
   name: string;

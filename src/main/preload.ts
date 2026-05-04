@@ -4,6 +4,7 @@ const ALLOWED_CHANNELS = new Set([
   "sync-log",
   "sync-start",
   "sync-complete",
+  "sync-paused",
   "company-status-change",
   "company-synced",
   "company-error",
@@ -23,6 +24,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // Sync
   syncNow: () => ipcRenderer.invoke("sync-now"),
+  pauseSync: () => ipcRenderer.invoke("pause-sync"),
+  resumeSync: () => ipcRenderer.invoke("resume-sync"),
   checkTally: () => ipcRenderer.invoke("check-tally"),
   checkTallyCapabilities: () => ipcRenderer.invoke("check-tally-capabilities"),
   getTallyCompanies: () => ipcRenderer.invoke("get-tally-companies"),

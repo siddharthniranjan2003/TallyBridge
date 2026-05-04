@@ -44,6 +44,7 @@ export interface AppConfig {
   odbcDsnOverride: string;
   syncFromDate: string;
   syncToDate: string;
+  syncPaused: boolean;
   companies: Company[];
 }
 
@@ -72,6 +73,7 @@ export const store = new Store<AppConfig>({
     odbcDsnOverride: "",
     syncFromDate: "",
     syncToDate: "",
+    syncPaused: false,
     companies: [],
   },
 });
