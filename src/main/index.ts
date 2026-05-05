@@ -66,9 +66,13 @@ app.whenReady().then(() => {
     onSyncStart: () => trayController.setStatus("syncing"),
     onSyncComplete: (hadErrors) => trayController.setStatus(hadErrors ? "error" : "idle"),
     onCompanyError: () => trayController.setStatus("error"),
+    onSyncPaused: () => trayController.setStatus("paused"),
   });
   setupIpcHandlers(syncEngine, mainWindow!);
 
+  if (syncEngine.isPaused()) {
+    trayController.setStatus("paused");
+  }
   syncEngine.start();
   pushQueuePoller.start();
 });

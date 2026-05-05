@@ -1366,9 +1366,13 @@ async function buildInventoryIntelligenceReport(
   }
 
   allClassifiedItems.sort((left, right) => {
-    if (left.priority !== right.priority) {
-      return left.priority - right.priority;
+    const leftClosingStockAmount = left.closing_stock_amount ?? Number.NEGATIVE_INFINITY;
+    const rightClosingStockAmount = right.closing_stock_amount ?? Number.NEGATIVE_INFINITY;
+
+    if (rightClosingStockAmount !== leftClosingStockAmount) {
+      return rightClosingStockAmount - leftClosingStockAmount;
     }
+
     return left.stock_item_name.localeCompare(right.stock_item_name);
   });
 

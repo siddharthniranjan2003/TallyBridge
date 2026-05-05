@@ -20,6 +20,7 @@ type SyncLifecycleCallbacks = {
   onSyncStart?: () => void;
   onSyncComplete?: (hadErrors: boolean) => void;
   onCompanyError?: () => void;
+  onSyncPaused?: () => void;
 };
 
 export class SyncEngine {
@@ -30,6 +31,12 @@ export class SyncEngine {
   private lifecycleCallbacks: SyncLifecycleCallbacks = {};
   private paused = false;
   private currentProc: ReturnType<typeof spawn> | null = null;
+  private nextRunId = 0;
+  private activeRunId: number | null = null;
+  private cancelledRunIds = new Set<number>();
+  private activeChildRunId: number | null = null;
+  private pauseKilledChildRunId: number | null = null;
+  private resumeImmediately = false;
 
   constructor(window: BrowserWindow) {
     this.mainWindow = window;
@@ -93,26 +100,39 @@ export class SyncEngine {
   }
 
   pause() {
+    if (this.paused) {
+      return;
+    }
     this.paused = true;
     store.set("syncPaused", true);
     this.stop();
+    if (this.activeRunId !== null) {
+      this.cancelledRunIds.add(this.activeRunId);
+    }
     if (this.currentProc?.pid) {
+      this.pauseKilledChildRunId = this.activeChildRunId;
       if (process.platform === "win32") {
         spawn("taskkill", ["/pid", String(this.currentProc.pid), "/f", "/t"]);
       } else {
         this.currentProc.kill("SIGKILL");
       }
-      this.currentProc = null;
     }
-    this.isSyncing = false;
-    this.emit("sync-complete", { at: new Date().toISOString() });
+    this.lifecycleCallbacks.onSyncPaused?.();
     this.emit("sync-paused", { paused: true });
   }
 
   resume() {
+    if (!this.paused) {
+      return;
+    }
     this.paused = false;
     store.set("syncPaused", false);
     this.emit("sync-paused", { paused: false });
+    if (this.activeRunId !== null) {
+      this.resumeImmediately = true;
+      return;
+    }
+    this.resumeImmediately = false;
     this.scheduleNext(0);
   }
 
@@ -130,7 +150,7 @@ export class SyncEngine {
   }
 
   isSyncInProgress() {
-    return this.isSyncing;
+    return this.activeRunId !== null || this.isSyncing;
   }
 
   async syncNow() {
@@ -138,7 +158,7 @@ export class SyncEngine {
       this.emit("sync-log", { company: "System", line: "Sync is paused. Resume sync first." });
       return;
     }
-    if (this.isSyncing) {
+    if (this.activeRunId !== null) {
       this.emit("sync-log", { company: "System", line: "Sync already in progress..." });
       return;
     }
@@ -165,7 +185,7 @@ export class SyncEngine {
 
   private async runAllCompanies(trigger: "startup" | "manual" | "heartbeat") {
     if (this.paused) return;
-    if (this.isSyncing) {
+    if (this.activeRunId !== null) {
       this.emit("sync-log", { company: "System", line: "Sync already in progress..." });
       return;
     }
@@ -176,43 +196,101 @@ export class SyncEngine {
       return;
     }
 
-    // Pre-flight: confirm TallyPrime's port is open before spawning any Python process
-    const tallyUp = await this.checkTallyPort();
-    if (!tallyUp) {
-      this.emit("sync-log", {
-        company: "System",
-        line: "[TallyBridge] TallyPrime not reachable — sync skipped. Will retry next interval.",
-      });
-      this.scheduleNext();
-      return;
-    }
-
-    this.isSyncing = true;
-    this.hadCompanyError = false;
-    this.lifecycleCallbacks.onSyncStart?.();
-    this.emit("sync-start", { companies: companies.map((c) => c.name) });
+    const runId = ++this.nextRunId;
+    this.activeRunId = runId;
+    let startedSync = false;
+    let shouldScheduleNext = false;
+    let nextScheduleDelay: number | undefined;
 
     try {
+      // Pre-flight: confirm TallyPrime's port is open before spawning any Python process
+      const tallyUp = await this.checkTallyPort();
+      if (this.shouldAbortRun(runId)) {
+        return;
+      }
+      if (!tallyUp) {
+        this.emit("sync-log", {
+          company: "System",
+          line: "[TallyBridge] TallyPrime not reachable — sync skipped. Will retry next interval.",
+        });
+        shouldScheduleNext = true;
+        return;
+      }
+
+      this.isSyncing = true;
+      this.hadCompanyError = false;
+      startedSync = true;
+      this.lifecycleCallbacks.onSyncStart?.();
+      this.emit("sync-start", { companies: companies.map((c) => c.name) });
+
       for (const company of companies) {
+        if (this.shouldAbortRun(runId)) {
+          break;
+        }
+        const previousCompanyState = store.get("companies").find((c) => c.id === company.id);
         updateCompanyStatus(company.id, { lastSyncStatus: "syncing" });
         this.emit("company-status-change", {
           id: company.id,
           status: "syncing",
         });
-        await this.syncOneCompany(company, trigger);
+        await this.syncOneCompany(company, trigger, runId, previousCompanyState);
+        if (this.shouldAbortRun(runId)) {
+          break;
+        }
       }
+      shouldScheduleNext = !this.shouldAbortRun(runId);
     } finally {
+      const runWasCancelled = this.cancelledRunIds.has(runId);
+      const shouldResumeImmediately = this.resumeImmediately;
+      if (this.activeRunId === runId) {
+        this.activeRunId = null;
+      }
+      this.cancelledRunIds.delete(runId);
+      this.resumeImmediately = false;
       this.isSyncing = false;
-      this.lifecycleCallbacks.onSyncComplete?.(this.hadCompanyError);
-      this.emit("sync-complete", { at: new Date().toISOString() });
+      if (runWasCancelled) {
+        if (this.paused) {
+          this.lifecycleCallbacks.onSyncPaused?.();
+        } else if (startedSync) {
+          this.lifecycleCallbacks.onSyncComplete?.(false);
+        }
+      } else if (startedSync) {
+        this.lifecycleCallbacks.onSyncComplete?.(this.hadCompanyError);
+        this.emit("sync-complete", { at: new Date().toISOString() });
+      }
       // Refresh company list in UI
       this.emit("companies-updated", store.get("companies"));
-      this.scheduleNext();
+      if (!this.paused) {
+        if (shouldResumeImmediately) {
+          shouldScheduleNext = true;
+          nextScheduleDelay = 0;
+        }
+        if (shouldScheduleNext) {
+          this.scheduleNext(nextScheduleDelay);
+        }
+      }
     }
   }
 
-  private syncOneCompany(company: Company, trigger: "startup" | "manual" | "heartbeat"): Promise<void> {
+  private syncOneCompany(
+    company: Company,
+    trigger: "startup" | "manual" | "heartbeat",
+    runId: number,
+    previousCompanyState?: Company,
+  ): Promise<void> {
     return new Promise((resolve) => {
+      if (this.shouldAbortRun(runId)) {
+        updateCompanyStatus(company.id, {
+          lastSyncStatus: previousCompanyState?.lastSyncStatus ?? "idle",
+          lastSyncError: previousCompanyState?.lastSyncError,
+        });
+        this.emit("company-status-change", {
+          id: company.id,
+          status: previousCompanyState?.lastSyncStatus ?? "idle",
+        });
+        resolve();
+        return;
+      }
       const config = store.store;
       const companyId = company.id;
       const companyName = company.name;
@@ -327,7 +405,21 @@ export class SyncEngine {
           clearTimeout(hardTimeout);
         }
 
-        if (code === 0 && !overrideError) {
+        const wasCancelled = this.pauseKilledChildRunId === runId || this.cancelledRunIds.has(runId);
+        if (this.pauseKilledChildRunId === runId) {
+          this.pauseKilledChildRunId = null;
+        }
+
+        if (wasCancelled) {
+          updateCompanyStatus(companyId, {
+            lastSyncStatus: previousCompanyState?.lastSyncStatus ?? "idle",
+            lastSyncError: previousCompanyState?.lastSyncError,
+          });
+          this.emit("company-status-change", {
+            id: companyId,
+            status: previousCompanyState?.lastSyncStatus ?? "idle",
+          });
+        } else if (code === 0 && !overrideError) {
           const existing = store.get("companies").find((c) => c.id === companyId);
           let records = this.normalizeRecordCounts(existing?.lastSyncRecords);
           let status = "success";
@@ -389,6 +481,7 @@ export class SyncEngine {
       try {
         proc = spawn(pythonBin, args, { env });
         this.currentProc = proc;
+        this.activeChildRunId = runId;
       } catch (error) {
         finalize(1, error instanceof Error ? error.message : "Failed to start sync process");
         return;
@@ -455,7 +548,12 @@ export class SyncEngine {
       });
 
       proc.on("close", (code) => {
-        this.currentProc = null;
+        if (this.currentProc === proc) {
+          this.currentProc = null;
+        }
+        if (this.activeChildRunId === runId) {
+          this.activeChildRunId = null;
+        }
         finalize(code);
       });
     });
@@ -506,5 +604,9 @@ export class SyncEngine {
       return "";
     }
     return `${fromValue || "open"}..${toValue || "open"}`;
+  }
+
+  private shouldAbortRun(runId: number) {
+    return this.paused || this.cancelledRunIds.has(runId);
   }
 }

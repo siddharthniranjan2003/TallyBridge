@@ -92,6 +92,10 @@ export class PushQueuePoller {
 
   private async pollOnce() {
     try {
+      if (this.syncEngine.isPaused()) {
+        return;
+      }
+
       const config = store.store;
       const companies = store.get("companies").filter((company) => company.enabled);
       const controlPlaneUrl = resolveControlPlaneUrl(config);
@@ -106,7 +110,7 @@ export class PushQueuePoller {
       }
 
       for (const company of companies) {
-        if (this.syncEngine.isSyncInProgress()) {
+        if (this.syncEngine.isPaused() || this.syncEngine.isSyncInProgress()) {
           break;
         }
 

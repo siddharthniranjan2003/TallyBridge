@@ -5,6 +5,7 @@ export default function StatusBar() {
   const [internetOk] = useState(true);
   const [nextSync, setNextSync] = useState("5:00");
   const [syncInterval, setSyncInterval] = useState(5);
+  const [isPaused, setIsPaused] = useState(false);
 
   useEffect(() => {
     // Check Tally on mount and every 10s
@@ -18,13 +19,27 @@ export default function StatusBar() {
     // Load interval from config
     window.electronAPI.getConfig().then((cfg: any) => {
       setSyncInterval(cfg.syncIntervalMinutes || 5);
+      setIsPaused(Boolean(cfg.syncPaused));
     });
 
-    return () => clearInterval(t);
+    const onSyncPaused = (_: unknown, { paused }: { paused: boolean }) => {
+      setIsPaused(paused);
+    };
+    window.electronAPI.on("sync-paused", onSyncPaused);
+
+    return () => {
+      clearInterval(t);
+      window.electronAPI.off("sync-paused", onSyncPaused);
+    };
   }, []);
 
   // Countdown timer
   useEffect(() => {
+    if (isPaused) {
+      setNextSync("--:--");
+      return;
+    }
+
     let seconds = syncInterval * 60;
     const tick = setInterval(() => {
       seconds -= 1;
@@ -35,12 +50,16 @@ export default function StatusBar() {
     }, 1000);
 
     // Reset on sync
-    window.electronAPI.on("sync-complete", () => {
+    const onSyncComplete = () => {
       seconds = syncInterval * 60;
-    });
+    };
+    window.electronAPI.on("sync-complete", onSyncComplete);
 
-    return () => clearInterval(tick);
-  }, [syncInterval]);
+    return () => {
+      clearInterval(tick);
+      window.electronAPI.off("sync-complete", onSyncComplete);
+    };
+  }, [isPaused, syncInterval]);
 
   const dot = (on: boolean) => (
     <span style={{
@@ -67,7 +86,9 @@ export default function StatusBar() {
         <span>{dot(tallyOk)} Tally: {tallyOk ? "CONNECTED" : "NOT RUNNING"}</span>
         <span>{dot(internetOk)} Internet: {internetOk ? "OK" : "OFFLINE"}</span>
       </div>
-      <span>Auto-sync every {syncInterval}m · Next in {nextSync}</span>
+      <span>
+        {isPaused ? "Auto-sync paused" : `Auto-sync every ${syncInterval}m · Next in ${nextSync}`}
+      </span>
     </div>
   );
 }

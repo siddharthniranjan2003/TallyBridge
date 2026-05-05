@@ -44,10 +44,10 @@ export default function HomeGuided() {
 
   const handlePauseResume = async () => {
     if (isPaused) {
-      await (window.electronAPI.resumeSync as any)?.();
+      await window.electronAPI.resumeSync();
       setIsPaused(false);
     } else {
-      await (window.electronAPI.pauseSync as any)?.();
+      await window.electronAPI.pauseSync();
       setIsPaused(true);
       setIsSyncing(false);
     }

@@ -19,11 +19,12 @@ export function setupTray(mainWindow: BrowserWindow, onSyncNow: () => void) {
 
   tray.setToolTip("TallyBridge");
 
-  const buildMenu = (status: "idle" | "syncing" | "error") => {
+  const buildMenu = (status: "idle" | "syncing" | "error" | "paused") => {
     const statusLabel = {
       idle: "● Ready",
       syncing: "● Syncing...",
       error: "● Error — open app",
+      paused: "● Paused",
     }[status];
 
     return Menu.buildFromTemplate([
@@ -36,6 +37,7 @@ export function setupTray(mainWindow: BrowserWindow, onSyncNow: () => void) {
       },
       {
         label: "Sync Now",
+        enabled: status !== "paused",
         click: () => onSyncNow(),
       },
       { type: "separator" },
@@ -50,7 +52,7 @@ export function setupTray(mainWindow: BrowserWindow, onSyncNow: () => void) {
   tray.on("double-click", () => { mainWindow.show(); mainWindow.focus(); });
 
   return {
-    setStatus: (status: "idle" | "syncing" | "error") => {
+    setStatus: (status: "idle" | "syncing" | "error" | "paused") => {
       tray?.setContextMenu(buildMenu(status));
       tray?.setToolTip(`TallyBridge — ${status}`);
     },
