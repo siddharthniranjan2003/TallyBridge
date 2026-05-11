@@ -14,6 +14,7 @@ type PushVoucherPayload = Record<string, unknown> & {
   company_name?: unknown;
   company?: unknown;
 };
+type PushVoucherBatch = PushVoucherPayload[];
 
 function resolveLocalPushPort() {
   const parsed = Number((process.env.TB_LOCAL_PUSH_PORT || "").trim());
@@ -39,8 +40,12 @@ function sendJson(res: ServerResponse, statusCode: number, payload: unknown) {
   res.end(body);
 }
 
+function isPushVoucherPayload(value: unknown): value is PushVoucherPayload {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 function readJsonBody(req: IncomingMessage) {
-  return new Promise<PushVoucherPayload>((resolve, reject) => {
+  return new Promise<PushVoucherPayload | PushVoucherBatch>((resolve, reject) => {
     const chunks: Buffer[] = [];
     let totalBytes = 0;
 
@@ -63,8 +68,20 @@ function readJsonBody(req: IncomingMessage) {
           throw new Error("Request body is empty");
         }
         const parsed = JSON.parse(raw);
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-          throw new Error("Voucher payload must be a JSON object");
+        if (Array.isArray(parsed)) {
+          if (!parsed.length) {
+            throw new Error("Voucher payload array must not be empty");
+          }
+          if (!parsed.every(isPushVoucherPayload)) {
+            throw new Error("Voucher payload array must contain only JSON objects");
+          }
+          resolve(parsed as PushVoucherBatch);
+          return;
+        }
+        if (!isPushVoucherPayload(parsed)) {
+          throw new Error(
+            "Voucher payload must be a JSON object or non-empty array of voucher objects",
+          );
         }
         resolve(parsed as PushVoucherPayload);
       } catch (error) {
@@ -93,6 +110,16 @@ function pickCompanyName(payload: PushVoucherPayload) {
   throw new Error(
     "Multiple enabled Tally companies are configured. Include company_name in the payload.",
   );
+}
+
+function normalizeVoucherBatch(
+  input: PushVoucherPayload | PushVoucherBatch,
+): PushVoucherBatch {
+  const vouchers = Array.isArray(input) ? input : [input];
+  return vouchers.map((voucher) => ({
+    ...voucher,
+    company_name: pickCompanyName(voucher),
+  }));
 }
 
 function resolvePythonCommand(scriptPath: string) {
@@ -195,12 +222,8 @@ export class LocalPushServer {
     }
 
     try {
-      const payload = await readJsonBody(req);
-      const companyName = pickCompanyName(payload);
-      const result = await this.runPythonPushWorker({
-        ...payload,
-        company_name: companyName,
-      });
+      const vouchers = normalizeVoucherBatch(await readJsonBody(req));
+      const result = await this.runPythonPushWorker(vouchers);
       sendJson(res, result.ok ? 200 : 422, result);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown local push error";
@@ -212,56 +235,120 @@ export class LocalPushServer {
     }
   }
 
-  private runPythonPushWorker(payload: PushVoucherPayload) {
+  private runPythonPushWorker(vouchers: PushVoucherBatch) {
     return new Promise<Record<string, unknown>>((resolve, reject) => {
       const scriptPath = isDev
         ? path.join(__dirname, "../../src/python/sync_main.py")
         : path.join(process.resourcesPath, "python", "sync_main.py");
-      const pythonCommand = resolvePythonCommand(scriptPath);
-      const env = {
-        ...process.env,
-        PYTHONUNBUFFERED: "1",
-        TB_COMMAND: "push_voucher",
-        TALLY_URL: store.get("tallyUrl"),
-        TALLY_COMPANY: String(payload.company_name || "").trim(),
-        TB_USER_DATA_DIR: app.getPath("userData"),
-      };
-
-      const proc = spawn(pythonCommand.command, pythonCommand.args, { env });
-      let stdout = "";
-      let stderr = "";
-
-      proc.stdout?.on("data", (chunk: Buffer) => {
-        stdout += chunk.toString();
-      });
-
-      proc.stderr?.on("data", (chunk: Buffer) => {
-        stderr += chunk.toString();
-      });
-
-      proc.on("error", (error) => {
-        reject(error);
-      });
-
-      proc.on("close", () => {
-        try {
-          const parsed = parseLastJsonObject(stdout);
-          if (stderr.trim()) {
-            parsed.stderr = stderr.trim();
-          }
-          resolve(parsed);
-        } catch (error) {
-          reject(
-            new Error(
-              stderr.trim()
-                || (error instanceof Error ? error.message : "Python push worker failed"),
-            ),
-          );
+      const groupedVouchers = new Map<string, PushVoucherBatch>();
+      for (const voucher of vouchers) {
+        const companyName = String(voucher.company_name || "").trim();
+        if (!companyName) {
+          reject(new Error("company_name is required for direct push mode"));
+          return;
         }
-      });
 
-      proc.stdin?.write(JSON.stringify(payload));
-      proc.stdin?.end();
+        const existingBatch = groupedVouchers.get(companyName) || [];
+        existingBatch.push(voucher);
+        groupedVouchers.set(companyName, existingBatch);
+      }
+
+      const runSingleBatch = (companyName: string, batch: PushVoucherBatch) =>
+        new Promise<Record<string, unknown>>((batchResolve, batchReject) => {
+          const pythonCommand = resolvePythonCommand(scriptPath);
+          const env = {
+            ...process.env,
+            PYTHONUNBUFFERED: "1",
+            TB_COMMAND: "push_voucher",
+            TALLY_URL: store.get("tallyUrl"),
+            TALLY_COMPANY: companyName,
+            TB_USER_DATA_DIR: app.getPath("userData"),
+          };
+
+          const proc = spawn(pythonCommand.command, pythonCommand.args, { env });
+          let stdout = "";
+          let stderr = "";
+
+          proc.stdout?.on("data", (chunk: Buffer) => {
+            stdout += chunk.toString();
+          });
+
+          proc.stderr?.on("data", (chunk: Buffer) => {
+            stderr += chunk.toString();
+          });
+
+          proc.on("error", (error) => {
+            batchReject(error);
+          });
+
+          proc.on("close", () => {
+            try {
+              const parsed = parseLastJsonObject(stdout);
+              if (stderr.trim()) {
+                parsed.stderr = stderr.trim();
+              }
+              batchResolve(parsed);
+            } catch (error) {
+              batchReject(
+                new Error(
+                  stderr.trim()
+                    || (error instanceof Error ? error.message : "Python push worker failed"),
+                ),
+              );
+            }
+          });
+
+          proc.stdin?.write(JSON.stringify(batch.length === 1 ? batch[0] : batch));
+          proc.stdin?.end();
+        });
+
+      (async () => {
+        const batchResults: Array<Record<string, unknown>> = [];
+        let created = 0;
+        let altered = 0;
+        let errors = 0;
+        let exceptions = 0;
+        const lineErrors: string[] = [];
+        let stderrCombined = "";
+
+        for (const [companyName, batch] of groupedVouchers.entries()) {
+          const batchResult = await runSingleBatch(companyName, batch);
+          batchResults.push({
+            company_name: companyName,
+            voucher_count: batch.length,
+            ...batchResult,
+          });
+          created += Number(batchResult.created || 0);
+          altered += Number(batchResult.altered || 0);
+          errors += Number(batchResult.errors || 0);
+          exceptions += Number(batchResult.exceptions || 0);
+          if (Array.isArray(batchResult.line_errors)) {
+            lineErrors.push(
+              ...batchResult.line_errors.map((entry) =>
+                `[${companyName}] ${String(entry)}`),
+            );
+          }
+          if (typeof batchResult.stderr === "string" && batchResult.stderr.trim()) {
+            stderrCombined = stderrCombined
+              ? `${stderrCombined}\n${batchResult.stderr.trim()}`
+              : batchResult.stderr.trim();
+          }
+        }
+
+        const ok = errors === 0 && (created > 0 || altered > 0);
+        resolve({
+          ok,
+          voucher_count: vouchers.length,
+          company_count: groupedVouchers.size,
+          created,
+          altered,
+          errors,
+          exceptions,
+          line_errors: lineErrors,
+          results: batchResults,
+          ...(stderrCombined ? { stderr: stderrCombined } : {}),
+        });
+      })().catch(reject);
     });
   }
 

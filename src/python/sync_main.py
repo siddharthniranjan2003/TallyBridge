@@ -1216,23 +1216,44 @@ def run_single_push_command() -> int:
             raise ValueError("No voucher payload was provided on stdin")
 
         payload = json.loads(raw_payload)
-        if not isinstance(payload, dict):
-            raise ValueError("Voucher payload must be a JSON object")
+        if isinstance(payload, dict):
+            vouchers = [payload]
+        elif isinstance(payload, list) and payload:
+            if not all(isinstance(voucher, dict) for voucher in payload):
+                raise ValueError(
+                    "Voucher payload array must contain only JSON objects"
+                )
+            vouchers = payload
+        else:
+            raise ValueError(
+                "Voucher payload must be a JSON object or non-empty array of voucher objects"
+            )
 
-        company_name = str(
-            payload.get("company_name")
-            or payload.get("company")
-            or COMPANY
-            or ""
-        ).strip()
+        company_names = {
+            str(
+                voucher.get("company_name")
+                or voucher.get("company")
+                or COMPANY
+                or ""
+            ).strip()
+            for voucher in vouchers
+        }
+        company_names.discard("")
+        if len(company_names) > 1:
+            raise ValueError(
+                "All vouchers in a single direct push must target the same company"
+            )
+
+        company_name = next(iter(company_names), "")
         if not company_name:
             raise ValueError("company_name is required for direct push mode")
 
-        result = push_vouchers([payload], company_name)
+        result = push_vouchers(vouchers, company_name)
         ok = bool(result.get("created") or result.get("altered")) and not result.get("errors")
         print(json.dumps({
             "ok": ok,
             "company_name": company_name,
+            "voucher_count": len(vouchers),
             **result,
         }))
         return 0 if ok else 1

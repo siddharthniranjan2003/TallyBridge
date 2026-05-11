@@ -6,6 +6,9 @@ import { requireApiKey } from "../middleware/auth.js";
 
 const router = Router();
 
+type PushVoucherPayload = Record<string, unknown>;
+type PushVoucherBatch = PushVoucherPayload[];
+
 function resolveLocalPushUrl() {
   return (process.env.TALLYBRIDGE_LOCAL_PUSH_URL || "http://127.0.0.1:3002/push-voucher").trim();
 }
@@ -90,6 +93,34 @@ function parseForwardedBody(body: string) {
   }
 }
 
+function isVoucherPayload(value: unknown): value is PushVoucherPayload {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeVoucherBatch(payload: unknown) {
+  if (Array.isArray(payload)) {
+    if (!payload.length) {
+      return { error: "Voucher payload array must not be empty" };
+    }
+
+    if (!payload.every(isVoucherPayload)) {
+      return {
+        error: "Voucher payload array must contain only JSON objects",
+      };
+    }
+
+    return { vouchers: payload as PushVoucherBatch };
+  }
+
+  if (!isVoucherPayload(payload)) {
+    return {
+      error: "Voucher payload must be a JSON object or non-empty array of voucher objects",
+    };
+  }
+
+  return { vouchers: [payload] };
+}
+
 router.get("/health", requireApiKey, async (_req, res) => {
   try {
     const forwarded = await getJson(resolveLocalHealthUrl());
@@ -104,13 +135,17 @@ router.get("/health", requireApiKey, async (_req, res) => {
 });
 
 router.post("/", requireApiKey, async (req, res) => {
-  const payload = req.body;
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+  const normalized = normalizeVoucherBatch(req.body);
+  if ("error" in normalized) {
     return res.status(400).json({
       ok: false,
-      error: "Voucher payload must be a JSON object",
+      error: normalized.error,
     });
   }
+
+  const payload = normalized.vouchers.length === 1
+    ? normalized.vouchers[0]
+    : normalized.vouchers;
 
   try {
     const forwarded = await postJson(resolveLocalPushUrl(), payload);
