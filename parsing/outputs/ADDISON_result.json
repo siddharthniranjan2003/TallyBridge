@@ -1,0 +1,275 @@
+{
+  "ok": true,
+  "status": "partial_success",
+  "mode": "purchase",
+  "ocr_engine": "paddle",
+  "image_path": "D:\\Desktop\\TallyBridge\\parsing\\uploads\\ADDISON_rendered.jpg",
+  "company_name": "K V ENTERPRISES",
+  "master_source": "supabase",
+  "vendor": "ADDISON",
+  "summary": {
+    "row_count": 12,
+    "weak_match_count": 0,
+    "inference_seconds": 4.1,
+    "push_mode": "none",
+    "master_source": "supabase",
+    "ocr_engine": "paddle",
+    "matching_ready": false
+  },
+  "ocr": {
+    "header": {
+      "vendor_name": "ADDISON & COMPANY LTD",
+      "invoice_number": "/",
+      "invoice_date": "30/04/2026",
+      "customer_name": "K.V.ENTERPRISES 2534",
+      "discount_percent": 0.0,
+      "discount_amount": 0.0,
+      "invoice_total": 111340.06,
+      "tax_entries": [
+        {
+          "ledger_name": "IGST",
+          "amount": 17037.29
+        },
+        {
+          "ledger_name": "CGST",
+          "amount": 2017.0
+        }
+      ],
+      "round_off": 0.0
+    },
+    "description_rows": [
+      {
+        "item_code": "",
+        "raw_description": ""
+      },
+      {
+        "item_code": "",
+        "raw_description": ""
+      },
+      {
+        "item_code": "",
+        "raw_description": ""
+      },
+      {
+        "item_code": "",
+        "raw_description": ""
+      },
+      {
+        "item_code": "",
+        "raw_description": ""
+      },
+      {
+        "item_code": "",
+        "raw_description": ""
+      },
+      {
+        "item_code": "",
+        "raw_description": ""
+      },
+      {
+        "item_code": "",
+        "raw_description": ""
+      },
+      {
+        "item_code": "",
+        "raw_description": ""
+      },
+      {
+        "item_code": "",
+        "raw_description": ""
+      },
+      {
+        "item_code": "",
+        "raw_description": ""
+      },
+      {
+        "item_code": "",
+        "raw_description": ""
+      }
+    ],
+    "numeric_rows": [
+      {
+        "quantity": 5,
+        "unit": "",
+        "rate": 0.0,
+        "amount": 777.6
+      },
+      {
+        "quantity": 100,
+        "unit": "",
+        "rate": 0.0,
+        "amount": 14400.0
+      },
+      {
+        "quantity": 5,
+        "unit": "",
+        "rate": 0.0,
+        "amount": 2592.0
+      },
+      {
+        "quantity": 200,
+        "unit": "",
+        "rate": 0.0,
+        "amount": 22736.0
+      },
+      {
+        "quantity": 5,
+        "unit": "",
+        "rate": 0.0,
+        "amount": 4092.48
+      },
+      {
+        "quantity": 100,
+        "unit": "",
+        "rate": 0.0,
+        "amount": 28616.0
+      },
+      {
+        "quantity": 5,
+        "unit": "",
+        "rate": 0.0,
+        "amount": 0.0
+      },
+      {
+        "quantity": 0,
+        "unit": "",
+        "rate": 0.0,
+        "amount": 1.0
+      },
+      {
+        "quantity": 0,
+        "unit": "",
+        "rate": 30.0,
+        "amount": 0.0
+      },
+      {
+        "quantity": 40,
+        "unit": "",
+        "rate": 0.0,
+        "amount": 16161.6
+      },
+      {
+        "quantity": 5,
+        "unit": "",
+        "rate": 0.0,
+        "amount": 2909.09
+      },
+      {
+        "quantity": 50,
+        "unit": "",
+        "rate": 0.0,
+        "amount": 0.0
+      }
+    ],
+    "warnings": [
+      "Matching skipped because PaddleOCR did not yield structured purchase item rows."
+    ],
+    "raw_lines": [
+      "Tax Invoice Original",
+      "Duplicate",
+      "Addison and Company Limited State Code 33",
+      "ADDISOD",
+      "TOLL FREE:1800 3090 112 GSTIN : 33AAACA5199H1ZP.",
+      "EMAIL U28939TN1914PLC000008",
+      "Website AAACA5199H",
+      "MDS/DC Company Range- I (1)",
+      "Billed To 60532H Invoice No / Date",
+      "K.V.ENTERPRISES 2534",
+      "GRTW-001311-2627",
+      "30/04/2026 Eway bill No",
+      "GSTIN 06ALQPB8309N1ZO",
+      "State 06 Haryana Date of Supply 30/04/2026",
+      "Shipped To 60532H Place of Supply Haryana",
+      "K.V.ENTERPRISES Transportation Mode ANY-",
+      "2A/18-B.NIT, FARIDABAD NULL FARIDABADE Our Order No",
+      "Your Po No & Date",
+      "Payment Terms CASH AND CARRY",
+      "GSTIN 06ALQPB8309N1ZO",
+      "Haryana Contact No: 9810624811",
+      "SL NO HSN / SAC / Product No / Description Qty/UOM Rate Taxable value",
+      "82076090 156116400 0000 30.00 NOS 144.00 4,320.00",
+      "GST@18% '777.60",
+      "Your Item No:",
+      "82076090156120500 0000 100.00NOS 144.00 14,400.00",
+      "GST@18% 2,592.00",
+      "Your Item No:",
+      "82075000 181160680 0000 200.00NOS 113.68 22,736.00",
+      "M2 HSS PARALLEL SHANK TWIST DRILLS GST@18% 4,092.48",
+      "Your Item No:",
+      "82075000 181161050 0000 100.00NOS 286.16 28,616.00",
+      "GST@18%",
+      "BBER SERIES) 10.5mm FG TO IS:5101-",
+      "1991",
+      "Your Item No:",
+      "Page 1 of 2",
+      "Tax Invoice",
+      "ADDISON Invoice No GRTW-001311-2627",
+      "Invoice Date 30/04/2026",
+      "82075000 181161250 0000 40.00 NOS 16,161.60",
+      "M2 HSS PARALLEL SHANK TWIST DRILLSE GST@18% 2,909.09",
+      "Your Item No:",
+      "82075000191180200 0000 SON 0009 168.36",
+      "M2 HSS PSTD LS 2.0mm D IS:5102-1969 GST@18%",
+      "our Item No:",
+      "Total 520.00 94,651.60",
+      "Total Taxable 94,651.60",
+      "Total IGST@18% 17037.29",
+      "Net Bill Value 111,688.89",
+      "For ADDISON & CO. LTD.",
+      "Authorised Signatory",
+      "3T",
+      "sebce sestoe",
+      "E&OE",
+      "CGST Rules, 2017 and in accordance with the notifications",
+      "CD NOTE ELIGIBLE CD (IN RS ) PAYABLE AMOUNT (IN",
+      "6-5-2026 1,893.03 109795.86",
+      "1.419.7 190",
+      "Page 2 of 2"
+    ]
+  },
+  "raw_items": [],
+  "matched_items": [],
+  "weak_matches": [],
+  "party_name": "",
+  "voucher_payload": null,
+  "push_queue_payload": null,
+  "tally_push": null,
+  "n8n": {
+    "type": "purchase",
+    "ocr_engine": "paddle",
+    "company_name": "K V ENTERPRISES",
+    "vendor": "ADDISON",
+    "party_name": "",
+    "voucher_payload": null,
+    "push_queue_payload": null,
+    "matched_items": [],
+    "weak_matches": [],
+    "ocr": {
+      "header": {
+        "vendor_name": "ADDISON & COMPANY LTD",
+        "invoice_number": "/",
+        "invoice_date": "30/04/2026",
+        "customer_name": "K.V.ENTERPRISES 2534",
+        "discount_percent": 0.0,
+        "discount_amount": 0.0,
+        "invoice_total": 111340.06,
+        "tax_entries": [
+          {
+            "ledger_name": "IGST",
+            "amount": 17037.29
+          },
+          {
+            "ledger_name": "CGST",
+            "amount": 2017.0
+          }
+        ],
+        "round_off": 0.0
+      },
+      "warnings": [
+        "Matching skipped because PaddleOCR did not yield structured purchase item rows."
+      ]
+    }
+  },
+  "upload_kind": "pdf",
+  "source_upload_path": "D:\\Desktop\\TallyBridge\\parsing\\uploads\\ADDISON.pdf"
+}

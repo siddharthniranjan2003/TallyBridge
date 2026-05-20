@@ -1,0 +1,304 @@
+{
+  "name": "challan-to-invoice",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": "={{ [\"message\"] }}",
+        "additionalFields": {
+          "download": true
+        }
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        256,
+        384
+      ],
+      "id": "2f73a189-a5b4-45a1-9073-957ad074a736",
+      "name": "Telegram Trigger",
+      "webhookId": "a1537c78-1f97-40ad-9c78-1d79b66dbd18",
+      "credentials": {
+        "telegramApi": {
+          "id": "MzDsXbhbeli4cRfn",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a1b2c3d4-0001-0001-0001-000000000001",
+              "leftValue": "={{ $json.message.photo }}",
+              "rightValue": "",
+              "operator": {
+                "type": "array",
+                "operation": "exists",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "7d871b6c-1822-44e9-9001-a11a6556a817",
+              "leftValue": "={{ $json.message.document?.file_name?.toLowerCase().endsWith('.jpg')",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        464,
+        384
+      ],
+      "id": "488be504-3daa-4191-a01d-5ad258eae9ce",
+      "name": "Is Image?"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Is Image?').first().json.message.chat.id }}",
+        "text": "=🔗 Sheet ready: https://docs.google.com/spreadsheets/d/1qzsY9HgjzUk4S72nlnCF6sFgEutaCExknBsYvGru0gc/edit",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1392,
+        144
+      ],
+      "id": "6420163f-c15b-4486-bc0b-2b04989a3e02",
+      "name": "Send MiniCPM Result",
+      "webhookId": "c1d2e3f4-1234-1234-1234-000000000099",
+      "credentials": {
+        "telegramApi": {
+          "id": "MzDsXbhbeli4cRfn",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5003",
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        752,
+        144
+      ],
+      "id": "93f123b8-c07c-4b58-9d2b-5594f024fbee",
+      "name": "MiniCPM Server"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $('MiniCPM Server').first().json;\nconst party_name = data.n8n.party_name;\nconst rows = data.n8n.rows.map(r => ({\n  line_no: r.line_no,\n  qty_text: r.qty_text,\n  minicpm_read: r.minicpm_read,\n  stock_matched: r.stock_matched\n}));\nreturn [{ json: { party_name, rows, resume_url: $execution.resumeUrl } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        144
+      ],
+      "id": "c9a222da-17b0-4c11-9bc0-3ca90f64122b",
+      "name": "Code in JavaScript3"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://script.google.com/macros/s/AKfycbxDn6_RxH5hio8S-0NsXjiaAf3eherssBvfOlEMpmP6UJSllQNI1UChjBwSo4DWa6eM/exec",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1168,
+        144
+      ],
+      "id": "6a1de4b4-5b4f-4efb-aadb-db433a0dab71",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json.body;\n// If webhook passes it differently, try: $input.first().json\n\nconst partyName = data.party_name;\nconst items = data.items;\n\n// ── Calculate ledger amounts ──────────────────────────\nconst subtotal = items.reduce((sum, item) => sum + item.amount, 0); // GST SALE (excl. GST)\nconst cgst     = Math.round(subtotal * 0.09 * 100) / 100;\nconst sgst     = Math.round(subtotal * 0.09 * 100) / 100;\nconst total    = subtotal + cgst + sgst; // party amount (incl. GST)\n\n// ── Build final invoice ───────────────────────────────\nconst invoice = {\n  date: \"2025-07-30\",\n  voucher_type: \"GST SALE\",\n  voucher_number: \"bla-001\",\n  party_name: partyName,\n  narration: \"Sales invoice\",\n  reference: \"BlaBlaBlaBla-001\",\n  inventory_ledger_name: \"GST SALE\",\n  ledger_entries: [\n    { ledger_name: partyName,   amount: total,    is_deemed_positive: true  },\n    { ledger_name: \"GST SALE\",  amount: subtotal, is_deemed_positive: false },\n    { ledger_name: \"CGST\",      amount: cgst,     is_deemed_positive: false },\n    { ledger_name: \"SGST\",      amount: sgst,     is_deemed_positive: false }\n  ],\n  items: items.map(item => ({\n    stock_item_name: item.stock_item_name,\n    quantity:        item.quantity,\n    unit:            \"NOS\",\n    rate:            item.rate,\n    amount:          item.amount,\n    godown_name:     \"Main Location\"\n  }))\n};\n\nreturn { json: invoice };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1824,
+        144
+      ],
+      "id": "d7cf2981-2fbe-4d54-b226-18bfa3e0c2c9",
+      "name": "Code in JavaScript4"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://tallybridge-h3do.onrender.com/api/sync/push-queue",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": " application/json"
+            },
+            {
+              "name": "x-api-key",
+              "value": "sb_publishable_IRsM8wDF6w9OyiPegwB2cw_a9aqW9lt"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  company_name: \"K V ENTERPRISES\",\n  voucher_payload: Array.isArray($json) ? $json[0] : $json\n}) }}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2048,
+        144
+      ],
+      "id": "ac372350-bd7a-4341-8ec6-b52db25bb506",
+      "name": "HTTP Request2"
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "httpMethod": "POST",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1600,
+        144
+      ],
+      "id": "2121ed80-aff1-46e0-8314-194f5df7eef6",
+      "name": "Wait",
+      "webhookId": "013f5087-eda0-466b-aa51-db832019e810"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Is Image?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Image?": {
+      "main": [
+        [
+          {
+            "node": "MiniCPM Server",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Send MiniCPM Result": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MiniCPM Server": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript3": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Send MiniCPM Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript4": {
+      "main": [
+        []
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "4cab688b-1390-4f4a-9eed-b10cc275c08e",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "faba9ee414c7a4aa19c677be52538a3e55090bdb1063ad9740989ea556dc24b3"
+  },
+  "id": "H2Kq2EhNZrgPDAON",
+  "tags": []
+}

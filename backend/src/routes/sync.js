@@ -1384,7 +1384,33 @@ router.post("/", requireApiKey, async (req, res) => {
 // PUSH PHASE 1: queue outbound Sales/Purchase voucher imports without touching
 // the current inbound sync route or renderer flow.
 router.post("/push-queue", requireApiKey, async (req, res) => {
-    const { company_id, company_guid, company_name, voucher_payload } = req.body || {};
+    const rawBody = req.body && typeof req.body === "object"
+        ? req.body
+        : {};
+    const rawQuery = req.query && typeof req.query === "object"
+        ? req.query
+        : {};
+    const pushQueuePayload = rawBody.push_queue_payload && typeof rawBody.push_queue_payload === "object"
+        ? rawBody.push_queue_payload
+        : null;
+    const tallyPayload = rawBody.tally_payload && typeof rawBody.tally_payload === "object"
+        ? rawBody.tally_payload
+        : null;
+    const tallyPushQueuePayload = tallyPayload?.push_queue_payload
+        && typeof tallyPayload.push_queue_payload === "object"
+        ? tallyPayload.push_queue_payload
+        : null;
+    const requestPayload = pushQueuePayload ?? tallyPushQueuePayload ?? tallyPayload ?? rawBody;
+    const company_id = requestPayload.company_id ?? rawBody.company_id ?? rawQuery.company_id;
+    const company_guid = requestPayload.company_guid ?? rawBody.company_guid ?? rawQuery.company_guid;
+    const company_name = requestPayload.company_name ?? rawBody.company_name ?? rawQuery.company_name;
+    const source_payload = rawBody.source_payload ?? null;
+    const voucher_payload = requestPayload.voucher_payload
+        ?? rawBody.voucher_payload
+        ?? tallyPushQueuePayload?.voucher_payload
+        ?? tallyPayload?.voucher_payload
+        ?? tallyPayload
+        ?? null;
     const companyLookup = await resolveCompanyLookup({
         companyId: company_id,
         companyGuid: company_guid,
@@ -1403,6 +1429,7 @@ router.post("/push-queue", requireApiKey, async (req, res) => {
             .insert({
             company_id: companyLookup.companyId,
             voucher_payload: normalizedVoucher.voucher,
+            source_payload,
             status: "pending",
         })
             .select("id, status, created_at")

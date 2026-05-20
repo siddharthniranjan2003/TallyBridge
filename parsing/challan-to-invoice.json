@@ -1,0 +1,387 @@
+{
+  "name": "challan-to-invoice",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -2080,
+        -224
+      ],
+      "id": "4d7bbf19-3461-40ee-bcc7-9be3b57a4a52",
+      "name": "Telegram Trigger",
+      "webhookId": "fc6422f7-b89d-4769-b6e3-c3f21a06c4a0",
+      "credentials": {
+        "telegramApi": {
+          "id": "MzDsXbhbeli4cRfn",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "photo-check",
+              "leftValue": "={{ !!$json.message.photo }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1872,
+        -420
+      ],
+      "id": "b1c2d3e4-f5a6-4890-bcde-f12345678901",
+      "name": "IF: has photo"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/getFile?file_id={{ $('Telegram Trigger').item.json.message.photo[$('Telegram Trigger').item.json.message.photo.length - 1].file_id }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1640,
+        -420
+      ],
+      "id": "b1c2d3e4-f5a6-4890-bcde-f12345678902",
+      "name": "Get File Info"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.telegram.org/file/bot{{ $env.TELEGRAM_BOT_TOKEN }}/{{ $json.result.file_path }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1400,
+        -420
+      ],
+      "id": "b1c2d3e4-f5a6-4890-bcde-f12345678903",
+      "name": "Download Challan Image"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5003",
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1160,
+        -420
+      ],
+      "id": "b1c2d3e4-f5a6-4890-bcde-f12345678904",
+      "name": "Send to MiniCPM"
+    },
+    {
+      "parameters": {
+        "jsCode": "const result = $input.first().json;\nconst s = result.summary || {};\nconst rows = result.rows || [];\n\nconst lines = rows.map(r =>\n  `${r.line_no}. ${r.minicpm_read} → ${r.stock_matched} [${r.verdict}]`\n);\n\nconst header = `Challan processed ✅\\nRows: ${s.row_count} | Exact: ${s.exact} | Close+: ${s.close_or_better} | Diff: ${s.different} | Time: ${s.inference_seconds}s\\n\\n`;\nconst body = lines.join('\\n');\nconst full = header + body;\nconst text = full.length > 4000 ? full.slice(0, 4000) + '\\n...' : full;\n\nreturn [{ json: { text, chat_id: $('Telegram Trigger').item.json.message.chat.id } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -920,
+        -420
+      ],
+      "id": "b1c2d3e4-f5a6-4890-bcde-f12345678905",
+      "name": "Format MiniCPM Reply"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -680,
+        -420
+      ],
+      "id": "b1c2d3e4-f5a6-4890-bcde-f12345678906",
+      "name": "Send MiniCPM Reply",
+      "credentials": {
+        "telegramApi": {
+          "id": "MzDsXbhbeli4cRfn",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "reorder-check",
+              "leftValue": "={{ $json.supported }}",
+              "rightValue": "/reorder",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1648,
+        -224
+      ],
+      "id": "f6677a77-7fff-47dd-a938-61a4902d6d85",
+      "name": "IF: is /reorder"
+    },
+    {
+      "parameters": {
+        "url": "={{ String($json.url).trim() }}\n",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "sb_publishable_Qm0GdANwo_Ov7zySAPymtA_R_LoMR4l"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1424,
+        -320
+      ],
+      "id": "c0a6ab78-393b-4334-aae1-d0750e65b52d",
+      "name": "GET reorder-levels"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst items = data.items || [];\n\nconst headers = [\n  \"Item Name\",\n  \"Avg Sale (6m)\",\n  \"Last Month Purchase\",\n  \"Closing Stock\",\n  \"Reorder Level\",\n  \"Reorder At\",\n  \"Current Quantity\",\n  \"Reorder Quantity\"\n];\n\nfunction esc(value) {\n  const text = String(value ?? \"\");\n  if (text.includes(\",\") || text.includes('\"') || text.includes(\"\\n\")) {\n    return `\"${text.replace(/\"/g, '\"\"')}\"`;\n  }\n  return text;\n}\n\nconst lines = [\n  headers.join(\",\"),\n  ...items.map(item => [\n    item.stock_item_name,\n    item.avg_sale_6m,\n    item.last_month_purchase,\n    item.closing_stock_value,\n    item.reorder_level,\n    item.reorder_at,\n    item.current_quantity,\n    item.reorder_quantity\n  ].map(esc).join(\",\"))\n];\n\nconst csv = lines.join(\"\\n\");\nconst trigger = data.trigger_word_filter || \"ALL\";\nconst asOf = data.as_of_date || \"unknown-date\";\nconst fileName = `reorder_report_${trigger}_${asOf}.csv`;\n\nreturn [\n  {\n    json: {\n      fileName\n    },\n    binary: {\n      data: {\n        data: Buffer.from(csv, \"utf8\").toString(\"base64\"),\n        mimeType: \"text/csv\",\n        fileName\n      }\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1200,
+        -320
+      ],
+      "id": "0161aba1-d758-40dc-94ca-0501b531259b",
+      "name": "Format reorder text"
+    },
+    {
+      "parameters": {
+        "operation": "sendDocument",
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "binaryData": true,
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -976,
+        -320
+      ],
+      "id": "2235061c-38a2-4f6b-8d03-38efd6fbe5bb",
+      "name": "Send reorder reply",
+      "webhookId": "1091cfcb-c5c7-4425-a3b0-e7c33e57b6f2",
+      "credentials": {
+        "telegramApi": {
+          "id": "MzDsXbhbeli4cRfn",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const text = ($json.message?.text || \"\").trim().toLowerCase();\n\nconst commandMap = {\n  \"/reorder\": null,\n  \"/surge\": \"SURGE\",\n  \"/starve\": \"STARVE\",\n  \"/drain\": \"DRAIN\",\n  \"/blaze\": \"BLAZE\",\n  \"/taper\": \"TAPER\",\n  \"/onset\": \"ONSET\",\n  \"/ghost\": \"GHOST\",\n  \"/bloat\": \"BLOAT\",\n  \"/inert\": \"INERT\"\n};\n\nif (!(text in commandMap)) {\n  return [{\n    json: {\n      supported: false,\n      text: \"Unknown command. Use /reorder, /surge, /starve, /drain, /blaze, /taper, /onset, /ghost, /bloat, or /inert.\"\n    }\n  }];\n}\n\nconst triggerWord = commandMap[text];\nconst companyGuid = \"f3e9df46-fc4f-4b85-930a-abe1e427e900\";\nconst asOfDate = \"2025-07-30\";\nconst threshold = 100000;\n\nconst baseUrl = \"http://localhost:3001/api/sync/reorder-levels\";\nconst url = triggerWord\n  ? `${baseUrl}/${triggerWord}?company_guid=${companyGuid}&as_of_date=${asOfDate}&threshold=${threshold}`\n  : `${baseUrl}?company_guid=${companyGuid}&as_of_date=${asOfDate}&threshold=${threshold}`;\n\nreturn [{\n  json: {\n    supported: true,\n    original_command: text,\n    triggerWord,\n    url\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1872,
+        -224
+      ],
+      "id": "cb3339f6-ca63-46c7-9278-7aca85c1f7d7",
+      "name": "Code in JavaScript"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "IF: has photo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: has photo": {
+      "main": [
+        [
+          {
+            "node": "Get File Info",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get File Info": {
+      "main": [
+        [
+          {
+            "node": "Download Challan Image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Challan Image": {
+      "main": [
+        [
+          {
+            "node": "Send to MiniCPM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to MiniCPM": {
+      "main": [
+        [
+          {
+            "node": "Format MiniCPM Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format MiniCPM Reply": {
+      "main": [
+        [
+          {
+            "node": "Send MiniCPM Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "IF: is /reorder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: is /reorder": {
+      "main": [
+        [
+          {
+            "node": "GET reorder-levels",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET reorder-levels": {
+      "main": [
+        [
+          {
+            "node": "Format reorder text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format reorder text": {
+      "main": [
+        [
+          {
+            "node": "Send reorder reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "6fa7819d-5c61-4f6a-a0d5-8a5eae5c6f8b",
+  "meta": {
+    "instanceId": "faba9ee414c7a4aa19c677be52538a3e55090bdb1063ad9740989ea556dc24b3"
+  },
+  "id": "0iHa8HOAdbsYhdxG",
+  "tags": []
+}

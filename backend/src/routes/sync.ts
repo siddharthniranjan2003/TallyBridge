@@ -2128,7 +2128,34 @@ router.post("/", requireApiKey, async (req, res) => {
 // PUSH PHASE 1: queue outbound Sales/Purchase voucher imports without touching
 // the current inbound sync route or renderer flow.
 router.post("/push-queue", requireApiKey, async (req, res) => {
-  const { company_id, company_guid, company_name, voucher_payload } = req.body || {};
+  const rawBody = req.body && typeof req.body === "object"
+    ? (req.body as Record<string, unknown>)
+    : {};
+  const rawQuery = req.query && typeof req.query === "object"
+    ? (req.query as Record<string, unknown>)
+    : {};
+  const pushQueuePayload = rawBody.push_queue_payload && typeof rawBody.push_queue_payload === "object"
+    ? (rawBody.push_queue_payload as Record<string, unknown>)
+    : null;
+  const tallyPayload = rawBody.tally_payload && typeof rawBody.tally_payload === "object"
+    ? (rawBody.tally_payload as Record<string, unknown>)
+    : null;
+  const tallyPushQueuePayload = tallyPayload?.push_queue_payload
+    && typeof tallyPayload.push_queue_payload === "object"
+    ? (tallyPayload.push_queue_payload as Record<string, unknown>)
+    : null;
+  const requestPayload = pushQueuePayload ?? tallyPushQueuePayload ?? tallyPayload ?? rawBody;
+
+  const company_id = requestPayload.company_id ?? rawBody.company_id ?? rawQuery.company_id;
+  const company_guid = requestPayload.company_guid ?? rawBody.company_guid ?? rawQuery.company_guid;
+  const company_name = requestPayload.company_name ?? rawBody.company_name ?? rawQuery.company_name;
+  const source_payload = rawBody.source_payload ?? null;
+  const voucher_payload = requestPayload.voucher_payload
+    ?? rawBody.voucher_payload
+    ?? tallyPushQueuePayload?.voucher_payload
+    ?? tallyPayload?.voucher_payload
+    ?? tallyPayload
+    ?? null;
 
   const companyLookup = await resolveCompanyLookup({
     companyId: company_id,
@@ -2150,6 +2177,7 @@ router.post("/push-queue", requireApiKey, async (req, res) => {
       .insert({
         company_id: companyLookup.companyId,
         voucher_payload: normalizedVoucher.voucher,
+        source_payload,
         status: "pending",
       })
       .select("id, status, created_at")
@@ -2166,6 +2194,87 @@ router.post("/push-queue", requireApiKey, async (req, res) => {
   } catch (err: any) {
     const errorMessage = withSupabaseSchemaGuidance(err.message || "Could not enqueue push voucher");
     console.error("[PushQueue] Enqueue error:", errorMessage);
+    return res.status(500).json({ error: errorMessage });
+  }
+});
+
+router.post("/push-queue/activate", requireApiKey, async (req, res) => {
+  const { job_id, company_id, company_guid, company_name } = req.body || {};
+  const jobId = normalizeTrimmedString(job_id);
+  if (!jobId) {
+    return res.status(400).json({ error: "job_id is required" });
+  }
+
+  const hasCompanyIdentity = Boolean(
+    normalizeTrimmedString(company_id)
+    || normalizeTrimmedString(company_guid)
+    || normalizeTrimmedString(company_name)
+  );
+
+  let resolvedCompanyId: string | null = null;
+  if (hasCompanyIdentity) {
+    const companyLookup = await resolveCompanyLookup({
+      companyId: company_id,
+      companyGuid: company_guid,
+      companyName: company_name,
+    }, { requireSuccessfulSync: false });
+    if (companyLookup.status !== 200) {
+      return res.status(companyLookup.status).json({ error: companyLookup.error });
+    }
+    resolvedCompanyId = companyLookup.companyId;
+  }
+
+  try {
+    const { data: existingJob, error: lookupError } = await supabase
+      .from("push_queue")
+      .select("id, company_id, status, created_at, voucher_payload")
+      .eq("id", jobId)
+      .maybeSingle();
+
+    if (lookupError) {
+      throw new Error(`Push queue lookup failed: ${lookupError.message}`);
+    }
+
+    if (!existingJob) {
+      return res.status(404).json({ error: "Push queue job not found" });
+    }
+
+    if (resolvedCompanyId && existingJob.company_id !== resolvedCompanyId) {
+      return res.status(409).json({ error: "Push queue job does not belong to the requested company" });
+    }
+
+    if (existingJob.status !== "pending") {
+      return res.status(409).json({
+        error: `Push queue job must be pending before activation (current status: ${existingJob.status})`,
+      });
+    }
+
+    const { data: updatedJob, error: updateError } = await supabase
+      .from("push_queue")
+      .update({
+        status: "push_now",
+        error_message: null,
+      })
+      .eq("id", jobId)
+      .eq("status", "pending")
+      .select("id, status, created_at")
+      .maybeSingle();
+
+    if (updateError) {
+      throw new Error(`Push queue activation failed: ${updateError.message}`);
+    }
+
+    if (!updatedJob) {
+      return res.status(409).json({ error: "Push queue job could not be activated" });
+    }
+
+    return res.json({
+      success: true,
+      job: updatedJob,
+    });
+  } catch (err: any) {
+    const errorMessage = withSupabaseSchemaGuidance(err.message || "Could not activate push queue job");
+    console.error("[PushQueue] Activate error:", errorMessage);
     return res.status(500).json({ error: errorMessage });
   }
 });
@@ -2190,7 +2299,7 @@ router.get("/push-queue", requireApiKey, async (req, res) => {
       .from("push_queue")
       .select("id, voucher_payload, created_at")
       .eq("company_id", companyLookup.companyId)
-      .eq("status", "pending")
+      .eq("status", "push_now")
       .order("created_at", { ascending: true })
       .limit(limit);
 

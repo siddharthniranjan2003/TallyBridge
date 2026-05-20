@@ -1,0 +1,187 @@
+[
+  {
+    "date": "2025-07-30",
+    "voucher_type": "GST SALE",
+    "voucher_number": "bla-003",
+    "party_name": "SHREE SHYAM HARDWARE STORE",
+    "narration": "Sales invoice",
+    "reference": "BlaBlaBlaBla-001",
+    "inventory_ledger_name": "GST SALE",
+    "ledger_entries": [
+      {
+        "ledger_name": "SHREE SHYAM HARDWARE STORE",
+        "amount": 26710.480000000003,
+        "is_deemed_positive": true
+      },
+      {
+        "ledger_name": "GST SALE",
+        "amount": 22636,
+        "is_deemed_positive": false
+      },
+      {
+        "ledger_name": "CGST",
+        "amount": 2037.24,
+        "is_deemed_positive": false
+      },
+      {
+        "ledger_name": "SGST",
+        "amount": 2037.24,
+        "is_deemed_positive": false
+      }
+    ],
+    "items": [
+      {
+        "stock_item_name": "HSS TAP 4 X .7 SEC TOTEM",
+        "quantity": 2,
+        "unit": "NOS",
+        "rate": 390,
+        "amount": 780,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS TAP 5 X .8 SEC TOTEM",
+        "quantity": 11,
+        "unit": "NOS",
+        "rate": 419,
+        "amount": 4609,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS DRILL 3.5 MIRANDA",
+        "quantity": 2,
+        "unit": "NOS",
+        "rate": 76,
+        "amount": 152,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS DRILL 4 MIRANDA",
+        "quantity": 4,
+        "unit": "NOS",
+        "rate": 113,
+        "amount": 452,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS DRILL 4.6 MIRANDA",
+        "quantity": 4,
+        "unit": "NOS",
+        "rate": 179,
+        "amount": 716,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS DRILL 4.3 MIRANDA",
+        "quantity": 4,
+        "unit": "NOS",
+        "rate": 130,
+        "amount": 520,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS DRILL 4.5 MIRANDA",
+        "quantity": 4,
+        "unit": "NOS",
+        "rate": 179,
+        "amount": 716,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS DRILL 5 MIRANDA",
+        "quantity": 4,
+        "unit": "NOS",
+        "rate": 197,
+        "amount": 788,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS DRILL 5.2 MIRANDA",
+        "quantity": 4,
+        "unit": "NOS",
+        "rate": 197,
+        "amount": 788,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS DRILL 5.3 MIRANDA",
+        "quantity": 4,
+        "unit": "NOS",
+        "rate": 212,
+        "amount": 848,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS DRILL 5.5 MIRANDA",
+        "quantity": 4,
+        "unit": "NOS",
+        "rate": 212,
+        "amount": 848,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "FLAP DISK 4\" G60 CHAMP GNL",
+        "quantity": 1,
+        "unit": "NOS",
+        "rate": 23,
+        "amount": 23,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS DRILL 4 MIRANDA",
+        "quantity": 10,
+        "unit": "NOS",
+        "rate": 113,
+        "amount": 1130,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "TAP 8 X 1.25 BOT",
+        "quantity": 2,
+        "unit": "NOS",
+        "rate": 59,
+        "amount": 118,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS TAP 10 X 1.5 BOT MIRANDA",
+        "quantity": 11,
+        "unit": "NOS",
+        "rate": 682,
+        "amount": 7502,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "CUT OFF WHEEL 107 X 1 X 16 (LTGUC2) GREEN GNL",
+        "quantity": 2,
+        "unit": "NOS",
+        "rate": 11,
+        "amount": 22,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS BLADE 12 X 1/2 RED BIPICO",
+        "quantity": 2,
+        "unit": "NOS",
+        "rate": 36,
+        "amount": 72,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS ROUND DIE 12 X 1.75 TOTEM",
+        "quantity": 2,
+        "unit": "NOS",
+        "rate": 931,
+        "amount": 1862,
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "ROUND DIE HANDLE 2\"",
+        "quantity": 2,
+        "unit": "NOS",
+        "rate": 345,
+        "amount": 690,
+        "godown_name": "Main Location"
+      }
+    ]
+  }
+]

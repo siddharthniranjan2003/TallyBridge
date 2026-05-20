@@ -1,0 +1,772 @@
+{
+  "ok": true,
+  "status": "success",
+  "mode": "purchase",
+  "ocr_engine": "paddle",
+  "image_path": "D:\\Desktop\\TallyBridge\\parsing\\uploads\\upload_20260512_213904_rendered.jpg",
+  "company_name": "K V ENTERPRISES",
+  "master_source": "supabase",
+  "vendor": "ET",
+  "summary": {
+    "row_count": 7,
+    "weak_match_count": 0,
+    "inference_seconds": 6.62,
+    "push_mode": "none",
+    "master_source": "supabase",
+    "ocr_engine": "paddle",
+    "matching_ready": true
+  },
+  "ocr": {
+    "header": {
+      "vendor_name": "EMKAY TOOLS LIMITED",
+      "invoice_number": "GN25Y-34486",
+      "invoice_date": "31-03-2026",
+      "customer_name": "K.V.ENTERPRISES,FARIDABAD",
+      "discount_percent": 3.0,
+      "discount_amount": 1807.6,
+      "invoice_total": 70773.41,
+      "tax_entries": [
+        {
+          "ledger_name": "IGST",
+          "amount": 10520.21
+        }
+      ],
+      "round_off": 0.19
+    },
+    "description_rows": [
+      {
+        "item_code": "F--027534",
+        "raw_description": "FIS-III M35 M12 X 1.25 6H SP.FLUTE E SeriesT"
+      },
+      {
+        "item_code": "F-028205",
+        "raw_description": "FIS-III M35 M12X1.5 6H SP.PT.E SeriesTIN"
+      },
+      {
+        "item_code": "F--028206",
+        "raw_description": "FIS-III M35 M16 X1.5 6H SP.FLUTE E SeriesTI"
+      },
+      {
+        "item_code": "F--028516",
+        "raw_description": "FBS 949 M357/16-20 UNF FLUTELESS O.G.E Seri"
+      },
+      {
+        "item_code": "F-028734",
+        "raw_description": "FBS 949 M35 5/16-24 UNF SP.FLUTE E SeriesT"
+      },
+      {
+        "item_code": "F-029663",
+        "raw_description": ""
+      },
+      {
+        "item_code": "F-030797",
+        "raw_description": "FIS-II M35 M4 X 0.7 6H SP.PT.E SeriesFUTURA"
+      },
+      {
+        "item_code": "F-031027",
+        "raw_description": "FD-371M35 M6 X0.756G SP.PT.TIN"
+      }
+    ],
+    "numeric_rows": [
+      {
+        "quantity": 0,
+        "unit": "NO",
+        "rate": 1227.42,
+        "amount": 12274.2
+      },
+      {
+        "quantity": 0,
+        "unit": "NO",
+        "rate": 1016.28,
+        "amount": 5081.4
+      },
+      {
+        "quantity": 0,
+        "unit": "NO",
+        "rate": 1566.0,
+        "amount": 15660.0
+      },
+      {
+        "quantity": 0,
+        "unit": "NO",
+        "rate": 1336.5,
+        "amount": 6682.5
+      },
+      {
+        "quantity": 15,
+        "unit": "NO",
+        "rate": 536.76,
+        "amount": 8051.4
+      },
+      {
+        "quantity": 10,
+        "unit": "NO",
+        "rate": 47736.0,
+        "amount": 4773.6
+      },
+      {
+        "quantity": 10,
+        "unit": "NO",
+        "rate": 401.22,
+        "amount": 4012.2
+      },
+      {
+        "quantity": 0,
+        "unit": "NO",
+        "rate": 743.58,
+        "amount": 3717.9
+      }
+    ],
+    "warnings": [],
+    "raw_lines": [
+      "Tax Invoice EMKAY TOOLS LIMITED Extra Copy",
+      "PLOT NO.B-27&B-27/1MIDC HINGNA ROADNAGPUR440016NAGPURNDIA",
+      "State Name :MAHARASHTRA State Code27 Serial No.Invoice GN25Y-34486",
+      "GSTIN 27AAHCE5302K1ZN Date of Invoice 31-03-2026",
+      "PAN NO. AAHCE5302K",
+      "CIN NO. U25939MH2023PLC401627 Duedate 14-JUN-26",
+      "Contact Detall Emallhq@emkaytools.com E-Way Bm Number",
+      "E-Way Bil Date",
+      "Date & Time of Supply 05:00PM",
+      "Details of Recipient (Billed to) Transporter Name SMART EXPRESS PRIVATE LIMETED",
+      "K.V.ENTERPRISES,FARIDABAD LRNO. LR Date:",
+      "2A/18-B,NITFARIDABADNEW,FARIDABAD PONO. SPL3%",
+      "121001,FARIDABAD,INDIA Date 14-03-2026",
+      "State Name :HARYANA State Code :6 Place of Supply HARYANA",
+      "GSTIN/Unique ID 06ALQPB8309N1ZO",
+      "PAN NO. ALQPB8309N",
+      "Contact Detail Email :kventerprises.fbd@gmall.com",
+      "Consignee (Shipped to)",
+      "K.V.ENTERPRISES,.FARIDABAD",
+      "2A/18-BNITFARIDABADNEWFARIDABAD-",
+      "121001,FARIDABAD,INDIA",
+      "State Name HARYANA State Code 6",
+      "GSTIN/Unique ID 06ALQPB8309N1ZO",
+      "PAN No. ALQPB8309N",
+      "Contact Detail Emall :kventerprises.fbd@gmail.com",
+      "Sr Item Code Description of Goods HSN/SAC Qty Unit Rate Taxable Value",
+      "No. No. (per unit)",
+      "F--027534 FIS-III M35 M12 X 1.25 6H SP.FLUTE E SeriesT 82074090 NO 1,227.42 12,274.20",
+      "F-028205 FIS-III M35 M12X1.5 6H SP.PT.E SeriesTIN 82074090 NO 1,016.28 5,081.40",
+      "F--028206 FIS-III M35 M16 X1.5 6H SP.FLUTE E SeriesTI 82074090 NO 1,566.00 15,660.00",
+      "F--028516 FBS 949 M357/16-20 UNF FLUTELESS O.G.E Seri 82074090 NO 1,336.50 6,682.50",
+      "5 F-028734 FBS 949 M35 5/16-24 UNF SP.FLUTE E SeriesT 82074090 15 NO 536.76 8,051.40",
+      "F-029663 82074090 10 NO 47736 4773.60",
+      "F-030797 FIS-II M35 M4 X 0.7 6H SP.PT.E SeriesFUTURA 82074090 10 NO 401.22 4,012.20",
+      "F-031027 FD-371M35 M6 X0.756G SP.PT.TIN 82074090 NO 743.58 3,717.90",
+      "Total: 70.000 60253.2",
+      "Total Tax Value (In Word) DISCOUNT 3.00 -1,807.60",
+      "Rs -Ten Thousand Five Hundred Twenty And Paise Twenty IGST 18.00 tof 10,520.21",
+      "One Only. R.OFF 0.19",
+      "Total Invoice Value (In Word) Rs-Sixty Eight Thousand Nine Hundred Sixty Six Only Total GST Value 10,520.21",
+      "Tatal Invoice Value 68,966.00",
+      "Declaration :Certified that the particular given above are true and correct.",
+      "For EMKAY TOOLS LIMITED",
+      "Authorised Signatory"
+    ]
+  },
+  "raw_items": [
+    {
+      "item_code": "F--027534",
+      "raw_description": "FIS-III M35 M12 X 1.25 6H SP.FLUTE E SERIEST",
+      "quantity": 0.0,
+      "rate": 1227.42,
+      "amount": 12274.2,
+      "unit": "NOS"
+    },
+    {
+      "item_code": "F-028205",
+      "raw_description": "FIS-III M35 M12X1.5 6H SP.PTE SERIESTIN",
+      "quantity": 0.0,
+      "rate": 1016.28,
+      "amount": 5081.4,
+      "unit": "NOS"
+    },
+    {
+      "item_code": "F--028206",
+      "raw_description": "FIS-III M35 M16 X1.5 6H SP.FLUTE E SERIESTI",
+      "quantity": 0.0,
+      "rate": 1566.0,
+      "amount": 15660.0,
+      "unit": "NOS"
+    },
+    {
+      "item_code": "F--028516",
+      "raw_description": "FBS 949 M357/16-20 UNF FLUTELESS O.G.E SERI",
+      "quantity": 0.0,
+      "rate": 1336.5,
+      "amount": 6682.5,
+      "unit": "NOS"
+    },
+    {
+      "item_code": "F-028734",
+      "raw_description": "FBS 949 M35 5/16-24 UNF SP.FLUTE E SERIEST",
+      "quantity": 15.0,
+      "rate": 536.76,
+      "amount": 8051.4,
+      "unit": "NOS"
+    },
+    {
+      "item_code": "F-030797",
+      "raw_description": "FIS-II M35 M4 X 0.7 6H SP.PTE SERIESFUTURA",
+      "quantity": 10.0,
+      "rate": 401.22,
+      "amount": 4012.2,
+      "unit": "NOS"
+    },
+    {
+      "item_code": "F-031027",
+      "raw_description": "FD-371M35 M6 X0.756G SP.PTTIN",
+      "quantity": 0.0,
+      "rate": 743.58,
+      "amount": 3717.9,
+      "unit": "NOS"
+    }
+  ],
+  "matched_items": [
+    {
+      "item_code": "F--027534",
+      "raw_description": "FIS-III M35 M12 X 1.25 6H SP.FLUTE E SERIEST",
+      "canonical_query": "HSS-E TAP 12 X 1.25 SPFL ET",
+      "stock_item_name": "HSS-E TAP 12 X 1.25 SPFL ET",
+      "quantity": 0.0,
+      "rate": 1227.42,
+      "amount": 13330.3,
+      "unit": "NOS",
+      "match_score": 100.0,
+      "match_group": "ET"
+    },
+    {
+      "item_code": "F-028205",
+      "raw_description": "FIS-III M35 M12X1.5 6H SP.PTE SERIESTIN",
+      "canonical_query": "HSS-E TAP 12 X 1.5 SPPT TIN ET",
+      "stock_item_name": "HSS-E TAP 12 X 1.5 SPPT TIN ET",
+      "quantity": 0.0,
+      "rate": 1016.28,
+      "amount": 5518.62,
+      "unit": "NOS",
+      "match_score": 100.0,
+      "match_group": "ET"
+    },
+    {
+      "item_code": "F--028206",
+      "raw_description": "FIS-III M35 M16 X1.5 6H SP.FLUTE E SERIESTI",
+      "canonical_query": "HSS-E TAP 16 X 1.5 SPFL ET",
+      "stock_item_name": "HSS-E TAP 16 X 1.5 SPFL ET",
+      "quantity": 0.0,
+      "rate": 1566.0,
+      "amount": 17007.42,
+      "unit": "NOS",
+      "match_score": 100.0,
+      "match_group": "ET"
+    },
+    {
+      "item_code": "F--028516",
+      "raw_description": "FBS 949 M357/16-20 UNF FLUTELESS O.G.E SERI",
+      "canonical_query": "HSS-E ROLL TAP 357/16\" UNF O/G TIN ET",
+      "stock_item_name": "HSS-E ROLL TAP 10-24 UNC TIN ET",
+      "quantity": 0.0,
+      "rate": 1336.5,
+      "amount": 7257.48,
+      "unit": "NOS",
+      "match_score": 69.57,
+      "match_group": "ET"
+    },
+    {
+      "item_code": "F-028734",
+      "raw_description": "FBS 949 M35 5/16-24 UNF SP.FLUTE E SERIEST",
+      "canonical_query": "HSS-E TAP 5/16\" UNF SPFL ET",
+      "stock_item_name": "HSS-E TAP 5/16\" UNF SPFL TIN ET",
+      "quantity": 15.0,
+      "rate": 582.94,
+      "amount": 8744.16,
+      "unit": "NOS",
+      "match_score": 96.84,
+      "match_group": "ET"
+    },
+    {
+      "item_code": "F-030797",
+      "raw_description": "FIS-II M35 M4 X 0.7 6H SP.PTE SERIESFUTURA",
+      "canonical_query": "HSS-E TAP 4 X .7 SPPT FUTURA ET",
+      "stock_item_name": "HSS-E TAP 4 X .7 SPPT FUTURA ET",
+      "quantity": 10.0,
+      "rate": 435.74,
+      "amount": 4357.42,
+      "unit": "NOS",
+      "match_score": 100.0,
+      "match_group": "ET"
+    },
+    {
+      "item_code": "F-031027",
+      "raw_description": "FD-371M35 M6 X0.756G SP.PTTIN",
+      "canonical_query": "HSS-E TAP D371 6 X 0 6G SPPT TIN ET",
+      "stock_item_name": "HSS-E TAP D371 6 X .75 6G SPPT TIN ET",
+      "quantity": 0.0,
+      "rate": 743.58,
+      "amount": 4037.8,
+      "unit": "NOS",
+      "match_score": 85.97,
+      "match_group": "ET"
+    }
+  ],
+  "weak_matches": [],
+  "party_name": "EMKAY TOOLS LIMITED",
+  "voucher_payload": {
+    "party_name": "EMKAY TOOLS LIMITED",
+    "date": "2026-03-31",
+    "voucher_number": "GN25Y-34486",
+    "reference": "GN25Y-34486",
+    "narration": "Purchase invoice GN25Y-34486",
+    "voucher_type": "Purchase",
+    "inventory_ledger_name": "PURCHASE GST",
+    "ledger_entries": [
+      {
+        "ledger_name": "EMKAY TOOLS LIMITED",
+        "amount": 70773.41,
+        "is_deemed_positive": false
+      },
+      {
+        "ledger_name": "PURCHASE GST",
+        "amount": 60253.2,
+        "is_deemed_positive": true
+      },
+      {
+        "ledger_name": "IGST",
+        "amount": 10520.21,
+        "is_deemed_positive": true
+      }
+    ],
+    "items": [
+      {
+        "stock_item_name": "HSS-E TAP 12 X 1.25 SPFL ET",
+        "quantity": 0.0,
+        "rate": 1227.42,
+        "amount": 13330.3,
+        "unit": "NOS",
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS-E TAP 12 X 1.5 SPPT TIN ET",
+        "quantity": 0.0,
+        "rate": 1016.28,
+        "amount": 5518.62,
+        "unit": "NOS",
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS-E TAP 16 X 1.5 SPFL ET",
+        "quantity": 0.0,
+        "rate": 1566.0,
+        "amount": 17007.42,
+        "unit": "NOS",
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS-E ROLL TAP 10-24 UNC TIN ET",
+        "quantity": 0.0,
+        "rate": 1336.5,
+        "amount": 7257.48,
+        "unit": "NOS",
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS-E TAP 5/16\" UNF SPFL TIN ET",
+        "quantity": 15.0,
+        "rate": 582.94,
+        "amount": 8744.16,
+        "unit": "NOS",
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS-E TAP 4 X .7 SPPT FUTURA ET",
+        "quantity": 10.0,
+        "rate": 435.74,
+        "amount": 4357.42,
+        "unit": "NOS",
+        "godown_name": "Main Location"
+      },
+      {
+        "stock_item_name": "HSS-E TAP D371 6 X .75 6G SPPT TIN ET",
+        "quantity": 0.0,
+        "rate": 743.58,
+        "amount": 4037.8,
+        "unit": "NOS",
+        "godown_name": "Main Location"
+      }
+    ]
+  },
+  "push_queue_payload": {
+    "company_name": "K V ENTERPRISES",
+    "voucher_payload": {
+      "party_name": "EMKAY TOOLS LIMITED",
+      "date": "2026-03-31",
+      "voucher_number": "GN25Y-34486",
+      "reference": "GN25Y-34486",
+      "narration": "Purchase invoice GN25Y-34486",
+      "voucher_type": "Purchase",
+      "inventory_ledger_name": "PURCHASE GST",
+      "ledger_entries": [
+        {
+          "ledger_name": "EMKAY TOOLS LIMITED",
+          "amount": 70773.41,
+          "is_deemed_positive": false
+        },
+        {
+          "ledger_name": "PURCHASE GST",
+          "amount": 60253.2,
+          "is_deemed_positive": true
+        },
+        {
+          "ledger_name": "IGST",
+          "amount": 10520.21,
+          "is_deemed_positive": true
+        }
+      ],
+      "items": [
+        {
+          "stock_item_name": "HSS-E TAP 12 X 1.25 SPFL ET",
+          "quantity": 0.0,
+          "rate": 1227.42,
+          "amount": 13330.3,
+          "unit": "NOS",
+          "godown_name": "Main Location"
+        },
+        {
+          "stock_item_name": "HSS-E TAP 12 X 1.5 SPPT TIN ET",
+          "quantity": 0.0,
+          "rate": 1016.28,
+          "amount": 5518.62,
+          "unit": "NOS",
+          "godown_name": "Main Location"
+        },
+        {
+          "stock_item_name": "HSS-E TAP 16 X 1.5 SPFL ET",
+          "quantity": 0.0,
+          "rate": 1566.0,
+          "amount": 17007.42,
+          "unit": "NOS",
+          "godown_name": "Main Location"
+        },
+        {
+          "stock_item_name": "HSS-E ROLL TAP 10-24 UNC TIN ET",
+          "quantity": 0.0,
+          "rate": 1336.5,
+          "amount": 7257.48,
+          "unit": "NOS",
+          "godown_name": "Main Location"
+        },
+        {
+          "stock_item_name": "HSS-E TAP 5/16\" UNF SPFL TIN ET",
+          "quantity": 15.0,
+          "rate": 582.94,
+          "amount": 8744.16,
+          "unit": "NOS",
+          "godown_name": "Main Location"
+        },
+        {
+          "stock_item_name": "HSS-E TAP 4 X .7 SPPT FUTURA ET",
+          "quantity": 10.0,
+          "rate": 435.74,
+          "amount": 4357.42,
+          "unit": "NOS",
+          "godown_name": "Main Location"
+        },
+        {
+          "stock_item_name": "HSS-E TAP D371 6 X .75 6G SPPT TIN ET",
+          "quantity": 0.0,
+          "rate": 743.58,
+          "amount": 4037.8,
+          "unit": "NOS",
+          "godown_name": "Main Location"
+        }
+      ]
+    }
+  },
+  "tally_push": null,
+  "n8n": {
+    "type": "purchase",
+    "ocr_engine": "paddle",
+    "company_name": "K V ENTERPRISES",
+    "vendor": "ET",
+    "party_name": "EMKAY TOOLS LIMITED",
+    "voucher_payload": {
+      "party_name": "EMKAY TOOLS LIMITED",
+      "date": "2026-03-31",
+      "voucher_number": "GN25Y-34486",
+      "reference": "GN25Y-34486",
+      "narration": "Purchase invoice GN25Y-34486",
+      "voucher_type": "Purchase",
+      "inventory_ledger_name": "PURCHASE GST",
+      "ledger_entries": [
+        {
+          "ledger_name": "EMKAY TOOLS LIMITED",
+          "amount": 70773.41,
+          "is_deemed_positive": false
+        },
+        {
+          "ledger_name": "PURCHASE GST",
+          "amount": 60253.2,
+          "is_deemed_positive": true
+        },
+        {
+          "ledger_name": "IGST",
+          "amount": 10520.21,
+          "is_deemed_positive": true
+        }
+      ],
+      "items": [
+        {
+          "stock_item_name": "HSS-E TAP 12 X 1.25 SPFL ET",
+          "quantity": 0.0,
+          "rate": 1227.42,
+          "amount": 13330.3,
+          "unit": "NOS",
+          "godown_name": "Main Location"
+        },
+        {
+          "stock_item_name": "HSS-E TAP 12 X 1.5 SPPT TIN ET",
+          "quantity": 0.0,
+          "rate": 1016.28,
+          "amount": 5518.62,
+          "unit": "NOS",
+          "godown_name": "Main Location"
+        },
+        {
+          "stock_item_name": "HSS-E TAP 16 X 1.5 SPFL ET",
+          "quantity": 0.0,
+          "rate": 1566.0,
+          "amount": 17007.42,
+          "unit": "NOS",
+          "godown_name": "Main Location"
+        },
+        {
+          "stock_item_name": "HSS-E ROLL TAP 10-24 UNC TIN ET",
+          "quantity": 0.0,
+          "rate": 1336.5,
+          "amount": 7257.48,
+          "unit": "NOS",
+          "godown_name": "Main Location"
+        },
+        {
+          "stock_item_name": "HSS-E TAP 5/16\" UNF SPFL TIN ET",
+          "quantity": 15.0,
+          "rate": 582.94,
+          "amount": 8744.16,
+          "unit": "NOS",
+          "godown_name": "Main Location"
+        },
+        {
+          "stock_item_name": "HSS-E TAP 4 X .7 SPPT FUTURA ET",
+          "quantity": 10.0,
+          "rate": 435.74,
+          "amount": 4357.42,
+          "unit": "NOS",
+          "godown_name": "Main Location"
+        },
+        {
+          "stock_item_name": "HSS-E TAP D371 6 X .75 6G SPPT TIN ET",
+          "quantity": 0.0,
+          "rate": 743.58,
+          "amount": 4037.8,
+          "unit": "NOS",
+          "godown_name": "Main Location"
+        }
+      ]
+    },
+    "push_queue_payload": {
+      "company_name": "K V ENTERPRISES",
+      "voucher_payload": {
+        "party_name": "EMKAY TOOLS LIMITED",
+        "date": "2026-03-31",
+        "voucher_number": "GN25Y-34486",
+        "reference": "GN25Y-34486",
+        "narration": "Purchase invoice GN25Y-34486",
+        "voucher_type": "Purchase",
+        "inventory_ledger_name": "PURCHASE GST",
+        "ledger_entries": [
+          {
+            "ledger_name": "EMKAY TOOLS LIMITED",
+            "amount": 70773.41,
+            "is_deemed_positive": false
+          },
+          {
+            "ledger_name": "PURCHASE GST",
+            "amount": 60253.2,
+            "is_deemed_positive": true
+          },
+          {
+            "ledger_name": "IGST",
+            "amount": 10520.21,
+            "is_deemed_positive": true
+          }
+        ],
+        "items": [
+          {
+            "stock_item_name": "HSS-E TAP 12 X 1.25 SPFL ET",
+            "quantity": 0.0,
+            "rate": 1227.42,
+            "amount": 13330.3,
+            "unit": "NOS",
+            "godown_name": "Main Location"
+          },
+          {
+            "stock_item_name": "HSS-E TAP 12 X 1.5 SPPT TIN ET",
+            "quantity": 0.0,
+            "rate": 1016.28,
+            "amount": 5518.62,
+            "unit": "NOS",
+            "godown_name": "Main Location"
+          },
+          {
+            "stock_item_name": "HSS-E TAP 16 X 1.5 SPFL ET",
+            "quantity": 0.0,
+            "rate": 1566.0,
+            "amount": 17007.42,
+            "unit": "NOS",
+            "godown_name": "Main Location"
+          },
+          {
+            "stock_item_name": "HSS-E ROLL TAP 10-24 UNC TIN ET",
+            "quantity": 0.0,
+            "rate": 1336.5,
+            "amount": 7257.48,
+            "unit": "NOS",
+            "godown_name": "Main Location"
+          },
+          {
+            "stock_item_name": "HSS-E TAP 5/16\" UNF SPFL TIN ET",
+            "quantity": 15.0,
+            "rate": 582.94,
+            "amount": 8744.16,
+            "unit": "NOS",
+            "godown_name": "Main Location"
+          },
+          {
+            "stock_item_name": "HSS-E TAP 4 X .7 SPPT FUTURA ET",
+            "quantity": 10.0,
+            "rate": 435.74,
+            "amount": 4357.42,
+            "unit": "NOS",
+            "godown_name": "Main Location"
+          },
+          {
+            "stock_item_name": "HSS-E TAP D371 6 X .75 6G SPPT TIN ET",
+            "quantity": 0.0,
+            "rate": 743.58,
+            "amount": 4037.8,
+            "unit": "NOS",
+            "godown_name": "Main Location"
+          }
+        ]
+      }
+    },
+    "matched_items": [
+      {
+        "item_code": "F--027534",
+        "raw_description": "FIS-III M35 M12 X 1.25 6H SP.FLUTE E SERIEST",
+        "canonical_query": "HSS-E TAP 12 X 1.25 SPFL ET",
+        "stock_item_name": "HSS-E TAP 12 X 1.25 SPFL ET",
+        "quantity": 0.0,
+        "rate": 1227.42,
+        "amount": 13330.3,
+        "unit": "NOS",
+        "match_score": 100.0,
+        "match_group": "ET"
+      },
+      {
+        "item_code": "F-028205",
+        "raw_description": "FIS-III M35 M12X1.5 6H SP.PTE SERIESTIN",
+        "canonical_query": "HSS-E TAP 12 X 1.5 SPPT TIN ET",
+        "stock_item_name": "HSS-E TAP 12 X 1.5 SPPT TIN ET",
+        "quantity": 0.0,
+        "rate": 1016.28,
+        "amount": 5518.62,
+        "unit": "NOS",
+        "match_score": 100.0,
+        "match_group": "ET"
+      },
+      {
+        "item_code": "F--028206",
+        "raw_description": "FIS-III M35 M16 X1.5 6H SP.FLUTE E SERIESTI",
+        "canonical_query": "HSS-E TAP 16 X 1.5 SPFL ET",
+        "stock_item_name": "HSS-E TAP 16 X 1.5 SPFL ET",
+        "quantity": 0.0,
+        "rate": 1566.0,
+        "amount": 17007.42,
+        "unit": "NOS",
+        "match_score": 100.0,
+        "match_group": "ET"
+      },
+      {
+        "item_code": "F--028516",
+        "raw_description": "FBS 949 M357/16-20 UNF FLUTELESS O.G.E SERI",
+        "canonical_query": "HSS-E ROLL TAP 357/16\" UNF O/G TIN ET",
+        "stock_item_name": "HSS-E ROLL TAP 10-24 UNC TIN ET",
+        "quantity": 0.0,
+        "rate": 1336.5,
+        "amount": 7257.48,
+        "unit": "NOS",
+        "match_score": 69.57,
+        "match_group": "ET"
+      },
+      {
+        "item_code": "F-028734",
+        "raw_description": "FBS 949 M35 5/16-24 UNF SP.FLUTE E SERIEST",
+        "canonical_query": "HSS-E TAP 5/16\" UNF SPFL ET",
+        "stock_item_name": "HSS-E TAP 5/16\" UNF SPFL TIN ET",
+        "quantity": 15.0,
+        "rate": 582.94,
+        "amount": 8744.16,
+        "unit": "NOS",
+        "match_score": 96.84,
+        "match_group": "ET"
+      },
+      {
+        "item_code": "F-030797",
+        "raw_description": "FIS-II M35 M4 X 0.7 6H SP.PTE SERIESFUTURA",
+        "canonical_query": "HSS-E TAP 4 X .7 SPPT FUTURA ET",
+        "stock_item_name": "HSS-E TAP 4 X .7 SPPT FUTURA ET",
+        "quantity": 10.0,
+        "rate": 435.74,
+        "amount": 4357.42,
+        "unit": "NOS",
+        "match_score": 100.0,
+        "match_group": "ET"
+      },
+      {
+        "item_code": "F-031027",
+        "raw_description": "FD-371M35 M6 X0.756G SP.PTTIN",
+        "canonical_query": "HSS-E TAP D371 6 X 0 6G SPPT TIN ET",
+        "stock_item_name": "HSS-E TAP D371 6 X .75 6G SPPT TIN ET",
+        "quantity": 0.0,
+        "rate": 743.58,
+        "amount": 4037.8,
+        "unit": "NOS",
+        "match_score": 85.97,
+        "match_group": "ET"
+      }
+    ],
+    "weak_matches": [],
+    "ocr": {
+      "header": {
+        "vendor_name": "EMKAY TOOLS LIMITED",
+        "invoice_number": "GN25Y-34486",
+        "invoice_date": "31-03-2026",
+        "customer_name": "K.V.ENTERPRISES,FARIDABAD",
+        "discount_percent": 3.0,
+        "discount_amount": 1807.6,
+        "invoice_total": 70773.41,
+        "tax_entries": [
+          {
+            "ledger_name": "IGST",
+            "amount": 10520.21
+          }
+        ],
+        "round_off": 0.19
+      },
+      "warnings": []
+    }
+  },
+  "upload_kind": "pdf",
+  "source_upload_path": "D:\\Desktop\\TallyBridge\\parsing\\uploads\\upload_20260512_213904.pdf"
+}

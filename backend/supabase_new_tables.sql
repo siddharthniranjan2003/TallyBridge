@@ -69,8 +69,9 @@ CREATE TABLE IF NOT EXISTS push_queue (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   company_id UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
   voucher_payload JSONB NOT NULL,
+  source_payload JSONB,
   status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending', 'pushed', 'failed')),
+    CHECK (status IN ('pending', 'push_now', 'pushed', 'failed')),
   error_message TEXT,
   tally_response JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
