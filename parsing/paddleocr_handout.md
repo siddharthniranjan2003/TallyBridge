@@ -88,3 +88,56 @@ For best possible results with Paddle:
 - Scanned PDF -> render at 300 DPI with PyMuPDF -> raw PaddleOCR
 - Use `det_limit_side_len=1920` only as an auxiliary comparison pass.
 - Do not rely on heavy preprocessing by default.
+
+---
+
+# PaddleOCR-VL-1.5 Engine (the `ocr=vlm` route)
+
+PaddleOCR-VL is a 0.9B document-parsing vision-language model. It emits structured
+markdown (invoice tables become markdown tables), which is more robust than the
+classic pixel-column heuristics. It powers `POST /?type=purchase&ocr=vlm`.
+
+## Why a separate venv
+
+PaddleOCR-VL needs `paddleocr>=3.2` (`[doc-parser]`), which conflicts with the
+classic runner's `paddleocr==2.7.3`. Install it in its own venv.
+
+## Install (Windows, NVIDIA GPU)
+
+```
+py -3.11 -m venv parsing\.venv-ocrvl
+parsing\.venv-ocrvl\Scripts\pip install paddlepaddle-gpu
+parsing\.venv-ocrvl\Scripts\pip install "paddleocr[doc-parser]"
+```
+
+The first `predict()` auto-downloads the PaddleOCR-VL-1.5 and PP-DocLayoutV2 weights.
+On native Windows use `MINICPM_VLM_BACKEND=native` (vLLM has no native Windows build).
+
+## Optional: vLLM acceleration (Linux / WSL2 only)
+
+In a separate venv:
+
+```
+paddleocr genai_server --model_name PaddleOCR-VL-1.5-0.9B --backend vllm --port 8118
+```
+
+Then set `MINICPM_VLM_BACKEND=vllm-server` and `MINICPM_VLM_VLLM_URL=http://127.0.0.1:8118/v1`.
+
+## Run
+
+```
+parsing\.venv-ocrvl\Scripts\python parsing\paddleocr_vl_server.py   # port 5006, model stays warm
+python parsing\n8n_minicpm_server.py --serve                        # port 5003
+```
+
+The n8n server (port 5003) calls the VLM server (port 5006) over HTTP per request.
+Relevant `.env` keys: `MINICPM_VLM_SERVER_URL`, `MINICPM_VLM_HTTP_PORT`,
+`MINICPM_VLM_BACKEND`, `MINICPM_VLM_VLLM_URL`, `MINICPM_VLM_REQUEST_TIMEOUT`.
+
+## Request
+
+```
+POST http://127.0.0.1:5003/?type=purchase&company=K%20V%20ENTERPRISES&check=duplicacy&ocr=vlm
+```
+
+`ocr` defaults to `paddle` (classic engine, unchanged). `ocr=vlm` selects this model.
