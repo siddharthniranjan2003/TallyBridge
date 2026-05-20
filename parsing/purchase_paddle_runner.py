@@ -942,6 +942,18 @@ def run_purchase_paddle_pipeline(
     }
 
 
+def run_purchase_ocr_header_only(input_path: Path) -> dict[str, Any]:
+    """OCR pass 1: extract invoice header only — no stock matching, no Supabase calls."""
+    header_data, _, _, warnings, _, _ = build_purchase_ocr_payload(input_path)
+    return {
+        "ok": True,
+        "invoice_number": header_data.get("invoice_number", ""),
+        "invoice_date": header_data.get("invoice_date", ""),
+        "vendor_name": header_data.get("vendor_name", ""),
+        "warnings": warnings,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the purchase OCR pipeline with PaddleOCR and return JSON.")
     parser.add_argument("--input", help="Path to the purchase invoice PDF or image.")
@@ -949,10 +961,16 @@ def main() -> int:
     parser.add_argument("--company-name", default=DEFAULT_COMPANY_NAME, help="Company name used for Supabase master lookup.")
     parser.add_argument("--push-mode", default="none", help="Must remain 'none'; direct push is disabled.")
     parser.add_argument("--min-match-score", type=float, default=DEFAULT_MATCH_THRESHOLD, help="Weak-match threshold.")
+    parser.add_argument("--ocr-only", action="store_true", help="Extract invoice header only (no stock matching, no Supabase).")
     args = parser.parse_args()
     input_value = args.input or args.image
     if not input_value:
         parser.error("Provide --input with a purchase invoice PDF or image path.")
+
+    if args.ocr_only:
+        payload = run_purchase_ocr_header_only(Path(input_value).resolve())
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
 
     payload = run_purchase_paddle_pipeline(
         Path(input_value).resolve(),

@@ -415,6 +415,20 @@ def parse_vlm_invoice(
 # --------------------------------------------------------------------------- #
 # Orchestrator
 # --------------------------------------------------------------------------- #
+def run_purchase_vl_ocr_header_only(input_path: Path) -> dict[str, Any]:
+    """VLM OCR pass 1: header only — no stock matching, no Supabase calls."""
+    vlm_result = call_vlm_server(Path(input_path))
+    markdown = vlm_result.get("markdown", "") or ""
+    header_data = build_header_data(markdown)
+    return {
+        "ok": True,
+        "invoice_number": header_data.get("invoice_number", ""),
+        "invoice_date": header_data.get("invoice_date", ""),
+        "vendor_name": header_data.get("vendor_name", ""),
+        "warnings": [],
+    }
+
+
 def run_purchase_vl_pipeline(
     image_path: Path,
     *,

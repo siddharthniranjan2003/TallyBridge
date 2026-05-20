@@ -926,6 +926,25 @@ def run_purchase_pipeline(image_path: Path, company_name: str, push_mode: str) -
     return extract_json_object(result.stdout)
 
 
+def run_purchase_ocr_header(image_path: Path) -> dict:
+    """Pass 1 for paddle: extract invoice header only, no stock matching."""
+    helper_python = resolve_paddle_python_executable()
+    if not PURCHASE_PADDLE_RUNNER_PATH.exists():
+        raise RuntimeError(f"Purchase Paddle runner is missing at {PURCHASE_PADDLE_RUNNER_PATH}")
+    result = subprocess.run(
+        [helper_python, str(PURCHASE_PADDLE_RUNNER_PATH), "--input", str(image_path), "--ocr-only"],
+        capture_output=True,
+        text=True,
+        cwd=str(SCRIPT_DIR),
+        timeout=300,
+    )
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        raise RuntimeError(stderr or stdout or "Purchase Paddle OCR header extraction failed.")
+    return extract_json_object(result.stdout)
+
+
 def check_duplicacy(invoice_number: str) -> bool:
     if not invoice_number or not SUPABASE_URL or not SUPABASE_KEY:
         return False
@@ -1027,9 +1046,20 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                     if upload_kind == "pdf" and original_upload_path
                     else image_path
                 )
+                if options.get("check") == "duplicacy":
+                    # Pass 1: fast OCR-only to extract invoice number
+                    if options["ocr"] == "vlm":
+                        from purchase_ocrvl_pipeline import run_purchase_vl_ocr_header_only
+                        ocr_header = run_purchase_vl_ocr_header_only(purchase_input)
+                    else:
+                        ocr_header = run_purchase_ocr_header(purchase_input)
+                    invoice_number = ocr_header.get("invoice_number", "")
+                    if check_duplicacy(invoice_number):
+                        self._send_json(200, {"duplicacy": True, "invoice_number": invoice_number})
+                        return
+                # Pass 2 (or normal run): full pipeline
                 if options["ocr"] == "vlm":
                     from purchase_ocrvl_pipeline import run_purchase_vl_pipeline
-
                     payload = run_purchase_vl_pipeline(
                         purchase_input,
                         company_name=options["company_name"],
@@ -1048,9 +1078,6 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
             payload["upload_kind"] = upload_kind
             payload["source_upload_path"] = str(original_upload_path or image_path)
             payload["saved_result"] = str(save_result(OUTPUT_DIR, (original_upload_path or image_path).stem, payload))
-            if options.get("check") == "duplicacy":
-                invoice_number = (payload.get("ocr") or {}).get("header", {}).get("invoice_number", "")
-                payload["duplicacy"] = check_duplicacy(invoice_number)
             if options["type"] == "sale":
                 payload["n8n"] = {
                     "party_name": payload["party_name"],
