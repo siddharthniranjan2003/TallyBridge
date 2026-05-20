@@ -434,10 +434,14 @@ def run_purchase_vl_pipeline(
     *,
     company_name: str = DEFAULT_COMPANY_NAME,
     min_match_score: float = DEFAULT_MATCH_THRESHOLD,
+    _preloaded_markdown: str | None = None,
 ) -> dict[str, Any]:
     started_at = time.time()
-    vlm_result = call_vlm_server(Path(image_path))
-    markdown = vlm_result.get("markdown", "") or ""
+    if _preloaded_markdown is not None:
+        markdown = _preloaded_markdown
+    else:
+        vlm_result = call_vlm_server(Path(image_path))
+        markdown = vlm_result.get("markdown", "") or ""
     header_data, description_rows, numeric_rows, warnings = parse_vlm_invoice(markdown)
     elapsed = round(time.time() - started_at, 2)
 

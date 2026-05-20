@@ -1046,23 +1046,26 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                     if upload_kind == "pdf" and original_upload_path
                     else image_path
                 )
+                vlm_markdown: str | None = None
                 if options.get("check") == "duplicacy":
-                    # Pass 1: fast OCR-only to extract invoice number
+                    # Pass 1: extract invoice number (VLM: one server call reused below)
                     if options["ocr"] == "vlm":
-                        from purchase_ocrvl_pipeline import run_purchase_vl_ocr_header_only
-                        ocr_header = run_purchase_vl_ocr_header_only(purchase_input)
+                        from purchase_ocrvl_pipeline import call_vlm_server, build_header_data
+                        vlm_result = call_vlm_server(purchase_input)
+                        vlm_markdown = vlm_result.get("markdown", "") or ""
+                        invoice_number = build_header_data(vlm_markdown).get("invoice_number", "")
                     else:
-                        ocr_header = run_purchase_ocr_header(purchase_input)
-                    invoice_number = ocr_header.get("invoice_number", "")
+                        invoice_number = run_purchase_ocr_header(purchase_input).get("invoice_number", "")
                     if check_duplicacy(invoice_number):
                         self._send_json(200, {"duplicacy": True, "invoice_number": invoice_number})
                         return
-                # Pass 2 (or normal run): full pipeline
+                # Pass 2 (or normal run): full pipeline; VLM reuses already-fetched markdown
                 if options["ocr"] == "vlm":
                     from purchase_ocrvl_pipeline import run_purchase_vl_pipeline
                     payload = run_purchase_vl_pipeline(
                         purchase_input,
                         company_name=options["company_name"],
+                        _preloaded_markdown=vlm_markdown,
                     )
                 else:
                     payload = run_purchase_pipeline(
