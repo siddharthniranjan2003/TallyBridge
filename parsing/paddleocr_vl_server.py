@@ -34,6 +34,23 @@ from lib.env import make_env_loader
 
 _env = make_env_loader(SCRIPT_DIR / ".env")
 
+
+def _parse_optional_bool(raw: str | None) -> bool | None:
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    return value.lower() not in {"0", "false", "no", "off"}
+
+
+def _parse_optional_list(raw: str | None) -> list[str] | None:
+    if raw is None:
+        return None
+    parts = [item.strip() for item in str(raw).split(",")]
+    parts = [item for item in parts if item]
+    return parts or None
+
 SERVE_HOST = _env("MINICPM_VLM_HTTP_HOST", "127.0.0.1")
 SERVE_PORT = int(_env("MINICPM_VLM_HTTP_PORT", "5006") or "5006")
 MAX_UPLOAD_BYTES = int(_env("MINICPM_VLM_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
@@ -42,8 +59,24 @@ MAX_UPLOAD_BYTES = int(_env("MINICPM_VLM_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024
 BACKEND = (_env("MINICPM_VLM_BACKEND", "native") or "native").strip().lower()
 VLLM_URL = _env("MINICPM_VLM_VLLM_URL", "http://127.0.0.1:8118/v1")
 PIPELINE_VERSION = _env("MINICPM_VLM_PIPELINE_VERSION", "")
+VLLM_MODEL_NAME = _env("MINICPM_VLM_API_MODEL_NAME", "PaddleOCR-VL-0.9B")
+NATIVE_MODEL_LABEL = "PaddleOCR-VL-1.5"
+DOC_PREPROCESS = _parse_optional_bool(_env("MINICPM_VLM_USE_DOC_PREPROCESSOR", ""))
+DOC_ORIENTATION = _parse_optional_bool(_env("MINICPM_VLM_USE_DOC_ORIENTATION_CLASSIFY", ""))
+DOC_UNWARPING = _parse_optional_bool(_env("MINICPM_VLM_USE_DOC_UNWARPING", ""))
+USE_LAYOUT_DETECTION = _parse_optional_bool(_env("MINICPM_VLM_USE_LAYOUT_DETECTION", ""))
+FORMAT_BLOCK_CONTENT = _parse_optional_bool(_env("MINICPM_VLM_FORMAT_BLOCK_CONTENT", ""))
+MERGE_LAYOUT_BLOCKS = _parse_optional_bool(_env("MINICPM_VLM_MERGE_LAYOUT_BLOCKS", ""))
+MARKDOWN_IGNORE_LABELS = _parse_optional_list(_env("MINICPM_VLM_MARKDOWN_IGNORE_LABELS", ""))
+PROMPT_LABEL = (_env("MINICPM_VLM_PROMPT_LABEL", "") or "").strip() or None
 
 _PIPELINE = None
+
+
+def active_model_label() -> str:
+    if BACKEND == "vllm-server":
+        return VLLM_MODEL_NAME
+    return NATIVE_MODEL_LABEL
 
 
 def build_pipeline():
@@ -53,9 +86,32 @@ def build_pipeline():
     kwargs: dict = {}
     if PIPELINE_VERSION:
         kwargs["pipeline_version"] = PIPELINE_VERSION
+    effective_doc_orientation = DOC_ORIENTATION
+    effective_doc_unwarping = DOC_UNWARPING
+    if DOC_PREPROCESS is not None:
+        if effective_doc_orientation is None:
+            effective_doc_orientation = DOC_PREPROCESS
+        if effective_doc_unwarping is None:
+            effective_doc_unwarping = DOC_PREPROCESS
+    if effective_doc_orientation is not None:
+        kwargs["use_doc_orientation_classify"] = effective_doc_orientation
+    if effective_doc_unwarping is not None:
+        kwargs["use_doc_unwarping"] = effective_doc_unwarping
+    if USE_LAYOUT_DETECTION is not None:
+        kwargs["use_layout_detection"] = USE_LAYOUT_DETECTION
+    if FORMAT_BLOCK_CONTENT is not None:
+        kwargs["format_block_content"] = FORMAT_BLOCK_CONTENT
+    if MERGE_LAYOUT_BLOCKS is not None:
+        kwargs["merge_layout_blocks"] = MERGE_LAYOUT_BLOCKS
+    if MARKDOWN_IGNORE_LABELS is not None:
+        kwargs["markdown_ignore_labels"] = MARKDOWN_IGNORE_LABELS
     if BACKEND == "vllm-server":
+        # The WSL vLLM server is currently serving PaddleOCR-VL-0.9B, so pass
+        # the exact served model name to the client wrapper instead of the
+        # native PaddleOCR-VL-1.5 default.
         kwargs["vl_rec_backend"] = "vllm-server"
         kwargs["vl_rec_server_url"] = VLLM_URL
+        kwargs["vl_rec_api_model_name"] = VLLM_MODEL_NAME
     return PaddleOCRVL(**kwargs)
 
 
@@ -91,7 +147,10 @@ def parse_document(file_path: Path) -> dict:
     if _PIPELINE is None:
         raise RuntimeError("PaddleOCR-VL pipeline is not loaded.")
     started = time.time()
-    results = list(_PIPELINE.predict(str(file_path)))
+    predict_kwargs: dict = {}
+    if PROMPT_LABEL:
+        predict_kwargs["prompt_label"] = PROMPT_LABEL
+    results = list(_PIPELINE.predict(str(file_path), **predict_kwargs))
     pages = [_markdown_of(res) for res in results]
     layout = [_layout_of(res) for res in results]
     return {
@@ -143,9 +202,24 @@ class PaddleVLHandler(BaseHTTPRequestHandler):
                 "ok": _PIPELINE is not None,
                 "status": "ready" if _PIPELINE is not None else "loading",
                 "service": "paddleocr_vl_server",
-                "model": "PaddleOCR-VL-1.5",
+                "model": active_model_label(),
                 "backend": BACKEND,
                 "port": SERVE_PORT,
+                "pipeline_version": PIPELINE_VERSION or "default",
+                "config": {
+                    "use_doc_preprocessor": (
+                        DOC_PREPROCESS
+                        if DOC_PREPROCESS is not None
+                        else bool(DOC_ORIENTATION) or bool(DOC_UNWARPING)
+                    ),
+                    "use_doc_orientation_classify": DOC_ORIENTATION,
+                    "use_doc_unwarping": DOC_UNWARPING,
+                    "use_layout_detection": USE_LAYOUT_DETECTION,
+                    "format_block_content": FORMAT_BLOCK_CONTENT,
+                    "merge_layout_blocks": MERGE_LAYOUT_BLOCKS,
+                    "markdown_ignore_labels": MARKDOWN_IGNORE_LABELS,
+                    "prompt_label": PROMPT_LABEL,
+                },
             })
             return
         self._send_json(404, {"ok": False, "error": "Not found"})
@@ -189,7 +263,7 @@ class PaddleVLHandler(BaseHTTPRequestHandler):
 
 def main() -> int:
     global _PIPELINE
-    print(f"Loading PaddleOCR-VL-1.5 (backend={BACKEND})...")
+    print(f"Loading {active_model_label()} (backend={BACKEND})...")
     _PIPELINE = build_pipeline()
     print(f"PaddleOCR-VL server ready on http://{SERVE_HOST}:{SERVE_PORT}")
     try:

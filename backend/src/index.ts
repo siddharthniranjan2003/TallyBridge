@@ -24,6 +24,13 @@ app.get("/health", (_, res) => {
   res.json({ status: "ok", service: "TallyBridge API" });
 });
 
+process.on('unhandledRejection', (reason) => {
+  console.error('[TallyBridge API] Unhandled rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[TallyBridge API] Uncaught exception:', err);
+});
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`[TallyBridge API] Running on port ${PORT}`);
