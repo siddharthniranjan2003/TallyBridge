@@ -119,11 +119,15 @@ def numeric_string(value: float) -> float | int:
     return round(value, 2)
 
 
+def strip_html_tags(text: str) -> str:
+    return re.sub(r"<[^>]+>", " ", text)
+
+
 def markdown_text_lines(markdown: str) -> list[str]:
-    """Flatten markdown to plain text lines (table pipes become spaces)."""
+    """Flatten markdown to plain text lines, stripping HTML tags and table pipes."""
     lines: list[str] = []
     for raw in markdown.splitlines():
-        text = normalize_ocr_text(raw.replace("|", " "))
+        text = normalize_ocr_text(strip_html_tags(raw).replace("|", " "))
         if text:
             lines.append(text)
     return lines
@@ -146,6 +150,30 @@ def extract_markdown_tables(markdown: str) -> list[list[list[str]]]:
             current = []
     if len(current) >= 2:
         tables.append(current)
+    return tables
+
+
+def extract_html_tables(markdown: str) -> list[list[list[str]]]:
+    """Parse HTML <table> blocks from VLM output into the same row/cell format."""
+    tables: list[list[list[str]]] = []
+    for table_html in re.findall(r"<table[^>]*>(.*?)</table>", markdown, flags=re.DOTALL | re.IGNORECASE):
+        rows: list[list[str]] = []
+        for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", table_html, flags=re.DOTALL | re.IGNORECASE):
+            cells = [
+                normalize_ocr_text(strip_html_tags(td))
+                for td in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, flags=re.DOTALL | re.IGNORECASE)
+            ]
+            if cells:
+                rows.append(cells)
+        if len(rows) >= 2:
+            tables.append(rows)
+    return tables
+
+
+def extract_all_tables(markdown: str) -> list[list[list[str]]]:
+    tables = extract_markdown_tables(markdown)
+    if not tables:
+        tables = extract_html_tables(markdown)
     return tables
 
 
@@ -201,7 +229,7 @@ def cell(row: list[str], mapping: dict[str, int], field: str) -> str:
 
 def parse_item_table(markdown: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     warnings: list[str] = []
-    table, mapping = select_item_table(extract_markdown_tables(markdown))
+    table, mapping = select_item_table(extract_all_tables(markdown))
     if not table:
         warnings.append("PaddleOCR-VL did not return a recognizable invoice item table.")
         return [], [], warnings
@@ -255,6 +283,7 @@ def extract_invoice_number(lines: list[str]) -> str:
     return _first_match(
         lines,
         (
+            r"SERIAL\s*NO\.?\s*[,.]?\s*INVOICE\s*[:\-]?\s*([A-Z0-9/\-]+)",
             r"INVOICE\s*NO\.?\s*[:\-]?\s*([A-Z0-9/\-]+)",
             r"SUPPLIER\s*INVOICE\s*NO\.?\s*[:\-]?\s*([A-Z0-9/\-]+)",
             r"BILL\s*NO\.?\s*[:\-]?\s*([A-Z0-9/\-]+)",
@@ -437,6 +466,7 @@ def run_purchase_vl_pipeline(
     _preloaded_markdown: str | None = None,
 ) -> dict[str, Any]:
     started_at = time.time()
+    vlm_result: dict[str, Any] = {}
     if _preloaded_markdown is not None:
         markdown = _preloaded_markdown
     else:
