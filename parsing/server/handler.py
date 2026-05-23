@@ -987,10 +987,14 @@ def request_options(path: str) -> dict[str, str]:
     }
 
 
+def normalized_request_path(path: str) -> str:
+    return urlparse(path or "").path.rstrip("/") or "/"
+
+
 class MiniCPMHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        request_path = urlparse(self.path).path.rstrip("/")
-        if request_path in {"", "/health"}:
+        current_path = normalized_request_path(self.path)
+        if current_path in {"", "/health"}:
             self._send_json(
                 200,
                 {
@@ -1011,6 +1015,10 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                     "default_purchase_ocr_engine": "paddle",
                     "purchase_pdf_render": "pymupdf_300dpi",
                     "purchase_ocr_compare_pass": "paddle_highres_1920_aux",
+                    "supported_endpoints": {
+                        "purchase_and_sale": "/?type=sale|purchase...",
+                        "raw_vlm": "/raw-vlm",
+                    },
                 },
             )
             return
@@ -1018,7 +1026,7 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            options = request_options(self.path)
+            current_path = normalized_request_path(self.path)
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > MAX_UPLOAD_BYTES:
                 self._send_json(400, {"ok": False, "error": "Bad request size"})
@@ -1030,6 +1038,25 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
             UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
             OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+            if current_path == "/raw-vlm":
+                from purchase_ocrvl_pipeline import call_vlm_server
+
+                upload_path, original_upload_path, upload_kind = materialize_upload(
+                    body,
+                    self.headers.get("Content-Type", ""),
+                    f"upload_{timestamp}",
+                    UPLOAD_DIR,
+                    render_pdf=False,
+                )
+                source_upload = original_upload_path or upload_path
+                payload = call_vlm_server(source_upload)
+                payload["upload_kind"] = upload_kind
+                payload["source_upload_path"] = str(source_upload)
+                payload["saved_result"] = str(save_result(OUTPUT_DIR, source_upload.stem, payload))
+                self._send_json(200, payload)
+                return
+
+            options = request_options(self.path)
             image_path, original_upload_path, upload_kind = materialize_upload(
                 body,
                 self.headers.get("Content-Type", ""),
@@ -1046,26 +1073,30 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                     if upload_kind == "pdf" and original_upload_path
                     else image_path
                 )
-                vlm_markdown: str | None = None
+                vlm_result: dict | None = None
                 if options.get("check") == "duplicacy":
-                    # Pass 1: extract invoice number (VLM: one server call reused below)
+                    duplicate_invoice_number = ""
+                    is_duplicate = False
                     if options["ocr"] == "vlm":
-                        from purchase_ocrvl_pipeline import call_vlm_server, build_header_data
+                        from purchase_ocrvl_pipeline import call_vlm_server, parse_vlm_server_result
+
                         vlm_result = call_vlm_server(purchase_input)
-                        vlm_markdown = vlm_result.get("markdown", "") or ""
-                        invoice_number = build_header_data(vlm_markdown).get("invoice_number", "")
+                        parsed_preview = parse_vlm_server_result(vlm_result)
+                        duplicate_invoice_number = parsed_preview.get("header_data", {}).get("invoice_number", "")
                     else:
-                        invoice_number = run_purchase_ocr_header(purchase_input).get("invoice_number", "")
-                    if check_duplicacy(invoice_number):
-                        self._send_json(200, {"duplicacy": True, "invoice_number": invoice_number})
-                        return
-                # Pass 2 (or normal run): full pipeline; VLM reuses already-fetched markdown
+                        duplicate_invoice_number = run_purchase_ocr_header(purchase_input).get("invoice_number", "")
+                    is_duplicate = check_duplicacy(duplicate_invoice_number)
+                else:
+                    duplicate_invoice_number = ""
+                    is_duplicate = False
+
                 if options["ocr"] == "vlm":
                     from purchase_ocrvl_pipeline import run_purchase_vl_pipeline
+
                     payload = run_purchase_vl_pipeline(
                         purchase_input,
                         company_name=options["company_name"],
-                        _preloaded_markdown=vlm_markdown,
+                        _preloaded_vlm_result=vlm_result,
                     )
                 else:
                     payload = run_purchase_pipeline(
@@ -1073,6 +1104,12 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                         company_name=options["company_name"],
                         push_mode=options["push_mode"],
                     )
+                if options.get("check") == "duplicacy":
+                    payload["duplicacy"] = {
+                        "checked": True,
+                        "is_duplicate": bool(is_duplicate),
+                        "invoice_number": duplicate_invoice_number,
+                    }
             else:
                 payload = run_pipeline_for_image(
                     image_path=image_path,
