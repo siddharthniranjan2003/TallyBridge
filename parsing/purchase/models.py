@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
 
 @dataclass
@@ -22,3 +23,4 @@ class StockMatch:
     group_name: str
     stock_rate: Decimal
     canonical_query: str
+    trace: dict[str, Any] | None = None

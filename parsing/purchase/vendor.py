@@ -17,7 +17,8 @@ def detect_vendor(value: str) -> str:
         return "TOTEM"
     if "CP GRAT-EX" in upper or "GRAT-EX" in upper:
         return "CP"
-    if "PIDILITE" in upper or "STEELGRIP" in upper:
+    if "PIDIL" in upper or "STEELGRIP" in upper:
+        # "PIDIL" prefix tolerates OCR variants like "PIDILLITE" (double-L).
         return "PIDILITE"
     if "STANLEY" in upper or "BLACK & DECKER" in upper or "LENOX" in upper:
         return "STANLEY"

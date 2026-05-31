@@ -7,6 +7,7 @@ from typing import Any
 import requests
 
 from lib.env import make_env_loader
+from lib.text import normalize_space
 
 _env = make_env_loader(Path(__file__).resolve().parents[1] / ".env")
 SUPABASE_URL = _env("SUPABASE_URL", "")
@@ -19,6 +20,7 @@ SUPABASE_PAGE_SIZE = max(100, int(_env("MINICPM_SUPABASE_PAGE_SIZE", "1000") or 
 SUPABASE_MAX_PAGES = max(1, int(_env("MINICPM_SUPABASE_MAX_PAGES", "10") or "10"))
 SUPABASE_TIMEOUT_SECONDS = max(5, int(_env("MINICPM_SUPABASE_TIMEOUT_SECONDS", "20") or "20"))
 _CONTEXT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_PURCHASE_MATCHING_EXACT_CACHE: tuple[float, dict[str, str]] | None = None
 
 
 def supabase_headers() -> dict[str, str]:
@@ -35,6 +37,21 @@ def supabase_get(endpoint: str, params: dict[str, str]) -> requests.Response:
             endpoint,
             headers=supabase_headers(),
             params=params,
+            timeout=SUPABASE_TIMEOUT_SECONDS,
+        )
+    return response
+
+
+def supabase_post_json(endpoint: str, payload: dict[str, Any]) -> requests.Response:
+    with requests.Session() as session:
+        session.trust_env = False
+        response = session.post(
+            endpoint,
+            headers={
+                **supabase_headers(),
+                "Content-Type": "application/json",
+            },
+            json=payload,
             timeout=SUPABASE_TIMEOUT_SECONDS,
         )
     return response
@@ -117,6 +134,97 @@ def fetch_supabase_company_rows(
     return rows
 
 
+def fetch_supabase_table_rows(table_name: str, *, select: str = "*") -> list[dict[str, Any]]:
+    ensure_supabase_configured()
+
+    rows: list[dict[str, Any]] = []
+    endpoint = supabase_endpoint(table_name)
+    for page_index in range(SUPABASE_MAX_PAGES):
+        params = {
+            "select": select,
+            "order": "id.asc",
+            "limit": str(SUPABASE_PAGE_SIZE),
+            "offset": str(page_index * SUPABASE_PAGE_SIZE),
+        }
+        try:
+            response = supabase_get(endpoint, params)
+            response.raise_for_status()
+            batch = response.json()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Could not reach Supabase while loading {table_name} lookup data.") from exc
+
+        rows.extend(batch)
+        if len(batch) < SUPABASE_PAGE_SIZE:
+            break
+    return rows
+
+
+def fetch_purchase_matching_rows() -> list[dict[str, Any]]:
+    try:
+        return fetch_supabase_table_rows("purchase_matching_api", select="*")
+    except RuntimeError:
+        pass
+
+    try:
+        return fetch_supabase_table_rows("Purchase_Matching", select="*")
+    except RuntimeError:
+        pass
+
+    ensure_supabase_configured()
+    sql = 'select "Invoice Item Description", "Tally Item Description" from public."Purchase_Matching";'
+    candidate_endpoints = [
+        f"{SUPABASE_URL.rstrip('/')}/pg/v1/query",
+        f"{SUPABASE_URL.rstrip('/')}/pg-meta/default/query",
+    ]
+    last_error: Exception | None = None
+    for endpoint in candidate_endpoints:
+        try:
+            response = supabase_post_json(endpoint, {"query": sql})
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, list):
+                return [row for row in payload if isinstance(row, dict)]
+            if isinstance(payload, dict):
+                rows = payload.get("rows") or payload.get("result") or payload.get("data") or []
+                if isinstance(rows, list):
+                    return [row for row in rows if isinstance(row, dict)]
+        except requests.RequestException as exc:
+            last_error = exc
+            continue
+
+    raise RuntimeError("Could not reach Supabase while loading Purchase_Matching lookup data.") from last_error
+
+
+def resolve_purchase_matching_exact_map() -> dict[str, str]:
+    global _PURCHASE_MATCHING_EXACT_CACHE
+
+    now = time.time()
+    if _PURCHASE_MATCHING_EXACT_CACHE and now - _PURCHASE_MATCHING_EXACT_CACHE[0] < CONTEXT_CACHE_TTL_SECONDS:
+        return _PURCHASE_MATCHING_EXACT_CACHE[1]
+
+    try:
+        rows = fetch_purchase_matching_rows()
+    except (RuntimeError, ValueError):
+        _PURCHASE_MATCHING_EXACT_CACHE = (now, {})
+        return {}
+
+    description_to_tally_names: dict[str, set[str]] = {}
+    for row in rows:
+        invoice_description = normalize_space(row.get("Invoice Item Description", ""))
+        tally_description = normalize_space(row.get("Tally Item Description", ""))
+        if not invoice_description or not tally_description:
+            continue
+        description_to_tally_names.setdefault(invoice_description, set()).add(tally_description)
+
+    exact_map = {
+        invoice_description: next(iter(tally_names))
+        for invoice_description, tally_names in description_to_tally_names.items()
+        if len(tally_names) == 1
+    }
+    _PURCHASE_MATCHING_EXACT_CACHE = (now, exact_map)
+    return exact_map
+
+
 def resolve_supabase_company_context(company_name: str) -> dict[str, Any]:
     cached = _CONTEXT_CACHE.get(company_name)
     now = time.time()
@@ -140,6 +248,7 @@ def resolve_supabase_company_context(company_name: str) -> dict[str, Any]:
         "source": "supabase",
         "ledgers": ledgers,
         "stock_items": stock_items,
+        "purchase_matching_exact_map": resolve_purchase_matching_exact_map(),
     }
     _CONTEXT_CACHE[company_name] = (now, context)
     return context

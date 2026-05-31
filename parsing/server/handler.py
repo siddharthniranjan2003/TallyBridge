@@ -1,11 +1,13 @@
 import argparse
 import base64
+import html
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -14,7 +16,7 @@ from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlsplit, urlunsplit
 import importlib.util
 
 import requests
@@ -58,6 +60,7 @@ def load_env_file(path: Path) -> dict[str, str]:
 
 
 ENV_VALUES = load_env_file(ENV_PATH)
+BACKEND_ENV_VALUES = load_env_file(SCRIPT_DIR.parent / "backend" / ".env")
 
 
 def env_value(name: str, default: str = "", aliases: tuple[str, ...] = ()) -> str:
@@ -75,10 +78,40 @@ SERVE_HOST = env_value("MINICPM_HTTP_HOST", "127.0.0.1")
 SERVE_PORT = int(env_value("MINICPM_HTTP_PORT", "5003"))
 MAX_UPLOAD_BYTES = int(env_value("MINICPM_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 PDF_RENDER_DPI = int(env_value("MINICPM_PDF_RENDER_DPI", "200"))
+# RunPod/Nanonets path renders at higher DPI: dense headers (e.g. Pidilite's
+# multi-column "Document No" block) get dropped at 200 but survive at 300.
+RUNPOD_PDF_RENDER_DPI = int(env_value("MINICPM_RUNPOD_PDF_DPI", "300"))
+RUNPOD_PDF_RETRY_DPI = int(env_value("MINICPM_RUNPOD_PDF_RETRY_DPI", "400"))
 PDF_MAX_PAGES = max(1, int(env_value("MINICPM_PDF_MAX_PAGES", "4")))
 PDF_PAGE_GAP_PX = max(0, int(env_value("MINICPM_PDF_PAGE_GAP_PX", "24")))
 DEFAULT_PURCHASE_COMPANY = env_value("MINICPM_PURCHASE_COMPANY", env_value("TALLY_COMPANY", "K V ENTERPRISES"))
 PADDLE_PYTHON_HINT = env_value("MINICPM_PADDLE_PYTHON", "")
+DOCSTRANGE_INVOICE_URL = env_value("DOCSTRANGE_INVOICE_URL", "http://127.0.0.1:8010/extract")
+DOCSTRANGE_TIMEOUT_SECONDS = int(env_value("DOCSTRANGE_TIMEOUT_SECONDS", "1800"))
+PUSH_QUEUE_URL = (
+    env_value("MINICPM_PUSH_QUEUE_URL", "")
+    or BACKEND_ENV_VALUES.get("PUSH_QUEUE_URL", "")
+    or "http://localhost:3001/api/sync/push-queue?company_name=K+V+ENTERPRISES"
+)
+PUSH_QUEUE_API_KEY = (
+    env_value("MINICPM_PUSH_QUEUE_API_KEY", "")
+    or BACKEND_ENV_VALUES.get("API_KEY", "")
+)
+PUSH_QUEUE_TIMEOUT_SECONDS = int(env_value("MINICPM_PUSH_QUEUE_TIMEOUT_SECONDS", "30"))
+RUNPOD_POD_URL = env_value("RUNPOD_POD_URL", "https://e1a2h1u5vujgun-8000.proxy.runpod.net").rstrip("/")
+RUNPOD_POD_API_KEY = env_value("RUNPOD_POD_API_KEY", "sk-e1a2h1u5vujgun")
+RUNPOD_MODEL = env_value("RUNPOD_MODEL", "nanonets/Nanonets-OCR2-3B")
+RUNPOD_TIMEOUT_SECONDS = int(env_value("RUNPOD_TIMEOUT_SECONDS", "180"))
+RUNPOD_SERVERLESS_POLL_SECONDS = float(env_value("RUNPOD_SERVERLESS_POLL_SECONDS", "3") or "3")
+RUNPOD_MAX_TOKENS = int(env_value("RUNPOD_MAX_TOKENS", "4096"))
+RUNPOD_TEMPERATURE = float(env_value("RUNPOD_TEMPERATURE", "0") or "0")
+RUNPOD_DEBUG_LOG = env_value("RUNPOD_DEBUG_LOG", str(OUTPUT_DIR / "runpod_debug.log"))
+RUNPOD_MARKDOWN_PROMPT = env_value(
+    "RUNPOD_MARKDOWN_PROMPT",
+    "Extract the text from the above document as if you were reading it naturally. "
+    "Return the tables in markdown table format. "
+    "Return page numbers as: <page_number>1</page_number>",
+)
 GSHEET_SHEET_NAME = env_value("MINICPM_GSHEET_NAME", "Challan")
 GSHEET_DATA_START_ROW = int(env_value("MINICPM_GSHEET_DATA_START_ROW", "5"))
 SUPABASE_URL = env_value("SUPABASE_URL", "")
@@ -816,6 +849,416 @@ def materialize_input_path(
     return input_path, None, upload_kind
 
 
+def call_docstrange_invoice_server(file_bytes: bytes, filename: str, upload_kind: str) -> dict:
+    content_type = "application/pdf" if upload_kind == "pdf" else "image/jpeg"
+    response = requests.post(
+        DOCSTRANGE_INVOICE_URL,
+        files={"file": (filename, file_bytes, content_type)},
+        timeout=DOCSTRANGE_TIMEOUT_SECONDS,
+    )
+    if response.status_code >= 400:
+        detail = response.text
+        try:
+            detail = json.dumps(response.json(), ensure_ascii=False)
+        except Exception:
+            pass
+        raise ValueError(f"DocStrange server failed with HTTP {response.status_code}: {detail}")
+    payload = response.json()
+    if not payload.get("ok"):
+        raise ValueError(payload.get("error") or "DocStrange extraction failed")
+    return payload
+
+
+def render_pdf_bytes_to_jpeg(pdf_bytes: bytes) -> bytes:
+    pages = convert_from_bytes(pdf_bytes, dpi=PDF_RENDER_DPI, first_page=1, last_page=PDF_MAX_PAGES)
+    if not pages:
+        raise ValueError("PDF upload did not contain any renderable pages")
+    converted_pages = [page.convert("RGB") for page in pages]
+    max_width = max(page.width for page in converted_pages)
+    total_height = sum(page.height for page in converted_pages) + (PDF_PAGE_GAP_PX * (len(converted_pages) - 1))
+    canvas = Image.new("RGB", (max_width, total_height), "white")
+    offset_y = 0
+    for page in converted_pages:
+        offset_x = max(0, (max_width - page.width) // 2)
+        canvas.paste(page, (offset_x, offset_y))
+        offset_y += page.height + PDF_PAGE_GAP_PX
+    buffer = BytesIO()
+    canvas.save(buffer, format="JPEG", quality=95)
+    return buffer.getvalue()
+
+
+def render_pdf_bytes_to_jpeg_pages(pdf_bytes: bytes, dpi: int | None = None) -> list[bytes]:
+    """Render each PDF page to its own full-resolution JPEG (no stitching)."""
+    pages = convert_from_bytes(pdf_bytes, dpi=dpi or PDF_RENDER_DPI, first_page=1, last_page=PDF_MAX_PAGES)
+    if not pages:
+        raise ValueError("PDF upload did not contain any renderable pages")
+    result: list[bytes] = []
+    for page in pages:
+        buffer = BytesIO()
+        page.convert("RGB").save(buffer, format="JPEG", quality=95)
+        result.append(buffer.getvalue())
+    return result
+
+
+def markdown_to_basic_html(markdown: str) -> str:
+    lines = str(markdown or "").splitlines()
+    parts: list[str] = [
+        "<!DOCTYPE html>",
+        "<html lang=\"en\">",
+        "<head>",
+        "<meta charset=\"UTF-8\">",
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">",
+        "<title>RunPod OCR Markdown</title>",
+        "<style>body{font-family:Arial,sans-serif;line-height:1.5;padding:24px;max-width:1100px;margin:auto}"
+        "table{border-collapse:collapse;width:100%;margin:16px 0}"
+        "th,td{border:1px solid #ccc;padding:6px;text-align:left;vertical-align:top}"
+        "th{background:#f3f3f3}pre{white-space:pre-wrap}</style>",
+        "</head>",
+        "<body>",
+    ]
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.strip().startswith("|"):
+            table_rows: list[list[str]] = []
+            while index < len(lines) and lines[index].strip().startswith("|"):
+                cells = [cell.strip() for cell in lines[index].strip().strip("|").split("|")]
+                if cells and all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells):
+                    index += 1
+                    continue
+                table_rows.append(cells)
+                index += 1
+            if table_rows:
+                parts.append("<table>")
+                for row_index, cells in enumerate(table_rows):
+                    tag = "th" if row_index == 0 else "td"
+                    parts.append("<tr>" + "".join(f"<{tag}>{html.escape(cell)}</{tag}>" for cell in cells) + "</tr>")
+                parts.append("</table>")
+            continue
+        stripped = line.strip()
+        if not stripped:
+            index += 1
+            continue
+        if stripped.startswith("#"):
+            level = min(6, len(stripped) - len(stripped.lstrip("#")))
+            text = stripped[level:].strip()
+            parts.append(f"<h{level}>{html.escape(text)}</h{level}>")
+        else:
+            parts.append(f"<p>{html.escape(stripped)}</p>")
+        index += 1
+    parts.extend(["</body>", "</html>"])
+    return "\n".join(parts)
+
+
+def extract_runpod_markdown(output: object) -> str:
+    if isinstance(output, str):
+        return output
+    if isinstance(output, dict):
+        choices = output.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, dict):
+                message = first.get("message")
+                if isinstance(message, dict) and isinstance(message.get("content"), str):
+                    return message["content"]
+                if isinstance(first.get("text"), str):
+                    return first["text"]
+        for key in ("content", "markdown", "text", "output"):
+            value = output.get(key)
+            if isinstance(value, str):
+                return value
+    return json.dumps(output, ensure_ascii=False, indent=2)
+
+
+def log_runpod_debug(event: str, payload: dict[str, object]) -> None:
+    try:
+        log_path = Path(RUNPOD_DEBUG_LOG)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "event": event,
+            **payload,
+        }
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def push_queue_url_with_company(company_name: str) -> str:
+    parts = urlsplit(PUSH_QUEUE_URL)
+    query_pairs = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query_pairs["company_name"] = company_name or DEFAULT_PURCHASE_COMPANY
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query_pairs), parts.fragment))
+
+
+def post_to_push_queue(payload: dict, company_name: str) -> dict:
+    if not PUSH_QUEUE_API_KEY:
+        raise ValueError("Push queue API key is not configured. Set MINICPM_PUSH_QUEUE_API_KEY or backend/.env API_KEY.")
+    request_url = push_queue_url_with_company(company_name)
+    session = requests.Session()
+    session.trust_env = False
+    response = session.post(
+        request_url,
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": PUSH_QUEUE_API_KEY,
+        },
+        json=payload,
+        timeout=PUSH_QUEUE_TIMEOUT_SECONDS,
+    )
+    try:
+        body = response.json() if response.text else {}
+    except ValueError:
+        body = {"raw": response.text}
+    if not response.ok:
+        raise ValueError(f"Push queue request failed with HTTP {response.status_code}: {json.dumps(body, ensure_ascii=False)[:1000]}")
+    return {
+        "ok": True,
+        "status_code": response.status_code,
+        "request_url": request_url,
+        "request_payload": payload,
+        "body": body,
+    }
+
+
+def _runpod_is_serverless() -> bool:
+    return "api.runpod.ai/v2/" in RUNPOD_POD_URL
+
+
+def _runpod_serverless_base_url() -> str:
+    # Serverless RUNPOD_POD_URL is .../v2/<id>/openai; the native job API drops /openai.
+    base = RUNPOD_POD_URL.rstrip("/")
+    if base.endswith("/openai"):
+        base = base[: -len("/openai")]
+    return base
+
+
+def _runpod_serverless_completion(session: requests.Session, headers: dict, payload: dict) -> dict:
+    # Custom serverless workers don't transparently proxy the OpenAI route, so use
+    # the native /run + /status API and unwrap the worker's `output` (OpenAI body).
+    base = _runpod_serverless_base_url()
+    submit = session.post(f"{base}/run", headers=headers, json={"input": payload}, timeout=RUNPOD_TIMEOUT_SECONDS)
+    try:
+        submit.raise_for_status()
+    except requests.HTTPError as exc:
+        log_runpod_debug("error", {"pod_url": base, "status_code": submit.status_code, "body": submit.text[:1000]})
+        raise ValueError(f"RunPod serverless submit failed with HTTP {submit.status_code}: {submit.text[:1000]}") from exc
+
+    job_id = (submit.json() or {}).get("id")
+    if not job_id:
+        raise ValueError(f"RunPod serverless did not return a job id: {submit.text[:300]}")
+
+    deadline = time.time() + RUNPOD_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        status = session.get(f"{base}/status/{job_id}", headers=headers, timeout=min(RUNPOD_TIMEOUT_SECONDS, 60))
+        status.raise_for_status()
+        data = status.json() or {}
+        state = data.get("status")
+        if state == "COMPLETED":
+            return data.get("output") or {}
+        if state in ("FAILED", "CANCELLED", "TIMED_OUT"):
+            raise ValueError(f"RunPod serverless job {state}: {json.dumps(data)[:500]}")
+        time.sleep(RUNPOD_SERVERLESS_POLL_SECONDS)
+    raise ValueError(f"RunPod serverless job timed out after {RUNPOD_TIMEOUT_SECONDS}s")
+
+
+def _runpod_markdown_for_image(image_bytes: bytes, filename: str, upload_kind: str) -> str:
+    b64_image = base64.b64encode(image_bytes).decode("ascii")
+    headers = {
+        "Authorization": f"Bearer {RUNPOD_POD_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": RUNPOD_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}},
+                    {"type": "text", "text": RUNPOD_MARKDOWN_PROMPT},
+                ],
+            }
+        ],
+        "max_tokens": RUNPOD_MAX_TOKENS,
+        "temperature": RUNPOD_TEMPERATURE,
+    }
+    session = requests.Session()
+    session.trust_env = False
+    log_runpod_debug(
+        "submitted",
+        {
+            "pod_url": RUNPOD_POD_URL,
+            "model": RUNPOD_MODEL,
+            "filename": filename,
+            "upload_kind": upload_kind,
+            "image_bytes": len(image_bytes),
+            "max_tokens": RUNPOD_MAX_TOKENS,
+        },
+    )
+    if _runpod_is_serverless():
+        response_payload = _runpod_serverless_completion(session, headers, payload)
+        return extract_runpod_markdown(response_payload)
+
+    response = session.post(
+        f"{RUNPOD_POD_URL}/v1/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=RUNPOD_TIMEOUT_SECONDS,
+    )
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        log_runpod_debug(
+            "error",
+            {
+                "pod_url": RUNPOD_POD_URL,
+                "status_code": response.status_code,
+                "body": response.text[:1000],
+            },
+        )
+        raise ValueError(f"RunPod pod request failed with HTTP {response.status_code}: {response.text[:1000]}") from exc
+
+    return extract_runpod_markdown(response.json())
+
+
+def call_runpod_markdown_ocr(file_bytes: bytes, filename: str, upload_kind: str, dpi: int | None = None) -> dict:
+    if not RUNPOD_POD_URL or not RUNPOD_POD_API_KEY:
+        raise ValueError("RunPod OCR source requires RUNPOD_POD_URL and RUNPOD_POD_API_KEY in environment or parsing/.env")
+
+    started_at = time.time()
+    # Multi-page PDFs are OCR'd one page at a time so each page keeps full
+    # resolution. Stitching pages into one tall JPEG made scanned multi-page
+    # invoices (e.g. 3-page scans) downscale until the model read almost nothing.
+    if upload_kind == "pdf":
+        page_images = render_pdf_bytes_to_jpeg_pages(file_bytes, dpi=dpi or RUNPOD_PDF_RENDER_DPI)
+    else:
+        page_images = [file_bytes]
+
+    markdown_parts: list[str] = []
+    for image_bytes in page_images:
+        page_markdown = _runpod_markdown_for_image(image_bytes, filename, upload_kind)
+        if page_markdown.strip():
+            markdown_parts.append(page_markdown.strip())
+    markdown = "\n\n---\n\n".join(markdown_parts)
+
+    log_runpod_debug(
+        "completed",
+        {
+            "pod_url": RUNPOD_POD_URL,
+            "model": RUNPOD_MODEL,
+            "seconds": round(time.time() - started_at, 2),
+            "pages": len(page_images),
+            "markdown_chars": len(markdown),
+        },
+    )
+    return {
+        "ok": True,
+        "status": "success",
+        "source": "runpod",
+        "markdown": markdown,
+        "html": markdown_to_basic_html(markdown),
+        "runpod": {
+            "transport": "pod_openai_chat_completions",
+            "pod_url": RUNPOD_POD_URL,
+            "model": RUNPOD_MODEL,
+            "seconds": round(time.time() - started_at, 2),
+            "upload_kind": upload_kind,
+            "filename": filename,
+            "pages": len(page_images),
+        },
+    }
+
+
+def runpod_targeted_field(file_bytes: bytes, upload_kind: str, question: str) -> str:
+    """Ask the VLM one specific question about the document and return its raw
+    text answer. Used as a fallback when the generic markdown OCR drops a field
+    (e.g. Pidilite's "Document No" on a dense header). Renders the first page at
+    the higher retry DPI for the best chance the label is legible."""
+    if upload_kind == "pdf":
+        pages = render_pdf_bytes_to_jpeg_pages(file_bytes, dpi=RUNPOD_PDF_RETRY_DPI)
+        image_bytes = pages[0] if pages else file_bytes
+    else:
+        image_bytes = file_bytes
+    b64_image = base64.b64encode(image_bytes).decode("ascii")
+    headers = {"Authorization": f"Bearer {RUNPOD_POD_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": RUNPOD_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}},
+                    {"type": "text", "text": question},
+                ],
+            }
+        ],
+        "max_tokens": 64,
+        "temperature": 0,
+    }
+    session = requests.Session()
+    session.trust_env = False
+    if _runpod_is_serverless():
+        result = _runpod_serverless_completion(session, headers, payload)
+        return extract_runpod_markdown(result)
+    resp = session.post(f"{RUNPOD_POD_URL}/v1/chat/completions", headers=headers, json=payload, timeout=RUNPOD_TIMEOUT_SECONDS)
+    resp.raise_for_status()
+    return extract_runpod_markdown(resp.json())
+
+
+def normalize_voucher_number(voucher_payload) -> str:
+    if isinstance(voucher_payload, dict):
+        return str(voucher_payload.get("voucher_number") or "").strip()
+    return ""
+
+
+# Vendor-specific re-ask prompts. The model is shown the invoice image and asked
+# for exactly one field, which is far more reliable than hoping a label survives
+# the generic markdown transcription.
+_INVOICE_NUMBER_QUESTIONS = {
+    "PIDILITE": "What is the 'Document No' printed on this invoice? Reply with ONLY the number, no words.",
+}
+_DEFAULT_INVOICE_NUMBER_QUESTION = (
+    "What is the invoice number (or document number) on this invoice? "
+    "Reply with ONLY the number/code, no words."
+)
+
+
+def recover_invoice_number(file_bytes: bytes, upload_kind: str, vendor: str) -> str:
+    question = _INVOICE_NUMBER_QUESTIONS.get(vendor, _DEFAULT_INVOICE_NUMBER_QUESTION)
+    answer = runpod_targeted_field(file_bytes, upload_kind, question)
+    # Pull the first plausible invoice token from the model's reply.
+    match = re.search(r"[A-Z0-9][A-Z0-9\-/]{3,}", str(answer or "").upper())
+    candidate = match.group(0) if match else ""
+    if candidate in {"INVOICE", "DOCUMENT", "NUMBER", "NONE", "N/A", "NA"}:
+        return ""
+    return candidate
+
+
+def apply_recovered_invoice_number(payload: dict, number: str) -> None:
+    number = number.strip()
+    if not number:
+        return
+    parsed_header = payload.setdefault("parsed", {}).setdefault("header", {})
+    parsed_header["invoice_number"] = number
+    narration = f"Purchase invoice {number}"
+    for key in ("voucher_payload",):
+        vp = payload.get(key)
+        if isinstance(vp, dict):
+            vp["voucher_number"] = number
+            vp["reference"] = number
+            vp["narration"] = narration
+    # Mirror into the queue request body that actually gets pushed.
+    req = payload.get("push_queue_request_payload")
+    if isinstance(req, dict):
+        tp = req.get("tally_payload")
+        if isinstance(tp, dict) and isinstance(tp.get("voucher_payload"), dict):
+            tp["voucher_payload"]["voucher_number"] = number
+            tp["voucher_payload"]["reference"] = number
+            tp["voucher_payload"]["narration"] = narration
+    payload["invoice_number_source"] = "vlm_targeted_reask"
+
+
 def run_pipeline_for_image(image_path: Path, benchmark_path: Path | None = None) -> dict:
     pipeline = load_pipeline()
     stock = pipeline.load_stock(pipeline.STOCK_CSV)
@@ -991,6 +1434,26 @@ def normalized_request_path(path: str) -> str:
     return urlparse(path or "").path.rstrip("/") or "/"
 
 
+def optional_query_bool(path: str, name: str) -> bool | None:
+    values = parse_qs(urlparse(path or "").query).get(name, [])
+    if not values:
+        return None
+    value = collapse_spaces(values[0]).lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be one of: on, off, true, false, 1, 0")
+
+
+def optional_query_string(path: str, name: str) -> str | None:
+    values = parse_qs(urlparse(path or "").query).get(name, [])
+    if not values:
+        return None
+    value = collapse_spaces(values[0])
+    return value or None
+
+
 class MiniCPMHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         current_path = normalized_request_path(self.path)
@@ -1018,6 +1481,43 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                     "supported_endpoints": {
                         "purchase_and_sale": "/?type=sale|purchase...",
                         "raw_vlm": "/raw-vlm",
+                        "docstrange": "/docstrange",
+                    },
+                    "docstrange": {
+                        "url": DOCSTRANGE_INVOICE_URL,
+                        "sources": ["local", "runpod"],
+                        "runpod_configured": bool(RUNPOD_POD_URL and RUNPOD_POD_API_KEY),
+                        "runpod_transport": "pod_openai_chat_completions",
+                        "returns": ["markdown", "html"],
+                        "purchase_all": "/docstrange?purchase=all",
+                        "purchase_all_returns": [
+                            "markdown",
+                            "html",
+                            "vendor",
+                            "parsed",
+                            "fuzzy_items",
+                            "push_queue_payload",
+                            "invoice_exists",
+                        ],
+                    },
+                    "raw_vlm_query_overrides": {
+                        "invoice": [
+                            "purchase",
+                            "all_vendors",
+                            "purchase_addison",
+                            "purchase_cp",
+                            "purchase_emkay",
+                            "purchase_forbes",
+                            "purchase_grindwell",
+                            "purchase_pidilite",
+                            "purchase_rr",
+                            "purchase_stanley",
+                            "purchase_wikus",
+                        ],
+                        "company": ["K V ENTERPRISES"],
+                        "document_unwarping": ["on", "off"],
+                        "use_layout_detection": ["on", "off"],
+                        "prompt_label": ["table", "ocr", "formula", "chart"],
                     },
                 },
             )
@@ -1039,8 +1539,10 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
             OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
             if current_path == "/raw-vlm":
-                from purchase_ocrvl_pipeline import call_vlm_server
-
+                invoice_mode = (optional_query_string(self.path, "invoice") or "").lower()
+                document_unwarping = optional_query_bool(self.path, "document_unwarping")
+                use_layout_detection = optional_query_bool(self.path, "use_layout_detection")
+                prompt_label = optional_query_string(self.path, "prompt_label")
                 upload_path, original_upload_path, upload_kind = materialize_upload(
                     body,
                     self.headers.get("Content-Type", ""),
@@ -1049,10 +1551,205 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                     render_pdf=False,
                 )
                 source_upload = original_upload_path or upload_path
-                payload = call_vlm_server(source_upload)
+
+                if invoice_mode == "all_vendors":
+                    from purchase_ocrvl_pipeline import run_all_vendors_vl_safe_extract
+
+                    company_name = (
+                        optional_query_string(self.path, "company") or DEFAULT_PURCHASE_COMPANY
+                    )
+                    payload = run_all_vendors_vl_safe_extract(
+                        source_upload,
+                        company_name=company_name,
+                        document_unwarping=document_unwarping,
+                        use_layout_detection=use_layout_detection,
+                        prompt_label=prompt_label,
+                    )
+                elif invoice_mode == "purchase_addison":
+                    from purchase_ocrvl_pipeline import run_addison_vl_safe_extract
+
+                    company_name = (
+                        optional_query_string(self.path, "company") or DEFAULT_PURCHASE_COMPANY
+                    )
+                    payload = run_addison_vl_safe_extract(
+                        source_upload,
+                        company_name=company_name,
+                        document_unwarping=document_unwarping,
+                        use_layout_detection=use_layout_detection,
+                        prompt_label=prompt_label,
+                    )
+                elif invoice_mode in {
+                    "purchase_cp",
+                    "purchase_emkay",
+                    "purchase_forbes",
+                    "purchase_grindwell",
+                    "purchase_pidilite",
+                    "purchase_rr",
+                    "purchase_stanley",
+                    "purchase_wikus",
+                }:
+                    from purchase_ocrvl_pipeline import VENDOR_SAFE_ENDPOINTS, run_vendor_vl_safe_extract
+
+                    company_name = (
+                        optional_query_string(self.path, "company") or DEFAULT_PURCHASE_COMPANY
+                    )
+                    vendor_config = VENDOR_SAFE_ENDPOINTS[invoice_mode]
+                    payload = run_vendor_vl_safe_extract(
+                        source_upload,
+                        expected_vendor=vendor_config["expected_vendor"],
+                        response_mode=vendor_config["mode"],
+                        parser_label=vendor_config["parser"],
+                        company_name=company_name,
+                        document_unwarping=document_unwarping,
+                        use_layout_detection=use_layout_detection,
+                        prompt_label=prompt_label,
+                    )
+                elif invoice_mode == "purchase":
+                    from purchase_ocrvl_pipeline import run_purchase_vl_matching_preview
+
+                    company_name = (
+                        optional_query_string(self.path, "company") or DEFAULT_PURCHASE_COMPANY
+                    )
+                    payload = run_purchase_vl_matching_preview(
+                        source_upload,
+                        company_name=company_name,
+                        document_unwarping=document_unwarping,
+                        use_layout_detection=use_layout_detection,
+                        prompt_label=prompt_label,
+                    )
+                    duplicate_invoice_number = (
+                        payload.get("parsed", {}).get("header", {}).get("invoice_number", "")
+                    )
+                    payload["duplicacy"] = {
+                        "checked": True,
+                        "is_duplicate": bool(check_duplicacy(duplicate_invoice_number)),
+                        "invoice_number": duplicate_invoice_number,
+                    }
+                else:
+                    from purchase_ocrvl_pipeline import call_vlm_server
+
+                    payload = call_vlm_server(
+                        source_upload,
+                        document_unwarping=document_unwarping,
+                        use_layout_detection=use_layout_detection,
+                        prompt_label=prompt_label,
+                    )
+
                 payload["upload_kind"] = upload_kind
                 payload["source_upload_path"] = str(source_upload)
                 payload["saved_result"] = str(save_result(OUTPUT_DIR, source_upload.stem, payload))
+                self._send_json(200, payload)
+                return
+
+            if current_path == "/docstrange":
+                purchase_mode = (optional_query_string(self.path, "purchase") or "").lower()
+                source_mode = (optional_query_string(self.path, "source") or "local").lower()
+                if source_mode not in {"local", "docstrange", "runpod"}:
+                    raise ValueError("Unsupported /docstrange source. Use source=local or source=runpod.")
+                raw_content_type = self.headers.get("Content-Type", "")
+                lower_content_type = raw_content_type.lower()
+                if lower_content_type.startswith("application/json"):
+                    file_bytes, filename, upload_kind = parse_json_body(body)
+                elif lower_content_type.startswith("multipart/form-data"):
+                    file_bytes, filename, upload_kind = parse_multipart_body(body, raw_content_type)
+                else:
+                    ext = ".bin"
+                    if "/" in lower_content_type:
+                        ext = "." + lower_content_type.split("/", 1)[1].split(";", 1)[0].strip()
+                    filename = f"upload_{timestamp}{ext}"
+                    file_bytes = body
+                    upload_kind = infer_upload_kind(file_bytes, filename, raw_content_type)
+                    if upload_kind == "unknown":
+                        raise ValueError(f"Unsupported Content-Type for /docstrange: {raw_content_type or 'missing'}")
+
+                safe_name = safe_filename(filename, f"upload_{timestamp}.jpg")
+                UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+                source_upload_path = UPLOAD_DIR / safe_name
+                source_upload_path.write_bytes(file_bytes)
+
+                if source_mode == "runpod":
+                    docstrange_payload = call_runpod_markdown_ocr(file_bytes, safe_name, upload_kind)
+                else:
+                    docstrange_payload = call_docstrange_invoice_server(file_bytes, safe_name, upload_kind)
+                if purchase_mode == "all":
+                    from purchase_docstrange_pipeline import run_docstrange_purchase_all_pipeline
+
+                    company_name = (
+                        optional_query_string(self.path, "company") or DEFAULT_PURCHASE_COMPANY
+                    )
+                    payload = run_docstrange_purchase_all_pipeline(
+                        input_path=source_upload_path,
+                        markdown=docstrange_payload.get("markdown") or "",
+                        html=docstrange_payload.get("html") or "",
+                        company_name=company_name,
+                    )
+                    # B (DISABLED): field-targeted VLM re-ask fallback for a missing
+                    # invoice number. Commented out because the extra OCR call adds
+                    # latency; 300 DPI (option A) makes the primary parse reliable.
+                    # Re-enable by uncommenting this block.
+                    # if (
+                    #     source_mode == "runpod"
+                    #     and not normalize_voucher_number(payload.get("voucher_payload"))
+                    # ):
+                    #     try:
+                    #         recovered = recover_invoice_number(
+                    #             file_bytes, upload_kind, payload.get("vendor", "")
+                    #         )
+                    #     except Exception as exc:  # noqa: BLE001 - fallback must never break the push
+                    #         recovered = ""
+                    #         print(f"[Runpod][Fallback] invoice-number re-ask failed: {exc}")
+                    #     if recovered:
+                    #         apply_recovered_invoice_number(payload, recovered)
+                    invoice_number = (
+                        payload.get("parsed", {}).get("header", {}).get("invoice_number", "")
+                    )
+                    invoice_exists = bool(check_duplicacy(invoice_number))
+                    payload["invoice_exists"] = invoice_exists
+                    payload["duplicacy"] = {
+                        "checked": True,
+                        "invoice_number": invoice_number,
+                        "invoice_exists": invoice_exists,
+                    }
+                    if source_mode == "runpod":
+                        queue_request_payload = payload.get("push_queue_request_payload")
+                        if not isinstance(queue_request_payload, dict):
+                            # Surface why the voucher could not be built instead of
+                            # raising a bare error that hides vendor/warning context.
+                            parse_warnings = payload.get("parsed", {}).get("warnings", []) or []
+                            payload["queue_response"] = {
+                                "ok": False,
+                                "skipped": True,
+                                "reason": "push_queue_request_payload was not produced; no voucher to enqueue.",
+                                "vendor": payload.get("vendor", ""),
+                                "warnings": parse_warnings,
+                            }
+                        else:
+                            # Still push the voucher even if no invoice/document number
+                            # was detected, but flag it clearly in the response.
+                            if not invoice_number:
+                                payload["invoice"] = "not detected"
+                            queue_response = post_to_push_queue(queue_request_payload, company_name)
+                            payload["queue_response"] = queue_response
+                            payload["saved_queue_response"] = str(
+                                save_result(
+                                    OUTPUT_DIR,
+                                    f"{source_upload_path.stem}_queue_response",
+                                    queue_response,
+                                )
+                            )
+                elif purchase_mode:
+                    raise ValueError("Unsupported /docstrange purchase mode. Use purchase=all.")
+                else:
+                    payload = {
+                        "markdown": docstrange_payload.get("markdown") or "",
+                        "html": docstrange_payload.get("html") or "",
+                    }
+                payload["upload_kind"] = upload_kind
+                payload["ocr_source"] = "runpod" if source_mode == "runpod" else "local_docstrange"
+                if isinstance(docstrange_payload.get("runpod"), dict):
+                    payload["runpod"] = docstrange_payload["runpod"]
+                payload["source_upload_path"] = str(source_upload_path)
+                payload["saved_result"] = str(save_result(OUTPUT_DIR, source_upload_path.stem, payload))
                 self._send_json(200, payload)
                 return
 

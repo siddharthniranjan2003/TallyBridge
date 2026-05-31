@@ -51,7 +51,9 @@ def normalize_decimal_token(raw: str) -> str:
 
 def parse_date_to_iso(value: str) -> str:
     raw = normalize_space(value)
-    for pattern in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y", "%d-%b-%y", "%d-%b-%Y"):
+    if not raw:
+        return ""
+    for pattern in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d/%m/%y", "%d.%m.%Y", "%d.%m.%y", "%d-%b-%y", "%d-%b-%Y"):
         try:
             return datetime.strptime(raw, pattern).strftime("%Y-%m-%d")
         except ValueError:

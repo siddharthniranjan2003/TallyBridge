@@ -31,6 +31,26 @@ LEDGER_NAME_HINTS = {
     "STANLEY": "STANLEY BLACK & DECKER INDIA PRIVATE LIMITED",
     "WIKUS": "WIKUS INDIA PRIVATE LIMITED",
 }
+LEDGER_NAME_ALIASES = {
+    "CP": [
+        "CP GRAT-EX MANUFACTURING COMPANY",
+        "CP GRAT-EX MANUFACTURING CO LTD",
+        "CP GRAT-EX MANUFACTURING CO. LTD.",
+        "CP GRAT-EX MANUFACTURING CO",
+        "CP GRAT-EX",
+    ],
+}
+BEST_EFFORT_LEDGER_NAMES = {
+    "ADDISON": "ADDISON & COMPANY LTD",
+    "ET": "EMKAY TOOLS LIMITED",
+    "GNL": "GRINDWELL NORTON LIMITED",
+    "RR": "R.R.TOOLS & EQUIPMENTS",
+    "TOTEM": "FORBES PRECISION TOOLS AND MACHINE PARTS LTD",
+    "CP": "CP GRAT-EX MANUFACTURING COMPANY",
+    "PIDILITE": "PIDILITE INDUSTRIES LIMITED",
+    "STANLEY": "STANLEY BLACK & DECKER INDIA PRIVATE LIMITED",
+    "WIKUS": "WIKUS INDIA PRIVATE LIMITED",
+}
 
 
 CP_EXACT_ITEM_QUERIES = {
@@ -47,6 +67,11 @@ CP_EXACT_ITEM_QUERIES = {
     "CS-R": ["CS-R HOLDER COUNTERSINK TOOL"],
     "HEX HOLD KIT": ["HEX HOLD KIT"],
     "C BURR SET 2": ["C BURR SET 2"],
+}
+CP_CANONICAL_QUERY_SET = {
+    normalize_space(query)
+    for query_list in CP_EXACT_ITEM_QUERIES.values()
+    for query in query_list
 }
 
 
@@ -186,6 +211,8 @@ def repair_totem_description(text: str) -> str:
 def repair_addison_description(text: str) -> str:
     cleaned = normalize_space(text).upper()
     cleaned = cleaned.replace("TYPE -A", "TYPE-A")
+    cleaned = cleaned.replace("TSTD", "TAPER SHANK TWIST DRILL")
+    cleaned = cleaned.replace("T/S DRILL", "TAPER SHANK TWIST DRILL")
     cleaned = cleaned.replace("PARALLEL SHANK TWIST DRILLS", "PARALLEL SHANK TWIST DRILL")
     cleaned = cleaned.replace("PSTD (JS)", "PSTD")
     cleaned = cleaned.replace("PSTD (LONG SERIES)", "PSTD LONG SERIES")
@@ -197,6 +224,7 @@ def repair_addison_description(text: str) -> str:
 def repair_gnl_description(text: str) -> str:
     cleaned = normalize_space(text).upper()
     cleaned = cleaned.replace("*", " X ")
+    cleaned = cleaned.replace("SPILFIRE", "SPITFIRE")
     cleaned = re.sub(r"(\d)X(\d)", r"\1 X \2", cleaned)
     return normalize_space(cleaned)
 
@@ -288,7 +316,7 @@ def candidate_vendor_tokens(vendor: str, raw_description: str, item_code: str = 
     if vendor == "GNL":
         return [" GNL", "GNL"]
     if vendor == "TOTEM":
-        return [" TOTEM", "TOTEM"]
+        return []
     if vendor == "ADDISON":
         return [" ADDISON", "ADDISON"]
     if vendor == "STANLEY":
@@ -317,6 +345,7 @@ def candidate_group_filter(vendor: str, raw_description: str = "", item_code: st
         return {"MIRANDA", "IT", "OTHER"}
     return {
         "ADDISON": {"ADDISON"},
+        "CP": {"CP"},
         "ET": {"ET"},
         "GNL": {"GNL"},
         "TOTEM": {"TOTEM"},
@@ -345,7 +374,11 @@ def build_candidate_queries(raw_description: str, vendor: str, item_code: str = 
                 queries.append(f"HSS CENTRE DRILL A  {pretty_number(numbers[0])} X {pretty_number(numbers[1])} ADDISON")
                 queries.append(f"HSS CENTRE DRILL A {pretty_number(numbers[0])} X {pretty_number(numbers[1])} ADDISON")
         diameter = extract_first_metric_diameter(text)
-        if "TAPER SHANK TWIST DRILL" in text:
+        if "M/C REAMER" in text or "MACHINE REAMER" in text:
+            if diameter:
+                queries.append(f"HSS M/C REAMER {diameter} ADDISON")
+                queries.append(f"HSS MACHINE REAMER {diameter} ADDISON")
+        elif "TAPER SHANK TWIST DRILL" in text or "TPR SHANK TWIST DRILL" in text:
             if diameter:
                 queries.append(f"HSS T/S DRILL {diameter} ADDISON")
         elif "LONG SERIES" in text:
@@ -461,6 +494,23 @@ def build_candidate_queries(raw_description: str, vendor: str, item_code: str = 
                 queries.append(f"FLAP WHEEL {x1} X {x2} G{flap_grit} GNL")
                 if "SPITFIRE" in source:
                     queries.append(f"FLAP WHEEL {x1} X {x2} G{flap_grit} SPITFIRE GNL")
+            dotted_flap_match = re.search(r"\b(\d{2,4})\.(\d{1,2})\s+(\d+(?:\.\d+)?)\s+R\d+\s+(\d{2,3})\b", source)
+            if dotted_flap_match:
+                x1 = pretty_number(dotted_flap_match.group(1))
+                raw_width = int(dotted_flap_match.group(2))
+                common_widths = (25, 40, 50, 75)
+                width = min(common_widths, key=lambda candidate: abs(candidate - raw_width))
+                x3 = pretty_number(dotted_flap_match.group(3))
+                grit_token = dotted_flap_match.group(4)
+                grit_candidates = [grit_token]
+                if len(grit_token) == 3 and grit_token.startswith("7"):
+                    grit_candidates.append(f"2{grit_token[1:]}")
+                for grit in dict.fromkeys(grit_candidates):
+                    queries.append(f"FLAP WHEEL {x1} X {width} X {x3} G{grit} GNL")
+                    queries.append(f"FLAP WHEEL {x1} X {width} G{grit} GNL")
+                    if "SPITFIRE" in source:
+                        queries.append(f"FLAP WHEEL {x1} X {width} X {x3} G{grit} SPITFIRE GNL")
+                        queries.append(f"FLAP WHEEL {x1} X {width} G{grit} SPITFIRE GNL")
         if has_prefix("FP") or " FD" in f" {source} ":
             inch_match = re.search(r'(\d+(?:/\d+)?)"', source)
             grit_match = re.search(r"\b(\d{2,3})\s+(?:BEAR|PREMIUM|FD)\b", source)
@@ -633,9 +683,23 @@ def build_candidate_queries(raw_description: str, vendor: str, item_code: str = 
                 if metric:
                     queries.append(normalize_space(f"{actual_prefix} {metric[0]} X {metric[1]} {' '.join(suffix)} TOTEM"))
         if "CS DIE" in text or " DIE" in f" {text} ":
-            metric = extract_metric_size_pitch(text)
-            imperial = extract_imperial_thread(text)
+            metric = extract_metric_size_pitch(text) or extract_bare_size_pitch(text)
+            die_thread_match = re.search(
+                r"\bOD\s+(?P<thread>\d+(?:-\d+/\d+|/\d+)?)\s*[Xx]\s*\d+\s+(?P<form>BSW|BSF|BSPT|BSP|NPTF|NPT|UNF|UNC|UNEF|UNS|NPSF|NPSM)\b",
+                text,
+            )
+            imperial = None if die_thread_match else extract_imperial_thread(text)
             od_match = re.search(r'(\d+(?:-\d+/\d+|/\d+)?)"?\s+OD', text)
+            if die_thread_match:
+                thread_token = die_thread_match.group("thread")
+                if thread_token == "58":
+                    thread_token = "5/8"
+                thread = f'{thread_token}"'
+                form = die_thread_match.group("form")
+                queries.append(normalize_space(f"DIE {thread} {form} TOTEM"))
+                if od_match:
+                    queries.append(normalize_space(f'DIE {thread} {form} OD{od_match.group(1)}"'))
+                    queries.append(normalize_space(f'DIE {thread} {form} OD {od_match.group(1)}"'))
             if imperial:
                 queries.append(normalize_space(f"DIE {imperial[0]} {imperial[1]} TOTEM"))
                 if od_match:
@@ -643,7 +707,10 @@ def build_candidate_queries(raw_description: str, vendor: str, item_code: str = 
                     queries.append(normalize_space(f'DIE {imperial[0]} {imperial[1]} OD {od_match.group(1)}"'))
             if metric:
                 queries.append(normalize_space(f"DIE {metric[0]} X {metric[1]}"))
-                queries.append(normalize_space(f"HSS ROUND DIE {metric[0]} X {metric[1]} TOTEM"))
+                if metric[1].startswith("0."):
+                    queries.append(normalize_space(f"DIE {metric[0]} X {metric[1][1:]}"))
+                if text.startswith("HS DIE") or "CS DIE" not in text:
+                    queries.append(normalize_space(f"HSS ROUND DIE {metric[0]} X {metric[1]} TOTEM"))
         if text.startswith("HS DIE"):
             metric = extract_metric_size_pitch(text)
             if metric:
@@ -672,6 +739,8 @@ def build_candidate_queries(raw_description: str, vendor: str, item_code: str = 
         code_key = normalized_code
         if "TIN COATED" in text and code_key.startswith("C-10"):
             queries.extend(CP_EXACT_ITEM_QUERIES["C-10-TIN"])
+        if "CS-REVOLVING HANDLE" in text or "CS REVOLVING HANDLE" in text:
+            queries.extend(CP_EXACT_ITEM_QUERIES["CS-R"])
         for key, values in CP_EXACT_ITEM_QUERIES.items():
             if key in code_key or key in text:
                 queries.extend(values)
@@ -886,6 +955,20 @@ def similarity_score(query: str, candidate: str, invoice_rate: Decimal, stock_ra
     return min(100.0, base_score)
 
 
+def classify_match_reason(query: str, candidate_name: str, score: float) -> str:
+    normalized_query = normalize_stock_name(query)
+    normalized_candidate = normalize_stock_name(candidate_name)
+    if normalized_query and normalized_query == normalized_candidate:
+        return "exact_normalized_match"
+    if normalized_query and (normalized_query in normalized_candidate or normalized_candidate in normalized_query):
+        return "substring_match"
+    if score >= 90:
+        return "high_confidence_score"
+    if score >= 70:
+        return "score_match"
+    return "weak_score_match"
+
+
 def best_query_score(queries: list[str], candidate_name: str, invoice_rate: Decimal, stock_rate: Decimal) -> tuple[float, str]:
     best_score = -1.0
     best_query = queries[0] if queries else ""
@@ -897,11 +980,86 @@ def best_query_score(queries: list[str], candidate_name: str, invoice_rate: Deci
     return best_score, best_query
 
 
+def match_preference(vendor: str, raw_description: str, candidate_name: str, best_query: str) -> int:
+    raw_text = repair_description(raw_description, vendor)
+    candidate = normalize_stock_name(candidate_name)
+    query = normalize_stock_name(best_query)
+    preference = 0
+
+    if vendor == "ET":
+        # Chamfer/style tokens are material for taps; a high fuzzy score must not
+        # allow SPPT/SPFL to beat a printed BOTTOMING/BOT description.
+        style_source = (
+            raw_text.replace("SP.PT", "SPPT")
+            .replace("SP.FLUTE", "SPFL")
+            .replace("BOTTOMING", "BOT")
+        )
+        style_tokens = ("BOT", "SPPT", "SPFL", "TPR", "SEC", "SET", "O/G")
+        for token in style_tokens:
+            raw_has_token = token in style_source
+            candidate_has_token = token in candidate
+            if raw_has_token and candidate_has_token:
+                preference += 30
+            elif raw_has_token and not candidate_has_token:
+                preference -= 20
+            elif not raw_has_token and candidate_has_token and token in {"BOT", "SPPT", "SPFL"}:
+                preference -= 10
+        if ("BOTTOMING" in raw_text or "BOT" in raw_text or "BOT" in query) and "BOT" not in candidate:
+            preference -= 60
+        if "STI" in candidate and "STI" not in raw_text and "STI" not in query:
+            preference -= 80
+        return preference
+
+    if vendor == "GNL":
+        source_mentions_spitfire = "SPITFIRE" in raw_text or "SPITFIRE" in query
+        candidate_mentions_spitfire = "SPITFIRE" in candidate
+        if source_mentions_spitfire and candidate_mentions_spitfire:
+            preference += 10
+        elif not source_mentions_spitfire and candidate_mentions_spitfire:
+            preference -= 5
+        return preference
+
+    if vendor != "ADDISON":
+        return 0
+
+    if "M35" in raw_text:
+        if "M35" in candidate:
+            preference += 20
+        else:
+            preference -= 5
+
+    if "LONG SERIES" in raw_text:
+        if "LONG DRILL" in candidate:
+            preference += 15
+        elif "DRILL" in candidate:
+            preference -= 5
+
+    if "TAPER SHANK TWIST DRILL" in raw_text:
+        if "T/S DRILL" in candidate:
+            preference += 15
+        elif "TOOLBIT" in candidate:
+            preference -= 10
+
+    if "PSTD" in raw_text and "LONG SERIES" not in raw_text:
+        if "HSS DRILL" in candidate or "M35 DRILL" in candidate:
+            preference += 10
+
+    if "M35" in query and "M35" in candidate:
+        preference += 5
+
+    return preference
+
+
 def resolve_party_ledger_name(vendor: str, ledgers: list[dict[str, Any]]) -> str:
     preferred = LEDGER_NAME_HINTS[vendor]
     exact = next((row["name"] for row in ledgers if row.get("name", "").casefold() == preferred.casefold()), "")
     if exact:
         return exact
+    aliases = [preferred, *LEDGER_NAME_ALIASES.get(vendor, [])]
+    for alias in aliases:
+        exact_alias = next((row["name"] for row in ledgers if row.get("name", "").casefold() == alias.casefold()), "")
+        if exact_alias:
+            return exact_alias
     upper_preferred = preferred.upper()
     for row in ledgers:
         name = normalize_space(row.get("name", ""))
@@ -909,6 +1067,13 @@ def resolve_party_ledger_name(vendor: str, ledgers: list[dict[str, Any]]) -> str
             continue
         if all(token in name.upper() for token in upper_preferred.split() if len(token) > 2):
             return name
+    for alias in aliases:
+        alias_tokens = [token for token in normalize_space(alias).upper().replace(".", "").split() if len(token) > 2]
+        for row in ledgers:
+            name = normalize_space(row.get("name", ""))
+            normalized_name = name.upper().replace(".", "")
+            if name and all(token in normalized_name for token in alias_tokens):
+                return name
     raise ValueError(f"Could not find supplier ledger for vendor {vendor} in Supabase master data")
 
 
@@ -924,6 +1089,19 @@ def resolve_purchase_ledger_name(ledgers: list[dict[str, Any]]) -> str:
         if group_name.upper() == "PURCHASE ACCOUNTS" and "PURCHASE" in name.upper():
             return name
     raise ValueError("Could not find a purchase ledger in Supabase master data")
+
+
+def best_effort_party_ledger_name(vendor: str, header_data: dict[str, Any] | None = None) -> str:
+    vendor_name = normalize_space((header_data or {}).get("vendor_name", ""))
+    if vendor == "CP" and "CP GRAT-EX" in vendor_name.upper():
+        return "CP GRAT-EX MANUFACTURING COMPANY"
+    if vendor == "ADDISON" and "ADDISON" in vendor_name.upper():
+        return "ADDISON & COMPANY LTD"
+    return BEST_EFFORT_LEDGER_NAMES.get(vendor, vendor_name or vendor)
+
+
+def best_effort_purchase_ledger_name() -> str:
+    return DEFAULT_PURCHASE_LEDGER
 
 
 def candidate_rows_for_item(
@@ -963,8 +1141,11 @@ def match_item_to_live_stock(raw_item: PurchaseRawItem, vendor: str, stock_rows:
         filtered_candidates = candidates or stock_rows
 
     best_score = -1.0
+    best_selection_score = -1.0
     best_query = queries[0] if queries else raw_item.raw_description
     best_row: dict[str, Any] | None = None
+    best_preference = -10_000
+    candidate_scores: list[dict[str, Any]] = []
     for row in filtered_candidates:
         score, query = best_query_score(
             queries or [raw_item.raw_description],
@@ -972,10 +1153,40 @@ def match_item_to_live_stock(raw_item: PurchaseRawItem, vendor: str, stock_rows:
             raw_item.rate,
             decimal_value(row.get("rate", "0")),
         )
-        if score > best_score:
+        preference = match_preference(vendor, raw_item.raw_description, row.get("name", ""), query)
+        if vendor == "ET":
+            selection_score = max(0.0, min(100.0, score + min(preference, 0)))
+        elif vendor == "GNL":
+            selection_score = max(0.0, min(100.0, score + preference))
+        else:
+            selection_score = score
+        candidate_scores.append(
+            {
+                "candidate_name": row.get("name", ""),
+                "score": round(score, 2),
+                "selection_score": round(selection_score, 2),
+                "best_query": query,
+                "group_name": normalize_space(row.get("group_name", "")),
+                "unit": clean_numeric_unit(row.get("unit", "")),
+                "rate": float(round2(decimal_value(row.get("rate", "0")))),
+                "preference": preference,
+            }
+        )
+        if selection_score > best_selection_score or (
+            abs(selection_score - best_selection_score) < 1e-9
+            and (score > best_score or (abs(score - best_score) < 1e-9 and preference > best_preference))
+        ):
             best_score = score
+            best_selection_score = selection_score
             best_query = query
             best_row = row
+            best_preference = preference
+
+    candidate_scores.sort(
+        key=lambda item: (item.get("selection_score", item["score"]), item["score"], item.get("preference", 0)),
+        reverse=True,
+    )
+    top_candidates = candidate_scores[:3]
 
     if best_row is None:
         return StockMatch(
@@ -985,15 +1196,95 @@ def match_item_to_live_stock(raw_item: PurchaseRawItem, vendor: str, stock_rows:
             group_name="",
             stock_rate=Decimal("0"),
             canonical_query=best_query,
+            trace={
+                "reason": "no_candidate_found",
+                "query_count": len(queries or [raw_item.raw_description]),
+                "candidate_pool_size": len(filtered_candidates),
+                "top_candidates": top_candidates,
+            },
         )
 
+    rounded_score = round(best_score, 2)
+    if vendor == "CP" and rounded_score < 56:
+        preferred_cp_query = next(
+            (normalize_space(query) for query in queries if normalize_space(query) in CP_CANONICAL_QUERY_SET),
+            "",
+        )
+        if preferred_cp_query:
+            return StockMatch(
+                stock_item_name=preferred_cp_query,
+                unit=clean_numeric_unit(raw_item.unit),
+                score=rounded_score,
+                group_name="CP",
+                stock_rate=Decimal("0"),
+                canonical_query=preferred_cp_query,
+                trace={
+                    "reason": "cp_canonical_query_fallback",
+                    "query_count": len(queries or [raw_item.raw_description]),
+                    "candidate_pool_size": len(filtered_candidates),
+                    "top_candidates": top_candidates,
+                },
+            )
     return StockMatch(
         stock_item_name=best_row["name"],
         unit=clean_numeric_unit(best_row.get("unit", "")) or raw_item.unit,
-        score=round(best_score, 2),
+        score=rounded_score,
         group_name=normalize_space(best_row.get("group_name", "")),
         stock_rate=decimal_value(best_row.get("rate", "0")),
         canonical_query=best_query,
+        trace={
+            "reason": classify_match_reason(best_query, best_row.get("name", ""), rounded_score),
+            "query_count": len(queries or [raw_item.raw_description]),
+            "candidate_pool_size": len(filtered_candidates),
+            "top_candidates": top_candidates,
+        },
+    )
+
+
+def stock_row_for_name(stock_item_name: str, stock_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    normalized_target = normalize_space(stock_item_name)
+    if not normalized_target:
+        return None
+
+    exact = next((row for row in stock_rows if normalize_space(row.get("name", "")) == normalized_target), None)
+    if exact is not None:
+        return exact
+
+    lowered_target = normalized_target.casefold()
+    return next((row for row in stock_rows if normalize_space(row.get("name", "")).casefold() == lowered_target), None)
+
+
+def match_item_via_purchase_matching(
+    raw_item: PurchaseRawItem,
+    stock_rows: list[dict[str, Any]],
+    purchase_matching_exact_map: dict[str, str] | None,
+) -> StockMatch | None:
+    if not purchase_matching_exact_map:
+        return None
+
+    invoice_description = normalize_space(raw_item.raw_description)
+    if not invoice_description:
+        return None
+
+    tally_item_name = purchase_matching_exact_map.get(invoice_description)
+    if not tally_item_name:
+        return None
+
+    stock_row = stock_row_for_name(tally_item_name, stock_rows)
+    return StockMatch(
+        stock_item_name=tally_item_name,
+        unit=clean_numeric_unit(stock_row.get("unit", "")) if stock_row else (raw_item.unit or "NOS"),
+        score=100.0,
+        group_name=normalize_space(stock_row.get("group_name", "")) if stock_row else "",
+        stock_rate=decimal_value(stock_row.get("rate", "0")) if stock_row else Decimal("0"),
+        canonical_query=raw_item.raw_description,
+        trace={
+            "reason": "purchase_matching_exact_lookup",
+            "lookup_table": "Purchase_Matching",
+            "invoice_item_description": invoice_description,
+            "matched_name": tally_item_name,
+            "stock_row_found": bool(stock_row),
+        },
     )
 
 
@@ -1001,6 +1292,8 @@ def combine_ocr_items(
     vendor: str,
     description_rows: list[dict[str, Any]],
     numeric_rows: list[dict[str, Any]],
+    *,
+    repair_descriptions: bool = True,
 ) -> tuple[list[PurchaseRawItem], list[str]]:
     warnings: list[str] = []
     if len(description_rows) != len(numeric_rows):
@@ -1012,7 +1305,12 @@ def combine_ocr_items(
     for index in range(row_count):
         description_row = description_rows[index] or {}
         numeric_row = numeric_rows[index] or {}
-        raw_description = repair_description(description_row.get("raw_description", ""), vendor)
+        raw_text = description_row.get("raw_description", "")
+        raw_description = (
+            repair_description(raw_text, vendor)
+            if repair_descriptions
+            else normalize_space(raw_text).upper()
+        )
         if not raw_description:
             continue
         quantity = decimal_value(numeric_row.get("quantity", 0))
@@ -1090,6 +1388,31 @@ def normalize_tax_entries(raw_entries: list[dict[str, Any]]) -> list[dict[str, A
     return entries
 
 
+def format_match_score_percent(score: float) -> str:
+    rounded = round(float(score), 2)
+    if abs(rounded - round(rounded)) < 0.001:
+        return f"{int(round(rounded))}%"
+    return f"{rounded:.2f}%"
+
+
+def build_source_payload_items(
+    voucher_items: list[dict[str, Any]],
+    matched_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    source_items: list[dict[str, Any]] = []
+    for index, voucher_item in enumerate(voucher_items):
+        matched_item = matched_items[index] if index < len(matched_items) else {}
+        reason = str((matched_item.get("match_trace") or {}).get("reason", ""))
+        source_items.append(
+            {
+                **voucher_item,
+                "source": "Purchase_Matching" if reason == "purchase_matching_exact_lookup" else "Matching_Algorithem",
+                "score": format_match_score_percent(float(matched_item.get("match_score", 0) or 0)),
+            }
+        )
+    return source_items
+
+
 def build_voucher_payload(
     company_name: str,
     vendor: str,
@@ -1098,6 +1421,7 @@ def build_voucher_payload(
     stock_rows: list[dict[str, Any]],
     ledgers: list[dict[str, Any]],
     min_score: float,
+    purchase_matching_exact_map: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     tax_entries = normalize_tax_entries(header_data.get("tax_entries", []))
     tax_total = round2(sum((decimal_value(entry["amount"]) for entry in tax_entries), Decimal("0")))
@@ -1111,7 +1435,9 @@ def build_voucher_payload(
     matched_items: list[dict[str, Any]] = []
     weak_matches: list[dict[str, Any]] = []
     for raw_item in items:
-        stock_match = match_item_to_live_stock(raw_item, vendor, stock_rows)
+        stock_match = match_item_via_purchase_matching(raw_item, stock_rows, purchase_matching_exact_map)
+        if stock_match is None:
+            stock_match = match_item_to_live_stock(raw_item, vendor, stock_rows)
         if stock_match.score < min_score:
             weak_matches.append(
                 {
@@ -1120,6 +1446,7 @@ def build_voucher_payload(
                     "canonical_query": stock_match.canonical_query,
                     "matched_name": stock_match.stock_item_name,
                     "score": stock_match.score,
+                    "match_trace": stock_match.trace,
                 }
             )
         matched_items.append(
@@ -1134,6 +1461,7 @@ def build_voucher_payload(
                 "unit": stock_match.unit or raw_item.unit or "NOS",
                 "match_score": stock_match.score,
                 "match_group": stock_match.group_name,
+                "match_trace": stock_match.trace,
             }
         )
 
@@ -1166,6 +1494,17 @@ def build_voucher_payload(
 
     voucher_number = normalize_space(header_data.get("invoice_number", ""))
     voucher_date = parse_date_to_iso(str(header_data.get("invoice_date", "")))
+    voucher_items = [
+        {
+            "stock_item_name": item["stock_item_name"],
+            "quantity": item["quantity"],
+            "rate": item["rate"],
+            "amount": item["amount"],
+            "unit": item["unit"],
+            "godown_name": "Main Location",
+        }
+        for item in matched_items
+    ]
     voucher_payload = {
         "party_name": party_name,
         "date": voucher_date,
@@ -1175,23 +1514,16 @@ def build_voucher_payload(
         "voucher_type": "Purchase",
         "inventory_ledger_name": inventory_ledger_name,
         "ledger_entries": ledger_entries,
-        "items": [
-            {
-                "stock_item_name": item["stock_item_name"],
-                "quantity": item["quantity"],
-                "rate": item["rate"],
-                "amount": item["amount"],
-                "unit": item["unit"],
-                "godown_name": "Main Location",
-            }
-            for item in matched_items
-        ],
+        "items": voucher_items,
     }
     return {
         "company_name": company_name,
         "vendor": vendor,
         "party_name": party_name,
         "voucher_payload": voucher_payload,
+        "source_payload": {
+            "items": build_source_payload_items(voucher_items, matched_items),
+        },
         "matched_items": matched_items,
         "weak_matches": weak_matches,
         "subtotal": float(subtotal),
@@ -1200,8 +1532,15 @@ def build_voucher_payload(
     }
 
 
-def build_purchase_queue_payload(company_name: str, voucher_payload: dict[str, Any]) -> dict[str, Any]:
-    return {
+def build_purchase_queue_payload(
+    company_name: str,
+    voucher_payload: dict[str, Any],
+    source_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
         "company_name": company_name,
-        "tally_payload": voucher_payload,
+        "voucher_payload": voucher_payload,
     }
+    if isinstance(source_payload, dict):
+        payload["source_payload"] = source_payload
+    return payload

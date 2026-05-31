@@ -25,6 +25,7 @@ from email.parser import BytesParser
 from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -71,6 +72,7 @@ MARKDOWN_IGNORE_LABELS = _parse_optional_list(_env("MINICPM_VLM_MARKDOWN_IGNORE_
 PROMPT_LABEL = (_env("MINICPM_VLM_PROMPT_LABEL", "") or "").strip() or None
 
 _PIPELINE = None
+_PIPELINE_CACHE: dict[tuple, object] = {}
 
 
 def active_model_label() -> str:
@@ -79,15 +81,53 @@ def active_model_label() -> str:
     return NATIVE_MODEL_LABEL
 
 
-def build_pipeline():
+def _parse_query_bool(raw: str | None) -> bool | None:
+    if raw is None:
+        return None
+    value = str(raw).strip().lower()
+    if not value:
+        return None
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError("Expected one of: on, off, true, false, 1, 0")
+
+
+def _pipeline_cache_key(
+    *,
+    doc_orientation: bool | None,
+    doc_unwarping: bool | None,
+    use_layout_detection: bool | None,
+) -> tuple:
+    return (
+        PIPELINE_VERSION or "",
+        BACKEND,
+        VLLM_URL,
+        VLLM_MODEL_NAME,
+        doc_orientation,
+        doc_unwarping,
+        use_layout_detection,
+        FORMAT_BLOCK_CONTENT,
+        MERGE_LAYOUT_BLOCKS,
+        tuple(MARKDOWN_IGNORE_LABELS or []),
+    )
+
+
+def build_pipeline(
+    *,
+    doc_orientation_override: bool | None = None,
+    doc_unwarping_override: bool | None = None,
+    use_layout_detection_override: bool | None = None,
+):
     """Instantiate the PaddleOCR-VL pipeline once; raises if paddleocr is missing."""
     from paddleocr import PaddleOCRVL
 
     kwargs: dict = {}
     if PIPELINE_VERSION:
         kwargs["pipeline_version"] = PIPELINE_VERSION
-    effective_doc_orientation = DOC_ORIENTATION
-    effective_doc_unwarping = DOC_UNWARPING
+    effective_doc_orientation = DOC_ORIENTATION if doc_orientation_override is None else doc_orientation_override
+    effective_doc_unwarping = DOC_UNWARPING if doc_unwarping_override is None else doc_unwarping_override
     if DOC_PREPROCESS is not None:
         if effective_doc_orientation is None:
             effective_doc_orientation = DOC_PREPROCESS
@@ -97,8 +137,13 @@ def build_pipeline():
         kwargs["use_doc_orientation_classify"] = effective_doc_orientation
     if effective_doc_unwarping is not None:
         kwargs["use_doc_unwarping"] = effective_doc_unwarping
-    if USE_LAYOUT_DETECTION is not None:
-        kwargs["use_layout_detection"] = USE_LAYOUT_DETECTION
+    effective_use_layout_detection = (
+        USE_LAYOUT_DETECTION
+        if use_layout_detection_override is None
+        else use_layout_detection_override
+    )
+    if effective_use_layout_detection is not None:
+        kwargs["use_layout_detection"] = effective_use_layout_detection
     if FORMAT_BLOCK_CONTENT is not None:
         kwargs["format_block_content"] = FORMAT_BLOCK_CONTENT
     if MERGE_LAYOUT_BLOCKS is not None:
@@ -113,6 +158,49 @@ def build_pipeline():
         kwargs["vl_rec_server_url"] = VLLM_URL
         kwargs["vl_rec_api_model_name"] = VLLM_MODEL_NAME
     return PaddleOCRVL(**kwargs)
+
+
+def get_pipeline(
+    *,
+    doc_orientation_override: bool | None = None,
+    doc_unwarping_override: bool | None = None,
+    use_layout_detection_override: bool | None = None,
+):
+    global _PIPELINE
+
+    default_orientation = DOC_ORIENTATION
+    default_unwarping = DOC_UNWARPING
+    default_layout_detection = USE_LAYOUT_DETECTION
+    if doc_orientation_override == default_orientation:
+        doc_orientation_override = None
+    if doc_unwarping_override == default_unwarping:
+        doc_unwarping_override = None
+    if use_layout_detection_override == default_layout_detection:
+        use_layout_detection_override = None
+
+    if (
+        doc_orientation_override is None
+        and doc_unwarping_override is None
+        and use_layout_detection_override is None
+    ):
+        if _PIPELINE is None:
+            _PIPELINE = build_pipeline()
+        return _PIPELINE
+
+    key = _pipeline_cache_key(
+        doc_orientation=doc_orientation_override,
+        doc_unwarping=doc_unwarping_override,
+        use_layout_detection=use_layout_detection_override,
+    )
+    pipeline = _PIPELINE_CACHE.get(key)
+    if pipeline is None:
+        pipeline = build_pipeline(
+            doc_orientation_override=doc_orientation_override,
+            doc_unwarping_override=doc_unwarping_override,
+            use_layout_detection_override=use_layout_detection_override,
+        )
+        _PIPELINE_CACHE[key] = pipeline
+    return pipeline
 
 
 def _markdown_of(result) -> str:
@@ -143,14 +231,25 @@ def _layout_of(result) -> dict | list:
         return {}
 
 
-def parse_document(file_path: Path) -> dict:
-    if _PIPELINE is None:
+def parse_document(
+    file_path: Path,
+    *,
+    document_unwarping_override: bool | None = None,
+    use_layout_detection_override: bool | None = None,
+    prompt_label_override: str | None = None,
+) -> dict:
+    pipeline = get_pipeline(
+        doc_unwarping_override=document_unwarping_override,
+        use_layout_detection_override=use_layout_detection_override,
+    )
+    if pipeline is None:
         raise RuntimeError("PaddleOCR-VL pipeline is not loaded.")
     started = time.time()
     predict_kwargs: dict = {}
-    if PROMPT_LABEL:
-        predict_kwargs["prompt_label"] = PROMPT_LABEL
-    results = list(_PIPELINE.predict(str(file_path), **predict_kwargs))
+    effective_prompt_label = prompt_label_override if prompt_label_override is not None else PROMPT_LABEL
+    if effective_prompt_label:
+        predict_kwargs["prompt_label"] = effective_prompt_label
+    results = list(pipeline.predict(str(file_path), **predict_kwargs))
     pages = [_markdown_of(res) for res in results]
     layout = [_layout_of(res) for res in results]
     return {
@@ -161,6 +260,24 @@ def parse_document(file_path: Path) -> dict:
         "page_markdown": pages,
         "layout": layout,
         "inference_seconds": round(time.time() - started, 2),
+        "request_overrides": {
+            "document_unwarping": document_unwarping_override,
+            "use_layout_detection": use_layout_detection_override,
+            "prompt_label": prompt_label_override,
+        },
+    }
+
+
+def request_overrides(path: str) -> dict[str, bool | str | None]:
+    parsed = urlparse(path or "")
+    query = parse_qs(parsed.query)
+    raw_document_unwarping = query.get("document_unwarping", [""])[0]
+    raw_use_layout_detection = query.get("use_layout_detection", [""])[0]
+    raw_prompt_label = query.get("prompt_label", [""])[0]
+    return {
+        "document_unwarping": _parse_query_bool(raw_document_unwarping) if raw_document_unwarping else None,
+        "use_layout_detection": _parse_query_bool(raw_use_layout_detection) if raw_use_layout_detection else None,
+        "prompt_label": str(raw_prompt_label).strip() or None,
     }
 
 
@@ -220,12 +337,17 @@ class PaddleVLHandler(BaseHTTPRequestHandler):
                     "markdown_ignore_labels": MARKDOWN_IGNORE_LABELS,
                     "prompt_label": PROMPT_LABEL,
                 },
+                "request_override_support": {
+                    "document_unwarping": ["on", "off"],
+                    "use_layout_detection": ["on", "off"],
+                    "prompt_label": ["table", "ocr", "formula", "chart"],
+                },
             })
             return
         self._send_json(404, {"ok": False, "error": "Not found"})
 
     def do_POST(self):
-        if self.path.rstrip("/") not in {"/parse"}:
+        if urlparse(self.path).path.rstrip("/") not in {"/parse"}:
             self._send_json(404, {"ok": False, "error": "Not found"})
             return
         try:
@@ -235,11 +357,17 @@ class PaddleVLHandler(BaseHTTPRequestHandler):
                 return
             body = self.rfile.read(length)
             content, filename = _decode_upload(body, self.headers.get("Content-Type", ""))
+            overrides = request_overrides(self.path)
             with tempfile.NamedTemporaryFile(suffix=_suffix_for(content, filename), delete=False) as handle:
                 handle.write(content)
                 temp_path = Path(handle.name)
             try:
-                payload = parse_document(temp_path)
+                payload = parse_document(
+                    temp_path,
+                    document_unwarping_override=overrides["document_unwarping"],
+                    use_layout_detection_override=overrides["use_layout_detection"],
+                    prompt_label_override=overrides["prompt_label"],
+                )
             finally:
                 temp_path.unlink(missing_ok=True)
             self._send_json(200, payload)

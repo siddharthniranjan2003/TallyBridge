@@ -1,0 +1,36 @@
+# Local virtualenvs (4.4 GB — never ship)
+.venv-ocrvl
+.venv
+venv
+**/__pycache__
+*.pyc
+
+# Secrets — provide these via Render environment variables, not baked into the image
+.env
+.env.*
+
+# Runtime / scratch data
+uploads/
+outputs/
+_final8/
+_live8/
+_results*/
+_dpi*/
+_all*/
+_srv*.log
+server_test*.log
+
+# Test assets / samples not needed at runtime
+*.jpg
+*.jpeg
+*.png
+*.xlsx
+*.pdf
+challan*
+~$*
+
+# Editor / VCS
+.vscode
+.obsidian
+.git
+.DS_Store
