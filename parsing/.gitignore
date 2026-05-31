@@ -1,0 +1,33 @@
+# Secrets — provided via Render environment variables, never committed
+.env
+.env.*
+
+# Local virtualenvs (multi-GB)
+.venv-ocrvl/
+.venv/
+venv/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Runtime / scratch data
+uploads/
+outputs/
+_final8/
+_live8/
+_results*/
+_dpi*/
+_all*/
+_cmp*.txt
+_*.txt
+_*.log
+*.log
+
+# Large local test assets
+*.jpg
+*.jpeg
+*.png
+*.xlsx
+*.pdf
+~$*
