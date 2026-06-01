@@ -1328,6 +1328,7 @@ def combine_ocr_items(
                 amount=amount,
                 rate=rate if rate > 0 else (round2(amount / quantity) if quantity > 0 else Decimal("0")),
                 unit=clean_numeric_unit(numeric_row.get("unit", "")),
+                discount_pct=decimal_value(numeric_row.get("discount_pct", 0)),
             )
         )
     return items, warnings
@@ -1354,6 +1355,7 @@ def adjust_items_to_target_subtotal(items: list[PurchaseRawItem], target_subtota
                 amount=new_amount,
                 rate=round2(new_amount / item.quantity) if item.quantity > 0 else item.rate,
                 unit=item.unit,
+                discount_pct=item.discount_pct,
             )
         )
 
@@ -1368,6 +1370,7 @@ def adjust_items_to_target_subtotal(items: list[PurchaseRawItem], target_subtota
             amount=new_amount,
             rate=round2(new_amount / last.quantity) if last.quantity > 0 else last.rate,
             unit=last.unit,
+            discount_pct=last.discount_pct,
         )
     return adjusted
 
@@ -1411,6 +1414,58 @@ def build_source_payload_items(
             }
         )
     return source_items
+
+
+def compute_item_discounts(
+    items: list[PurchaseRawItem],
+    header_data: dict[str, Any],
+) -> list[Decimal]:
+    """Absolute per-item discount value (in rupees) for the three invoice cases:
+
+    1. No discount               -> 0 for every item.
+    2. Per-item discount percent -> gross * pct / 100, where gross = rate * qty
+       (e.g. CP / RR 'Disc. %' column; the table amount is already net).
+    3. One total discount value stated outside the table (e.g. EMKAY / GNL,
+       a number following 'DISCOUNT' / 'TOTAL DISCOUNT') -> distributed across
+       items in proportion to each item's taxable amount:
+           item_discount = (item_amount / sum_of_item_amounts) * total_discount
+    """
+    count = len(items)
+    discounts = [Decimal("0")] * count
+    if count == 0:
+        return discounts
+
+    # --- Case 2: any item carries a per-line discount percentage ---
+    per_item_pct = [decimal_value(getattr(item, "discount_pct", 0) or 0) for item in items]
+    if any(pct > 0 for pct in per_item_pct):
+        for index, item in enumerate(items):
+            gross = round2(decimal_value(item.rate) * decimal_value(item.quantity))
+            discounts[index] = round2(gross * per_item_pct[index] / Decimal("100"))
+        return discounts
+
+    # --- Case 3: a single total discount value stated outside the table ---
+    total_discount = round2(decimal_value(header_data.get("discount_amount", 0) or 0))
+    if total_discount <= 0:
+        # Fall back to a total discount percentage if that is all we have.
+        disc_pct = decimal_value(header_data.get("discount_percent", 0) or 0)
+        if disc_pct > 0:
+            base = round2(sum((decimal_value(item.amount) for item in items), Decimal("0")))
+            total_discount = round2(base * disc_pct / Decimal("100"))
+    if total_discount > 0:
+        grand_total = round2(sum((decimal_value(item.amount) for item in items), Decimal("0")))
+        if grand_total > 0:
+            running = Decimal("0")
+            for index, item in enumerate(items):
+                share = round2(decimal_value(item.amount) / grand_total * total_discount)
+                discounts[index] = share
+                running += share
+            # Push any rounding remainder onto the last item so the parts sum exactly.
+            remainder = round2(total_discount - running)
+            if abs(remainder) >= Decimal("0.01"):
+                discounts[-1] = round2(discounts[-1] + remainder)
+
+    # --- Case 1 falls through as all zeros ---
+    return discounts
 
 
 def build_voucher_payload(
@@ -1494,6 +1549,7 @@ def build_voucher_payload(
 
     voucher_number = normalize_space(header_data.get("invoice_number", ""))
     voucher_date = parse_date_to_iso(str(header_data.get("invoice_date", "")))
+    item_discounts = compute_item_discounts(items, header_data)
     voucher_items = [
         {
             "stock_item_name": item["stock_item_name"],
@@ -1501,9 +1557,10 @@ def build_voucher_payload(
             "rate": item["rate"],
             "amount": item["amount"],
             "unit": item["unit"],
+            "discount": float(item_discounts[index]) if index < len(item_discounts) else 0.0,
             "godown_name": "Main Location",
         }
-        for item in matched_items
+        for index, item in enumerate(matched_items)
     ]
     voucher_payload = {
         "party_name": party_name,

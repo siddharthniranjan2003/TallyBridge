@@ -1,0 +1,7 @@
+# Keep the Cloud Build upload small and secret-free.
+node_modules/
+dist/
+.env
+.env.*
+*.log
+.git/

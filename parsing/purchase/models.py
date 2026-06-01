@@ -13,6 +13,7 @@ class PurchaseRawItem:
     amount: Decimal
     rate: Decimal
     unit: str
+    discount_pct: Decimal = Decimal("0")
 
 
 @dataclass
