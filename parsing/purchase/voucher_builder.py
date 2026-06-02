@@ -1550,24 +1550,34 @@ def build_voucher_payload(
     voucher_number = normalize_space(header_data.get("invoice_number", ""))
     voucher_date = parse_date_to_iso(str(header_data.get("invoice_date", "")))
     item_discounts = compute_item_discounts(items, header_data)
-    voucher_items = [
-        {
-            "stock_item_name": item["stock_item_name"],
-            "quantity": item["quantity"],
-            "rate": item["rate"],
-            "amount": item["amount"],
-            "unit": item["unit"],
-            "discount": float(item_discounts[index]) if index < len(item_discounts) else 0.0,
-            "godown_name": "Main Location",
-        }
-        for index, item in enumerate(matched_items)
-    ]
+    discount_total = round2(sum(item_discounts, Decimal("0")))
+    voucher_items = []
+    for index, item in enumerate(matched_items):
+        discount_value = item_discounts[index] if index < len(item_discounts) else Decimal("0")
+        # Derived effective percent: rupee discount over gross (rate x qty). Recovers
+        # the original column percent in the per-line case and yields a sensible
+        # effective percent when a single total was distributed pro-rata.
+        gross = round2(decimal_value(item["rate"]) * decimal_value(item["quantity"]))
+        discount_pct = round2(discount_value / gross * Decimal("100")) if gross > 0 else Decimal("0")
+        voucher_items.append(
+            {
+                "stock_item_name": item["stock_item_name"],
+                "quantity": item["quantity"],
+                "rate": item["rate"],
+                "amount": item["amount"],
+                "unit": item["unit"],
+                "discount": float(discount_value),
+                "discount_pct": float(discount_pct),
+                "godown_name": "Main Location",
+            }
+        )
     voucher_payload = {
         "party_name": party_name,
         "date": voucher_date,
         "voucher_number": voucher_number,
         "reference": voucher_number,
         "narration": f"Purchase invoice {voucher_number}",
+        "discount_total": float(discount_total),
         "voucher_type": "Purchase",
         "inventory_ledger_name": inventory_ledger_name,
         "ledger_entries": ledger_entries,

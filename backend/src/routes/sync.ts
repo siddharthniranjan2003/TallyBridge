@@ -244,6 +244,7 @@ function normalizePushVoucherPayload(value: unknown) {
       voucher_number: normalizeTrimmedString(raw.voucher_number),
       party_name: partyName,
       narration: normalizeTrimmedString(raw.narration),
+      discount_total: normalizeFiniteNumber(raw.discount_total) ?? 0,
       reference: normalizeTrimmedString(raw.reference),
       inventory_ledger_name: normalizeTrimmedString(raw.inventory_ledger_name),
       stock_ledger_name: normalizeTrimmedString(raw.stock_ledger_name),
