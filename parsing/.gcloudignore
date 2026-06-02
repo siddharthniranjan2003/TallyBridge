@@ -1,0 +1,37 @@
+# Keep the Cloud Build upload small and secret-free (mirrors .dockerignore).
+# Local virtualenvs (multi-GB — never upload)
+.venv-ocrvl
+.venv
+venv
+**/__pycache__
+*.pyc
+
+# Secrets — provided via Cloud Run env vars, never uploaded
+.env
+.env.*
+
+# Runtime / scratch data
+uploads/
+outputs/
+_final8/
+_live8/
+_results*/
+_dpi*/
+_all*/
+_srv*.log
+server_test*.log
+
+# Test assets / samples not needed at runtime
+*.jpg
+*.jpeg
+*.png
+*.xlsx
+*.pdf
+challan*
+~$*
+
+# Editor / VCS
+.vscode
+.obsidian
+.git
+.DS_Store

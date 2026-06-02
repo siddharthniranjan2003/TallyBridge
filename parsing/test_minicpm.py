@@ -81,6 +81,17 @@ def env_value(name: str, default: str = "", aliases: tuple[str, ...] = ()) -> st
 MODEL = env_value("OLLAMA_MODEL", "openbmb/minicpm-v4.5")
 OLLAMA_CHAT_URL = env_value("OLLAMA_CHAT_URL", "http://localhost:11434/api/chat")
 REQUEST_TIMEOUT = int(env_value("REQUEST_TIMEOUT", "600"))
+
+# Sale OCR backend: "ollama" (local, default) or "runpod" (MiniCPM-V 4.5 serverless).
+# Knobs kept separate from the Nanonets RUNPOD_POD_* so both endpoints coexist.
+SALE_OCR_BACKEND = env_value("SALE_OCR_BACKEND", "ollama").strip().lower()
+MINICPM_RUNPOD_URL = env_value("MINICPM_RUNPOD_URL", "").rstrip("/")
+MINICPM_RUNPOD_API_KEY = env_value("MINICPM_RUNPOD_API_KEY", "")
+MINICPM_RUNPOD_MODEL = env_value("MINICPM_RUNPOD_MODEL", "openbmb/MiniCPM-V-4_5")
+MINICPM_RUNPOD_TIMEOUT_SECONDS = int(env_value("MINICPM_RUNPOD_TIMEOUT_SECONDS", "300"))
+MINICPM_RUNPOD_MAX_TOKENS = int(env_value("MINICPM_RUNPOD_MAX_TOKENS", "4096"))
+MINICPM_RUNPOD_POLL_SECONDS = float(env_value("MINICPM_RUNPOD_POLL_SECONDS", "2"))
+OCR_SYSTEM_PROMPT = "You are a strict OCR extraction engine. Return only the requested text."
 SUPABASE_URL = env_value("SUPABASE_URL", "")
 SUPABASE_KEY = env_value("SUPABASE_KEY", "", aliases=("SUPABASE_SERVICE_KEY", "API_KEY"))
 PARTY_TABLE = env_value("MINICPM_PARTY_TABLE", "vouchers")
@@ -632,14 +643,125 @@ def extract_numbers(value: str) -> list[str]:
     return re.findall(r"\d+(?:/\d+)?(?:\.\d+)?", normalize_text(value))
 
 
+def _minicpm_runpod_base_url() -> str:
+    # Serverless MINICPM_RUNPOD_URL is .../v2/<id>/openai; the native job API drops /openai.
+    base = MINICPM_RUNPOD_URL.rstrip("/")
+    if base.endswith("/openai"):
+        base = base[: -len("/openai")]
+    return base
+
+
+def _minicpm_is_serverless() -> bool:
+    return "api.runpod.ai/v2/" in MINICPM_RUNPOD_URL
+
+
+def _strip_think(text: str) -> str:
+    # MiniCPM-V 4.5 is a reasoning model; drop any <think>...</think> chain-of-thought.
+    cleaned = re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL)
+    # If thinking was truncated (no closing tag), drop everything up to the last </think>.
+    if "<think>" in cleaned:
+        cleaned = cleaned.split("</think>")[-1]
+        cleaned = cleaned.replace("<think>", "")
+    return cleaned.strip()
+
+
+def _extract_openai_content(payload: object) -> str:
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, dict):
+        choices = payload.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            message = choices[0].get("message")
+            if isinstance(message, dict) and isinstance(message.get("content"), str):
+                return message["content"]
+            if isinstance(choices[0].get("text"), str):
+                return choices[0]["text"]
+        for key in ("content", "text", "output"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                return value
+    raise ValueError(f"MiniCPM RunPod response had no text content: {str(payload)[:300]}")
+
+
+def query_minicpm_vlm(image_b64: str, prompt: str, system_prompt: str = OCR_SYSTEM_PROMPT) -> str:
+    """Send one image + prompt to the MiniCPM-V 4.5 RunPod worker (OpenAI chat format)."""
+    if not MINICPM_RUNPOD_URL or not MINICPM_RUNPOD_API_KEY:
+        raise ValueError(
+            "SALE_OCR_BACKEND=runpod requires MINICPM_RUNPOD_URL and MINICPM_RUNPOD_API_KEY."
+        )
+    headers = {
+        "Authorization": f"Bearer {MINICPM_RUNPOD_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "model": MINICPM_RUNPOD_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                    {"type": "text", "text": prompt},
+                ],
+            },
+        ],
+        "max_tokens": MINICPM_RUNPOD_MAX_TOKENS,
+        "temperature": 0,
+        # Disable MiniCPM-V 4.5 reasoning so the model returns only the OCR text.
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    session = requests.Session()
+    session.trust_env = False
+
+    if _minicpm_is_serverless():
+        # Custom serverless workers don't proxy the OpenAI route, so use native /run + /status
+        # and unwrap the worker's `output` (the OpenAI chat body).
+        base = _minicpm_runpod_base_url()
+        submit = session.post(
+            f"{base}/run", headers=headers, json={"input": body}, timeout=MINICPM_RUNPOD_TIMEOUT_SECONDS
+        )
+        submit.raise_for_status()
+        job_id = (submit.json() or {}).get("id")
+        if not job_id:
+            raise ValueError(f"MiniCPM RunPod did not return a job id: {submit.text[:300]}")
+        deadline = time.time() + MINICPM_RUNPOD_TIMEOUT_SECONDS
+        while time.time() < deadline:
+            status = session.get(
+                f"{base}/status/{job_id}", headers=headers, timeout=min(MINICPM_RUNPOD_TIMEOUT_SECONDS, 60)
+            )
+            status.raise_for_status()
+            data = status.json() or {}
+            state = data.get("status")
+            if state == "COMPLETED":
+                return _strip_think(_extract_openai_content(data.get("output") or {}))
+            if state in ("FAILED", "CANCELLED", "TIMED_OUT"):
+                raise ValueError(f"MiniCPM RunPod job {state}: {str(data)[:500]}")
+            time.sleep(MINICPM_RUNPOD_POLL_SECONDS)
+        raise ValueError(f"MiniCPM RunPod job timed out after {MINICPM_RUNPOD_TIMEOUT_SECONDS}s")
+
+    response = session.post(
+        f"{MINICPM_RUNPOD_URL}/v1/chat/completions",
+        headers=headers,
+        json=body,
+        timeout=MINICPM_RUNPOD_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    return _strip_think(_extract_openai_content(response.json()))
+
+
 def query_ollama_chat(image_b64: str) -> tuple[str, float]:
+    if SALE_OCR_BACKEND == "runpod":
+        start = time.time()
+        content = query_minicpm_vlm(image_b64, PROMPT)
+        return content, round(time.time() - start, 1)
+
     payload = {
         "model": MODEL,
         "think": False,
         "messages": [
             {
                 "role": "system",
-                "content": "You are a strict OCR extraction engine. Return only the requested text.",
+                "content": OCR_SYSTEM_PROMPT,
             },
             {
                 "role": "user",
@@ -882,9 +1004,16 @@ def stock_unit_kind(unit: str, name: str) -> str:
     return "PIECE"
 
 
-def load_stock(path: Path) -> pd.DataFrame:
-    df = pd.read_csv(path)
+def _finalize_stock_frame(df: pd.DataFrame) -> pd.DataFrame:
+    for column in ("id", "name", "group_name", "unit"):
+        if column not in df.columns:
+            df[column] = ""
     stock = df[["id", "name", "group_name", "unit"]].dropna(subset=["name"]).copy()
+    # `id` is used as a dedup key downstream; synthesize one if the source lacks it.
+    stock["id"] = [
+        str(val) if (val is not None and str(val).strip() and str(val).lower() != "nan") else f"row-{pos}"
+        for pos, val in enumerate(stock["id"].tolist())
+    ]
     stock["name"] = stock["name"].astype(str)
     stock["group_name"] = stock["group_name"].fillna("").astype(str)
     stock["unit"] = stock["unit"].fillna("").astype(str)
@@ -896,6 +1025,28 @@ def load_stock(path: Path) -> pd.DataFrame:
     stock["brand_tokens"] = stock["token_set"].map(lambda vals: vals & BRAND_TOKENS)
     stock["unit_kind"] = stock.apply(lambda row: stock_unit_kind(row["unit"], row["name"]), axis=1)
     return stock.reset_index(drop=True)
+
+
+def load_stock(path: Path) -> pd.DataFrame:
+    return _finalize_stock_frame(pd.read_csv(path))
+
+
+def load_stock_from_supabase(company_name: str) -> pd.DataFrame:
+    """Live stock_items for the company, matching the CSV stock frame shape."""
+    from purchase.company_context import (
+        fetch_supabase_company_record,
+        fetch_supabase_company_rows,
+    )
+
+    company = fetch_supabase_company_record(company_name)
+    rows = fetch_supabase_company_rows(
+        "stock_items",
+        company["id"],
+        select="id,name,group_name,unit,closing_qty,closing_value,rate",
+    )
+    if not rows:
+        raise ValueError(f"No stock_items found in Supabase for company '{company_name}'.")
+    return _finalize_stock_frame(pd.DataFrame(rows))
 
 
 def load_benchmark(path: Path) -> list[str]:

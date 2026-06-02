@@ -2,3 +2,5 @@ requests
 pdf2image
 Pillow
 rapidfuzz
+pandas
+openpyxl

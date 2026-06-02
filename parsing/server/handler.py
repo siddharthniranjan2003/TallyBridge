@@ -116,6 +116,11 @@ GSHEET_SHEET_NAME = env_value("MINICPM_GSHEET_NAME", "Challan")
 GSHEET_DATA_START_ROW = int(env_value("MINICPM_GSHEET_DATA_START_ROW", "5"))
 SUPABASE_URL = env_value("SUPABASE_URL", "")
 SUPABASE_KEY = env_value("SUPABASE_KEY", "", aliases=("SUPABASE_SERVICE_KEY", "API_KEY"))
+# Sale voucher knobs. Mirrors backend push-invoice.ts (GST SALE, 9% CGST + 9% SGST).
+SALE_GST_RATE = float(env_value("SALE_GST_RATE", "0.09"))
+SALE_VOUCHER_TYPE = env_value("SALE_VOUCHER_TYPE", "GST SALE")
+SALE_LEDGER_NAME = env_value("SALE_LEDGER_NAME", "GST SALE")
+SALE_DEFAULT_UNIT = env_value("SALE_DEFAULT_UNIT", "NOS")
 PARTY_TABLE = env_value("MINICPM_PARTY_TABLE", "vouchers")
 PARTY_COLUMN = env_value("MINICPM_PARTY_COLUMN", "party_name")
 PARTY_QUERY_LIMIT = int(env_value("MINICPM_PARTY_QUERY_LIMIT", "100"))
@@ -195,6 +200,9 @@ def crop_party_header_image(image_path: Path) -> bytes:
 
 
 def query_ollama_text(image_bytes: bytes, prompt: str, pipeline) -> str:
+    if getattr(pipeline, "SALE_OCR_BACKEND", "ollama") == "runpod":
+        return collapse_spaces(pipeline.query_minicpm_vlm(image_bytes_to_b64(image_bytes), prompt))
+
     payload = {
         "model": pipeline.MODEL,
         "think": False,
@@ -453,29 +461,23 @@ def rank_party_candidates(ocr_party_name: str, candidates: list[str]) -> list[di
     return sorted(scored, key=lambda item: (item["score"], item["strong_ratio"], item["wratio"]), reverse=True)
 
 
-def extract_party_name(image_path: Path, pipeline) -> dict:
-    try:
-        cropped_image = crop_party_header_image(image_path)
-        ocr_party_name = clean_party_name_text(query_ollama_text(cropped_image, PARTY_NAME_PROMPT, pipeline))
-    except Exception as exc:
-        return {
-            "ocr_text": "",
-            "matched_name": "",
-            "score": 0.0,
-            "source": "error",
-            "candidates": [],
-            "error": str(exc),
-        }
+def load_full_image_jpeg(image_path: Path) -> bytes:
+    with Image.open(image_path) as image:
+        buffer = BytesIO()
+        image.convert("RGB").save(buffer, format="JPEG", quality=95)
+        return buffer.getvalue()
+
+
+def _match_party_from_image(image_bytes: bytes, pipeline) -> tuple[dict, bool]:
+    """OCR the party name from one image and match it against Supabase.
+
+    Returns (result, confident) where confident=True means a usable match
+    (override or a Supabase hit above threshold) — i.e. no fallback needed.
+    """
+    ocr_party_name = clean_party_name_text(query_ollama_text(image_bytes, PARTY_NAME_PROMPT, pipeline))
 
     if not ocr_party_name:
-        return {
-            "ocr_text": "",
-            "matched_name": "",
-            "score": 0.0,
-            "source": "empty_ocr",
-            "candidates": [],
-            "error": "",
-        }
+        return {"ocr_text": "", "matched_name": "", "score": 0.0, "source": "empty_ocr", "candidates": [], "error": ""}, False
 
     overridden_name = hardcoded_party_name_override(ocr_party_name)
     if overridden_name:
@@ -486,17 +488,10 @@ def extract_party_name(image_path: Path, pipeline) -> dict:
             "source": "hardcoded_override",
             "candidates": [{"party_name": overridden_name, "score": 999.0}],
             "error": "",
-        }
+        }, True
 
     if not SUPABASE_URL or not SUPABASE_KEY:
-        return {
-            "ocr_text": ocr_party_name,
-            "matched_name": "",
-            "score": 0.0,
-            "source": "supabase_not_configured",
-            "candidates": [],
-            "error": "",
-        }
+        return {"ocr_text": ocr_party_name, "matched_name": "", "score": 0.0, "source": "supabase_not_configured", "candidates": [], "error": ""}, False
 
     candidates = fetch_supabase_party_candidates(ocr_party_name)
     ranked_candidates = rank_party_candidates(ocr_party_name, candidates)
@@ -512,16 +507,31 @@ def extract_party_name(image_path: Path, pipeline) -> dict:
             "source": "supabase_fuzzy",
             "candidates": ranked_candidates[:5],
             "error": "",
-        }
+        }, True
 
-    return {
-        "ocr_text": ocr_party_name,
-        "matched_name": "",
-        "score": 0.0,
-        "source": "no_supabase_match",
-        "candidates": ranked_candidates[:5],
-        "error": "",
-    }
+    return {"ocr_text": ocr_party_name, "matched_name": "", "score": 0.0, "source": "no_supabase_match", "candidates": ranked_candidates[:5], "error": ""}, False
+
+
+def extract_party_name(image_path: Path, pipeline) -> dict:
+    try:
+        result, confident = _match_party_from_image(crop_party_header_image(image_path), pipeline)
+    except Exception as exc:
+        return {"ocr_text": "", "matched_name": "", "score": 0.0, "source": "error", "candidates": [], "error": str(exc)}
+
+    if confident:
+        return result
+
+    # The narrow header crop can misread (e.g. cursive "Balaji" -> "Bain"); the full
+    # image gives the model more context. Retry once and keep the better result.
+    try:
+        full_result, full_confident = _match_party_from_image(load_full_image_jpeg(image_path), pipeline)
+        if full_confident or full_result.get("ocr_text"):
+            full_result["source"] = f"{full_result['source']}_fullimg"
+            return full_result
+    except Exception:
+        pass
+
+    return result
 
 
 def markdown_table(rows: list[dict]) -> str:
@@ -1022,6 +1032,142 @@ def post_to_push_queue(payload: dict, company_name: str) -> dict:
     }
 
 
+# ── Sale rate lookup (ported from the Challan Apps Script) ──────────────────────
+def _supabase_session() -> requests.Session:
+    session = requests.Session()
+    session.trust_env = False
+    return session
+
+
+def fetch_latest_rates_for_party(party_name: str) -> dict[str, dict]:
+    """RPC get_latest_rates_for_party -> {stock_item_name: {rate, source}} (same party)."""
+    if not SUPABASE_URL or not SUPABASE_KEY or not party_name:
+        return {}
+    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/rpc/get_latest_rates_for_party"
+    try:
+        resp = _supabase_session().post(
+            url,
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"},
+            json={"p_party_name": party_name},
+            timeout=PUSH_QUEUE_TIMEOUT_SECONDS,
+        )
+        rows = resp.json() if resp.ok and resp.text else []
+    except Exception:
+        return {}
+    rate_map: dict[str, dict] = {}
+    if isinstance(rows, list):
+        for row in rows:
+            name = str(row.get("stock_item_name", "") or "").strip()
+            if name:
+                rate_map[name] = {"rate": float(row.get("rate") or 0), "source": "same_party"}
+    return rate_map
+
+
+def fetch_fallback_rate_for_item(party_name: str, item_name: str) -> dict | None:
+    """Most recent rate for this item from a DIFFERENT party."""
+    if not SUPABASE_URL or not SUPABASE_KEY or not item_name:
+        return None
+    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/voucher_items"
+    params = {
+        "select": "stock_item_name,rate,created_at,vouchers!inner(party_name)",
+        "stock_item_name": f"eq.{item_name}",
+        "vouchers.party_name": f"neq.{party_name}",
+        "order": "created_at.desc",
+        "limit": "1",
+    }
+    try:
+        resp = _supabase_session().get(
+            url,
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+            params=params,
+            timeout=PUSH_QUEUE_TIMEOUT_SECONDS,
+        )
+        rows = resp.json() if resp.ok and resp.text else []
+    except Exception:
+        return None
+    first = rows[0] if isinstance(rows, list) and rows else None
+    if not first or first.get("rate") is None:
+        return None
+    return {"rate": float(first.get("rate") or 0), "source": "different_party"}
+
+
+def build_sale_rate_map(party_name: str, item_names: list[str]) -> dict[str, dict]:
+    rate_map = fetch_latest_rates_for_party(party_name)
+    for name in {n for n in item_names if n}:
+        if name in rate_map:
+            continue
+        fallback = fetch_fallback_rate_for_item(party_name, name)
+        if fallback:
+            rate_map[name] = fallback
+    return rate_map
+
+
+def parse_sale_quantity(qty_text: str) -> float:
+    match = re.match(r"^\s*(\d+(?:\.\d+)?)", str(qty_text or ""))
+    return float(match.group(1)) if match else 0.0
+
+
+def build_sale_voucher_payload(company_name: str, party_name: str, rows: list[dict]) -> tuple[dict, list[dict]]:
+    """Build a GST SALE voucher (same envelope as purchase) from matched sale rows."""
+    item_names = [
+        str(r.get("stock_matched", "") or "").strip()
+        for r in rows
+        if str(r.get("stock_matched", "") or "").strip() and str(r.get("stock_matched", "") or "").strip() != "NO MATCH"
+    ]
+    rate_map = build_sale_rate_map(party_name, item_names)
+
+    priced_items: list[dict] = []
+    for row in rows:
+        name = str(row.get("stock_matched", "") or "").strip()
+        if not name or name == "NO MATCH":
+            continue
+        quantity = parse_sale_quantity(row.get("qty_text"))
+        if quantity <= 0:
+            quantity = 1.0
+        info = rate_map.get(name)
+        rate = round(float(info["rate"]), 2) if info else 0.0
+        amount = round(quantity * rate, 2)
+        priced_items.append(
+            {
+                "stock_item_name": name,
+                "quantity": quantity,
+                "rate": rate,
+                "amount": amount,
+                "unit": SALE_DEFAULT_UNIT,
+                "godown_name": "Main Location",
+                "rate_source": info["source"] if info else "none",
+            }
+        )
+
+    subtotal = round(sum(item["amount"] for item in priced_items), 2)
+    cgst = round(subtotal * SALE_GST_RATE, 2)
+    sgst = round(subtotal * SALE_GST_RATE, 2)
+    total = round(subtotal + cgst + sgst, 2)
+    voucher_number = f"SALE-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+    ledger_entries = [
+        {"ledger_name": party_name, "amount": total, "is_deemed_positive": True},
+        {"ledger_name": SALE_LEDGER_NAME, "amount": subtotal, "is_deemed_positive": False},
+    ]
+    if cgst > 0:
+        ledger_entries.append({"ledger_name": "CGST", "amount": cgst, "is_deemed_positive": False})
+    if sgst > 0:
+        ledger_entries.append({"ledger_name": "SGST", "amount": sgst, "is_deemed_positive": False})
+
+    voucher_payload = {
+        "party_name": party_name,
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "voucher_number": voucher_number,
+        "reference": voucher_number,
+        "narration": f"Sales challan {voucher_number}",
+        "voucher_type": SALE_VOUCHER_TYPE,
+        "inventory_ledger_name": SALE_LEDGER_NAME,
+        "ledger_entries": ledger_entries,
+        "items": [{k: v for k, v in item.items() if k != "rate_source"} for item in priced_items],
+    }
+    return {"company_name": company_name, "voucher_payload": voucher_payload}, priced_items
+
+
 def _runpod_is_serverless() -> bool:
     return "api.runpod.ai/v2/" in RUNPOD_POD_URL
 
@@ -1259,9 +1405,21 @@ def apply_recovered_invoice_number(payload: dict, number: str) -> None:
     payload["invoice_number_source"] = "vlm_targeted_reask"
 
 
-def run_pipeline_for_image(image_path: Path, benchmark_path: Path | None = None) -> dict:
+def load_sale_stock(pipeline, company_name: str | None):
+    """Live Supabase stock_items for the company; CSV fallback for local/CLI use."""
+    if company_name:
+        try:
+            return pipeline.load_stock_from_supabase(company_name)
+        except Exception as exc:
+            log_runpod_debug("sale_stock_supabase_fallback", {"company": company_name, "error": str(exc)[:300]})
+    return pipeline.load_stock(pipeline.STOCK_CSV)
+
+
+def run_pipeline_for_image(
+    image_path: Path, benchmark_path: Path | None = None, company_name: str | None = None
+) -> dict:
     pipeline = load_pipeline()
-    stock = pipeline.load_stock(pipeline.STOCK_CSV)
+    stock = load_sale_stock(pipeline, company_name)
     family_views = pipeline.build_family_views(stock)
     image_b64 = pipeline.load_image_b64(image_path)
     raw_text, elapsed = pipeline.query_ollama_chat(image_b64)
@@ -1413,8 +1571,8 @@ def request_options(path: str) -> dict[str, str]:
     push_mode = collapse_spaces(query.get("push", [""])[0]).lower()
     if not push_mode:
         push_mode = "none"
-    if push_mode != "none":
-        raise ValueError("Direct push is disabled on this endpoint. Use the returned JSON payload downstream.")
+    if push_mode not in {"none", "queue"}:
+        raise ValueError("push must be 'none' or 'queue'.")
 
     company_name = collapse_spaces(query.get("company", [DEFAULT_PURCHASE_COMPANY])[0]) or DEFAULT_PURCHASE_COMPANY
     check = collapse_spaces(query.get("check", [""])[0]).lower()
@@ -1761,8 +1919,8 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                 UPLOAD_DIR,
                 render_pdf=options["type"] != "purchase",
             )
-            if upload_kind == "pdf" and options["type"] != "purchase":
-                raise ValueError("PDF upload is currently supported only for type=purchase")
+            if upload_kind == "pdf" and options["type"] not in {"purchase", "sale"}:
+                raise ValueError("PDF upload is currently supported only for type=purchase or type=sale")
 
             if options["type"] == "purchase":
                 purchase_input = (
@@ -1811,6 +1969,7 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                 payload = run_pipeline_for_image(
                     image_path=image_path,
                     benchmark_path=DEFAULT_BENCHMARK if DEFAULT_BENCHMARK.exists() else None,
+                    company_name=options["company_name"],
                 )
             payload["upload_kind"] = upload_kind
             payload["source_upload_path"] = str(original_upload_path or image_path)
@@ -1827,6 +1986,30 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                     "table_markdown": payload["table_markdown"],
                     "gsheet": payload["gsheet"],
                 }
+                if options["push_mode"] == "queue":
+                    party_name = (payload.get("party_name") or "").strip()
+                    if not party_name:
+                        payload["queue_response"] = {
+                            "ok": False,
+                            "skipped": True,
+                            "reason": "No party_name matched in Supabase; cannot build a Sales voucher.",
+                        }
+                    else:
+                        queue_request_payload, sale_items = build_sale_voucher_payload(
+                            options["company_name"], party_name, payload.get("rows", [])
+                        )
+                        if not sale_items:
+                            payload["queue_response"] = {
+                                "ok": False,
+                                "skipped": True,
+                                "reason": "No matched stock items to enqueue.",
+                            }
+                        else:
+                            payload["sale_voucher_payload"] = queue_request_payload["voucher_payload"]
+                            payload["sale_rate_items"] = sale_items
+                            payload["queue_response"] = post_to_push_queue(
+                                queue_request_payload, options["company_name"]
+                            )
             self._send_json(200, payload)
         except Exception as exc:
             self._send_json(
