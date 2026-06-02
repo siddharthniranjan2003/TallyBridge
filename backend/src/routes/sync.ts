@@ -230,6 +230,7 @@ function normalizePushVoucherPayload(value: unknown) {
       unit,
       rate,
       amount,
+      discount_pct: normalizeFiniteNumber(rawItem.discount_pct) ?? 0,
       godown_name: normalizeTrimmedString(rawItem.godown_name),
       batch_name: normalizeTrimmedString(rawItem.batch_name),
       destination_godown_name: normalizeTrimmedString(rawItem.destination_godown_name),

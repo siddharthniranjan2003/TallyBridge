@@ -1059,7 +1059,11 @@ def fetch_latest_rates_for_party(party_name: str) -> dict[str, dict]:
         for row in rows:
             name = str(row.get("stock_item_name", "") or "").strip()
             if name:
-                rate_map[name] = {"rate": float(row.get("rate") or 0), "source": "same_party"}
+                rate_map[name] = {
+                    "rate": float(row.get("rate") or 0),
+                    "discount_pct": float(row.get("discount_pct") or 0),
+                    "source": "same_party",
+                }
     return rate_map
 
 
@@ -1088,7 +1092,7 @@ def fetch_fallback_rate_for_item(party_name: str, item_name: str) -> dict | None
     first = rows[0] if isinstance(rows, list) and rows else None
     if not first or first.get("rate") is None:
         return None
-    return {"rate": float(first.get("rate") or 0), "source": "different_party"}
+    return {"rate": float(first.get("rate") or 0), "discount_pct": 0.0, "source": "different_party"}
 
 
 def build_sale_rate_map(party_name: str, item_names: list[str]) -> dict[str, dict]:
@@ -1126,6 +1130,7 @@ def build_sale_voucher_payload(company_name: str, party_name: str, rows: list[di
             quantity = 1.0
         info = rate_map.get(name)
         rate = round(float(info["rate"]), 2) if info else 0.0
+        discount_pct = round(float(info.get("discount_pct", 0) or 0), 2) if info else 0.0
         amount = round(quantity * rate, 2)
         priced_items.append(
             {
@@ -1133,6 +1138,7 @@ def build_sale_voucher_payload(company_name: str, party_name: str, rows: list[di
                 "quantity": quantity,
                 "rate": rate,
                 "amount": amount,
+                "discount_pct": discount_pct,
                 "unit": SALE_DEFAULT_UNIT,
                 "godown_name": "Main Location",
                 "rate_source": info["source"] if info else "none",
