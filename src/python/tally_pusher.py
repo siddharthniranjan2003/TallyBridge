@@ -67,6 +67,15 @@ def _format_quantity(value: Decimal) -> str:
     return text or "0"
 
 
+def _format_discount(value: Decimal) -> str:
+    # Discount is a percentage (unsigned for both purchase and sale); render it
+    # as a plain trimmed number so "40.00" -> "40" and "12.50" -> "12.5".
+    text = format(value.quantize(Decimal("0.01")), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
 def _signed_tally_amount(amount, is_deemed_positive: bool) -> Decimal:
     absolute_amount = abs(_decimal_from_value(amount, "amount"))
     return -absolute_amount if is_deemed_positive else absolute_amount
@@ -170,6 +179,10 @@ def _normalize_items(voucher: dict, voucher_kind: str) -> list[dict]:
             "unit": unit,
             "rate": rate,
             "signed_amount": signed_amount,
+            "discount_pct": _decimal_from_value(
+                item.get("discount_pct", 0) or 0,
+                f"item #{index + 1} discount_pct",
+            ),
             "godown_name": str(item.get("godown_name") or "").strip(),
             "batch_name": str(item.get("batch_name") or "").strip(),
             "destination_godown_name": str(item.get("destination_godown_name") or "").strip(),
@@ -302,7 +315,7 @@ def _build_batch_allocations_xml(item: dict) -> str:
         # PUSH PHASE 1: Match the shape of exported GST SALE vouchers more
         # closely so Tally gets the same inventory allocation structure.
         "<ADDLAMOUNT></ADDLAMOUNT>",
-        "<BATCHDISCOUNT>0</BATCHDISCOUNT>",
+        f"<BATCHDISCOUNT>{_format_discount(item['discount_pct'])}</BATCHDISCOUNT>",
         f"<AMOUNT>{_format_amount(item['signed_amount'])}</AMOUNT>",
         f"<ACTUALQTY>{_format_quantity(item['quantity'])} {_xml_escape(item['unit'])}</ACTUALQTY>",
         f"<BILLEDQTY>{_format_quantity(item['quantity'])} {_xml_escape(item['unit'])}</BILLEDQTY>",
@@ -322,7 +335,7 @@ def _build_inventory_entry_xml(item: dict, inventory_ledger_entry: dict, voucher
         f"<ISDEEMEDPOSITIVE>{inventory_is_deemed_positive}</ISDEEMEDPOSITIVE>"
         f"<ISLASTDEEMEDPOSITIVE>{inventory_is_deemed_positive}</ISLASTDEEMEDPOSITIVE>"
         f"<RATE>{_format_amount(item['rate'])}/{_xml_escape(item['unit'])}</RATE>"
-        "<DISCOUNT>0</DISCOUNT>"
+        f"<DISCOUNT>{_format_discount(item['discount_pct'])}</DISCOUNT>"
         f"<AMOUNT>{_format_amount(item['signed_amount'])}</AMOUNT>"
         f"<ACTUALQTY>{_format_quantity(item['quantity'])} {_xml_escape(item['unit'])}</ACTUALQTY>"
         f"<BILLEDQTY>{_format_quantity(item['quantity'])} {_xml_escape(item['unit'])}</BILLEDQTY>"
