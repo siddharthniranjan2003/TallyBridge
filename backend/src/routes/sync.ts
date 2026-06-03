@@ -1139,75 +1139,6 @@ async function aggregateVoucherItemMetricsByName(voucherIds: string[], label: st
   return metricsByItem;
 }
 
-// Most recent purchase rate per stock item, across all history.
-// Joins voucher_items -> vouchers, keeps purchase vouchers, orders by voucher
-// date (then id) descending, and takes voucher_items.rate from the newest line.
-async function fetchLastPurchaseRateByItem(companyId: string) {
-  const rateByItem = new Map<string, number>();
-
-  const purchaseVouchers = await fetchAllPages("Inventory last-purchase vouchers", (from, to) =>
-    supabase
-      .from("vouchers")
-      .select("id, voucher_type")
-      .eq("company_id", companyId)
-      .eq("is_cancelled", false)
-      .order("date", { ascending: false })
-      .order("id", { ascending: false })
-      .range(from, to),
-  );
-
-  const voucherRank = new Map<string, number>();
-  const orderedVoucherIds: string[] = [];
-  for (const row of purchaseVouchers) {
-    const id = (row as any).id;
-    if (typeof id !== "string" || !id) {
-      continue;
-    }
-    if (!isPurchaseVoucherType((row as any).voucher_type)) {
-      continue;
-    }
-    voucherRank.set(id, orderedVoucherIds.length); // lower rank = more recent
-    orderedVoucherIds.push(id);
-  }
-
-  if (!orderedVoucherIds.length) {
-    return rateByItem;
-  }
-
-  const bestRankByItem = new Map<string, number>();
-  for (const chunk of chunkArray(orderedVoucherIds, 100)) {
-    const rows = await fetchAllPages("Inventory last-purchase items", (from, to) =>
-      supabase
-        .from("voucher_items")
-        .select("stock_item_name, rate, voucher_id")
-        .in("voucher_id", chunk)
-        .range(from, to),
-    );
-
-    for (const row of rows) {
-      const stockItemName = normalizeTrimmedString((row as any).stock_item_name);
-      if (!stockItemName) {
-        continue;
-      }
-      const rank = voucherRank.get((row as any).voucher_id);
-      if (rank == null) {
-        continue;
-      }
-      const rate = Number((row as any).rate);
-      if (!Number.isFinite(rate) || rate <= 0) {
-        continue; // skip zero/blank rates; fall through to the next-newest line
-      }
-      const bestRank = bestRankByItem.get(stockItemName);
-      if (bestRank == null || rank < bestRank) {
-        bestRankByItem.set(stockItemName, rank);
-        rateByItem.set(stockItemName, rate);
-      }
-    }
-  }
-
-  return rateByItem;
-}
-
 function classifyInventoryScenarioV2(
   avgSale6mPaise: number,
   lastMonthPurchasePaise: number,
@@ -1329,7 +1260,7 @@ async function buildInventoryIntelligenceReport(
     .filter((row: any) => typeof row?.id === "string" && isPurchaseVoucherType(row?.voucher_type))
     .map((row: any) => row.id as string);
 
-  const [saleMetricsByItem, purchaseMetricsByItem, lastPurchaseRateByItem, stockItems] = await Promise.all([
+  const [saleMetricsByItem, purchaseMetricsByItem, stockItems] = await Promise.all([
     aggregateVoucherItemMetricsByName(
       saleVoucherRows
         .map((row: any) => row?.id)
@@ -1337,7 +1268,6 @@ async function buildInventoryIntelligenceReport(
       "Inventory GST SALE voucher items",
     ),
     aggregateVoucherItemMetricsByName(purchaseVoucherIds, "Inventory purchase voucher items"),
-    fetchLastPurchaseRateByItem(companyId),
     fetchAllPages("Inventory stock items", (from, to) =>
       supabase
         .from("stock_items")
@@ -1389,7 +1319,9 @@ async function buildInventoryIntelligenceReport(
     const purchaseQuantity1mRaw = purchaseMetrics.quantityRaw;
     const closingQuantityRaw = stockSnapshot?.closingQuantityRaw ?? 0;
     const closingStockRaw = stockSnapshot?.closingStockRaw ?? 0;
-    const purchaseRateRaw = lastPurchaseRateByItem.get(stockItemName) ?? null;
+    const purchaseRateRaw = purchaseQuantity1mRaw > 0
+      ? lastMonthPurchaseRaw / purchaseQuantity1mRaw
+      : null;
     const salesAmountRaw = purchaseRateRaw == null ? null : avgSaleQuantity6mRaw * purchaseRateRaw;
     const purchaseAmountRaw = purchaseRateRaw == null ? null : purchaseQuantity1mRaw * purchaseRateRaw;
     const closingStockAmountRaw = purchaseRateRaw == null ? null : closingQuantityRaw * purchaseRateRaw;
