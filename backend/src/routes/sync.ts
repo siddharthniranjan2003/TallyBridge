@@ -1,6 +1,43 @@
-import { Router, type Response } from "express";
+import { Router, type Request, type Response, type NextFunction } from "express";
+import { timingSafeEqual } from "crypto";
+import { createClient } from "@supabase/supabase-js";
 import { supabase } from "../db/supabase.js";
 import { requireApiKey } from "../middleware/auth.js";
+
+// ── /reorder-levels client overrides (THIS endpoint only) ───────────────────
+// The reorder-levels endpoint serves a separate (client) Supabase project and
+// uses its own API key, read from *_CLIENT env vars so nothing is hardcoded.
+// Falls back to the shared `supabase` client / global auth if the vars are unset.
+// Env var names are case-sensitive and match the deployment panel exactly:
+//   SUPABASE_URL_Client, SUPABASE_SERVICE_KEY_CLIENT, API_KEY_CLIENT
+const reorderSupabase =
+  process.env.SUPABASE_URL_Client && process.env.SUPABASE_SERVICE_KEY_CLIENT
+    ? createClient(
+        process.env.SUPABASE_URL_Client,
+        process.env.SUPABASE_SERVICE_KEY_CLIENT,
+      )
+    : supabase;
+
+// Auth for the reorder-levels endpoint only: validates x-api-key against API_KEY_CLIENT.
+function requireClientApiKey(req: Request, res: Response, next: NextFunction): void {
+  const headerValue = req.headers["x-api-key"];
+  const key = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  const expectedKey = process.env.API_KEY_CLIENT;
+
+  if (!key || !expectedKey) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  const provided = Buffer.from(key);
+  const expected = Buffer.from(expectedKey);
+  if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  next();
+}
 
 const router = Router();
 const BATCH_SIZE = 250;
@@ -1112,7 +1149,7 @@ async function aggregateVoucherItemMetricsByName(voucherIds: string[], label: st
 
   for (const chunk of chunkArray(voucherIds, 100)) {
     const rows = await fetchAllPages(`${label} rows`, (from, to) =>
-      supabase
+      reorderSupabase
         .from("voucher_items")
         .select("id, stock_item_name, amount, quantity")
         .in("voucher_id", chunk)
@@ -1146,7 +1183,7 @@ async function fetchLastPurchaseRateByItem(companyId: string) {
   const rateByItem = new Map<string, number>();
 
   const purchaseVouchers = await fetchAllPages("Inventory last-purchase vouchers", (from, to) =>
-    supabase
+    reorderSupabase
       .from("vouchers")
       .select("id, voucher_type")
       .eq("company_id", companyId)
@@ -1177,7 +1214,7 @@ async function fetchLastPurchaseRateByItem(companyId: string) {
   const bestRankByItem = new Map<string, number>();
   for (const chunk of chunkArray(orderedVoucherIds, 100)) {
     const rows = await fetchAllPages("Inventory last-purchase items", (from, to) =>
-      supabase
+      reorderSupabase
         .from("voucher_items")
         .select("stock_item_name, rate, voucher_id")
         .in("voucher_id", chunk)
@@ -1301,7 +1338,7 @@ async function buildInventoryIntelligenceReport(
   const purchaseWindowTo = asOfDate;
 
   const saleVoucherRows = await fetchAllPages("Inventory GST SALE vouchers", (from, to) =>
-    supabase
+    reorderSupabase
       .from("vouchers")
       .select("id")
       .eq("company_id", companyId)
@@ -1314,7 +1351,7 @@ async function buildInventoryIntelligenceReport(
   );
 
   const purchaseVoucherRows = await fetchAllPages("Inventory purchase vouchers", (from, to) =>
-    supabase
+    reorderSupabase
       .from("vouchers")
       .select("id, voucher_type")
       .eq("company_id", companyId)
@@ -1339,7 +1376,7 @@ async function buildInventoryIntelligenceReport(
     aggregateVoucherItemMetricsByName(purchaseVoucherIds, "Inventory purchase voucher items"),
     fetchLastPurchaseRateByItem(companyId),
     fetchAllPages("Inventory stock items", (from, to) =>
-      supabase
+      reorderSupabase
         .from("stock_items")
         .select("id, name, unit, closing_qty, closing_value")
         .eq("company_id", companyId)
@@ -1605,15 +1642,16 @@ async function resolveCompanyLookup(
     companyGuid?: unknown;
     companyName?: unknown;
   },
-  options?: { requireSuccessfulSync?: boolean },
+  options?: { requireSuccessfulSync?: boolean; client?: typeof supabase },
 ) {
   const requireSuccessfulSync = options?.requireSuccessfulSync !== false;
+  const db = options?.client ?? supabase;
   const normalizedCompanyId = normalizeTrimmedString(companyId);
   const normalizedCompanyGuid = normalizeTrimmedString(companyGuid);
   const normalizedCompanyName = normalizeTrimmedString(companyName);
 
   if (normalizedCompanyId) {
-    const { data: company, error } = await supabase
+    const { data: company, error } = await db
       .from("companies")
       .select(COMPANY_LOOKUP_COLUMNS)
       .eq("id", normalizedCompanyId)
@@ -1631,7 +1669,7 @@ async function resolveCompanyLookup(
   }
 
   if (normalizedCompanyGuid) {
-    const { data: company, error } = await supabase
+    const { data: company, error } = await db
       .from("companies")
       .select(COMPANY_LOOKUP_COLUMNS)
       .eq("guid", normalizedCompanyGuid)
@@ -1655,7 +1693,7 @@ async function resolveCompanyLookup(
     };
   }
 
-  const { data: companies, error } = await supabase
+  const { data: companies, error } = await db
     .from("companies")
     .select(COMPANY_LOOKUP_COLUMNS)
     .eq("name", normalizedCompanyName)
@@ -2803,14 +2841,14 @@ router.get("/parties", requireApiKey, async (req, res) => {
 // Auto-detects the single company in Supabase — no company param required.
 
 // Returns the direct amount-based inventory intelligence report.
-router.get("/reorder-levels", requireApiKey, async (req, res) => {
+router.get("/reorder-levels", requireClientApiKey, async (req, res) => {
   try {
     const format = parseInventoryResponseFormat(req.query.format);
     const companyLookup = await resolveCompanyLookup({
       companyId: req.query.company_id,
       companyGuid: req.query.company_guid,
       companyName: req.query.company_name,
-    });
+    }, { client: reorderSupabase });
     if (companyLookup.status !== 200) {
       return res.status(companyLookup.status).json({ error: companyLookup.error });
     }
@@ -2830,7 +2868,7 @@ router.get("/reorder-levels", requireApiKey, async (req, res) => {
   }
 });
 
-router.get("/reorder-levels/:reportKey", requireApiKey, async (req, res) => {
+router.get("/reorder-levels/:reportKey", requireClientApiKey, async (req, res) => {
   try {
     const format = parseInventoryResponseFormat(req.query.format);
     const reportKey = normalizeInventoryReportKey(req.params.reportKey);
@@ -2846,7 +2884,7 @@ router.get("/reorder-levels/:reportKey", requireApiKey, async (req, res) => {
       companyId: req.query.company_id,
       companyGuid: req.query.company_guid,
       companyName: req.query.company_name,
-    });
+    }, { client: reorderSupabase });
     if (companyLookup.status !== 200) {
       return res.status(companyLookup.status).json({ error: companyLookup.error });
     }
