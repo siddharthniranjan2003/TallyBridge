@@ -1,6 +1,7 @@
 import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
 import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
+import UpdateBanner from "./components/UpdateBanner";
 import Home from "./pages/HomeGuided";
 import AddCompany from "./pages/AddCompanyGuided";
 import Settings from "./pages/Settings";
@@ -11,6 +12,7 @@ export default function App() {
   return (
     <HashRouter>
       <div style={{ display: "flex", height: "100vh", flexDirection: "column" }}>
+        <UpdateBanner />
         <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
           <Sidebar />
           <main style={{ flex: 1, overflowY: "auto", background: "#f1f3f5" }}>

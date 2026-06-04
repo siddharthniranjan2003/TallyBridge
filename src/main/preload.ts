@@ -9,6 +9,10 @@ const ALLOWED_CHANNELS = new Set([
   "company-synced",
   "company-error",
   "companies-updated",
+  "update-available",
+  "update-progress",
+  "update-downloaded",
+  "update-error",
 ]);
 
 contextBridge.exposeInMainWorld("electronAPI", {
@@ -37,6 +41,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // Logs
   openLogFile: () => ipcRenderer.invoke("open-log-file"),
+
+  // App updates
+  downloadUpdate: () => ipcRenderer.invoke("download-update"),
+  installUpdate: () => ipcRenderer.invoke("install-update"),
 
   // Events from main → renderer
   on: (channel: string, callback: (...args: any[]) => void) => {

@@ -33,6 +33,8 @@ declare global {
         companies: TallyCompanyDateRange[];
         error?: string;
       }>;
+      downloadUpdate: () => Promise<{ ok: boolean }>;
+      installUpdate: () => Promise<{ ok: boolean; deferred: boolean }>;
       on: (channel: string, cb: (...args: any[]) => void) => void;
       off: (channel: string, cb: (...args: any[]) => void) => void;
     };

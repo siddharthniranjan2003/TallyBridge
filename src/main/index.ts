@@ -7,6 +7,7 @@ import { setupIpcHandlers } from "./ipc-handlers";
 import { LocalPushServer } from "./local-push-server";
 import { PushQueuePoller } from "./push-queue-poller";
 import { SyncEngine } from "./sync-engine";
+import { setupAutoUpdater } from "./updater";
 
 if (!isDev) {
   initLogger();
@@ -15,6 +16,7 @@ if (!isDev) {
 let mainWindow: BrowserWindow | null = null;
 let localPushServer: LocalPushServer | null = null;
 let pushQueuePoller: PushQueuePoller | null = null;
+let isQuitting = false; // set true for a real quit (e.g. install-restart) so close-to-tray is bypassed
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -45,8 +47,9 @@ function createWindow() {
     mainWindow?.show();
   });
 
-  // Hide to tray instead of closing
+  // Hide to tray instead of closing — unless we're genuinely quitting (e.g. to install an update)
   mainWindow.on("close", (e) => {
+    if (isQuitting) return;
     e.preventDefault();
     mainWindow?.hide();
   });
@@ -75,6 +78,18 @@ app.whenReady().then(() => {
   }
   syncEngine.start();
   pushQueuePoller.start();
+
+  if (!isDev) {
+    setupAutoUpdater({
+      mainWindow: mainWindow!,
+      isBusy: () => syncEngine.isSyncInProgress(),
+      beforeInstall: () => {
+        isQuitting = true;
+        pushQueuePoller?.stop();
+        localPushServer?.stop();
+      },
+    });
+  }
 });
 
 // Keep running when all windows closed
