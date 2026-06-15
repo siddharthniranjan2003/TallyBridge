@@ -285,6 +285,7 @@ function normalizePushVoucherPayload(value: unknown) {
       reference: normalizeTrimmedString(raw.reference),
       inventory_ledger_name: normalizeTrimmedString(raw.inventory_ledger_name),
       stock_ledger_name: normalizeTrimmedString(raw.stock_ledger_name),
+      invoice_exists: normalizeBoolean(raw.invoice_exists) ?? false,
       ledger_entries,
       items,
     },

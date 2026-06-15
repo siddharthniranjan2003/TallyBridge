@@ -517,6 +517,8 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
 
   ipcMain.handle("get-config", () => store.store);
 
+  ipcMain.handle("get-app-version", () => app.getVersion());
+
   ipcMain.handle("get-companies", () => store.get("companies"));
 
   ipcMain.handle("save-settings", (_, s) => {

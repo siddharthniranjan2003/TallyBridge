@@ -1,4 +1,5 @@
 import { NavLink } from "react-router-dom";
+import { useEffect, useState } from "react";
 
 const links = [
   { to: "/", icon: "⊞", label: "Home" },
@@ -8,6 +9,11 @@ const links = [
 ];
 
 export default function Sidebar() {
+  const [version, setVersion] = useState("");
+  useEffect(() => {
+    window.electronAPI.getAppVersion().then(setVersion);
+  }, []);
+
   return (
     <aside style={{
       width: 200,
@@ -64,7 +70,7 @@ export default function Sidebar() {
         color: "rgba(255,255,255,0.25)",
         borderTop: "1px solid rgba(255,255,255,0.08)",
       }}>
-        v1.0.0
+        {version ? `v${version}` : ""}
       </div>
     </aside>
   );

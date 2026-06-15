@@ -8,6 +8,7 @@ import { LocalPushServer } from "./local-push-server";
 import { PushQueuePoller } from "./push-queue-poller";
 import { SyncEngine } from "./sync-engine";
 import { setupAutoUpdater } from "./updater";
+import { store } from "./store";
 
 if (!isDev) {
   initLogger();
@@ -56,6 +57,20 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // One-time migration: move existing installs off render mode (which sends the
+  // whole company in one request → OOM/413 → voucher items dropped) onto hybrid,
+  // which chunks vouchers straight to the Supabase ingest Edge Function. Only
+  // flip clients that already have the direct-ingest endpoint configured, so
+  // installs without it aren't broken. Changing the store default alone does NOT
+  // touch existing saved configs — this explicit override does.
+  if (!store.get("migratedToHybridV1")) {
+    if (store.get("syncIngestUrl")?.trim()) {
+      store.set("syncIngestMode", "hybrid");
+      logger.info("[migration] syncIngestMode -> hybrid (was render)");
+    }
+    store.set("migratedToHybridV1", true);
+  }
+
   createWindow();
 
   const syncEngine = new SyncEngine(mainWindow!);

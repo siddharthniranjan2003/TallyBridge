@@ -118,9 +118,15 @@ SUPABASE_URL = env_value("SUPABASE_URL", "")
 SUPABASE_KEY = env_value("SUPABASE_KEY", "", aliases=("SUPABASE_SERVICE_KEY", "API_KEY"))
 # Sale voucher knobs. Mirrors backend push-invoice.ts (GST SALE, 9% CGST + 9% SGST).
 SALE_GST_RATE = float(env_value("SALE_GST_RATE", "0.09"))
+SALE_IGST_RATE = float(env_value("SALE_IGST_RATE", "0.18"))
 SALE_VOUCHER_TYPE = env_value("SALE_VOUCHER_TYPE", "GST SALE")
 SALE_LEDGER_NAME = env_value("SALE_LEDGER_NAME", "GST SALE")
 SALE_DEFAULT_UNIT = env_value("SALE_DEFAULT_UNIT", "NOS")
+# Intra-state (CGST+SGST) vs inter-state (IGST) is decided by the debtor's home
+# state on the Supabase ledgers row. SALE_HOME_STATE = the company's own state.
+SALE_HOME_STATE = env_value("SALE_HOME_STATE", "Haryana")
+SALE_LEDGER_TABLE = env_value("MINICPM_SALE_LEDGER_TABLE", "ledgers")
+SALE_DEBTOR_GROUP = env_value("MINICPM_SALE_DEBTOR_GROUP", "Sundry Debtors")
 PARTY_TABLE = env_value("MINICPM_PARTY_TABLE", "vouchers")
 PARTY_COLUMN = env_value("MINICPM_PARTY_COLUMN", "party_name")
 PARTY_QUERY_LIMIT = int(env_value("MINICPM_PARTY_QUERY_LIMIT", "100"))
@@ -567,6 +573,7 @@ def serialize_rows(prediction_rows) -> list[dict]:
                 "minicpm_read": row.pre_fuzzy_name,
                 "stock_matched": row.predicted_name,
                 "score": row.similarity,
+                "match_score": row.match_score,
                 "correct_stock_name": row.expected_name,
                 "verdict": row.status,
                 "confidence": row.confidence,
@@ -1067,6 +1074,34 @@ def fetch_latest_rates_for_party(party_name: str) -> dict[str, dict]:
     return rate_map
 
 
+def fetch_party_state(party_name: str) -> str:
+    """Look up the debtor's state from the Supabase ledgers row.
+
+    Filters ledgers by name + group_name (Sundry Debtors) and returns the `state`
+    column. Used to choose intra-state (CGST+SGST) vs inter-state (IGST) GST.
+    Returns "" when not configured / not found so callers can fall back to default.
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY or not party_name:
+        return ""
+    endpoint = f"{SUPABASE_URL.rstrip('/')}/rest/v1/{SALE_LEDGER_TABLE}"
+    try:
+        resp = supabase_get(
+            endpoint,
+            {
+                "select": "state",
+                "name": f"eq.{party_name}",
+                "group_name": f"eq.{SALE_DEBTOR_GROUP}",
+                "limit": "1",
+            },
+        )
+        rows = resp.json() if resp.ok and resp.text else []
+    except Exception:
+        return ""
+    if isinstance(rows, list) and rows:
+        return str(rows[0].get("state", "") or "").strip()
+    return ""
+
+
 def fetch_fallback_rate_for_item(party_name: str, item_name: str) -> dict | None:
     """Most recent rate for this item from a DIFFERENT party."""
     if not SUPABASE_URL or not SUPABASE_KEY or not item_name:
@@ -1111,8 +1146,21 @@ def parse_sale_quantity(qty_text: str) -> float:
     return float(match.group(1)) if match else 0.0
 
 
-def build_sale_voucher_payload(company_name: str, party_name: str, rows: list[dict]) -> tuple[dict, list[dict]]:
-    """Build a GST SALE voucher (same envelope as purchase) from matched sale rows."""
+def format_sale_match_score(score: float) -> str:
+    """Match-score percent string, identical formatting to the purchase path."""
+    rounded = round(float(score or 0), 2)
+    if abs(rounded - round(rounded)) < 0.001:
+        return f"{int(round(rounded))}%"
+    return f"{rounded:.2f}%"
+
+
+def build_sale_voucher_payload(company_name: str, party_name: str, rows: list[dict]) -> tuple[dict, list[dict], dict]:
+    """Build a GST SALE voucher (same envelope as purchase) from matched sale rows.
+
+    Returns (queue_request_payload, priced_items, source_payload). The source_payload
+    mirrors the purchase path: {"items": [<voucher item> + provenance]} so the
+    push_queue row records how each line was matched and where its rate came from.
+    """
     item_names = [
         str(r.get("stock_matched", "") or "").strip()
         for r in rows
@@ -1121,6 +1169,7 @@ def build_sale_voucher_payload(company_name: str, party_name: str, rows: list[di
     rate_map = build_sale_rate_map(party_name, item_names)
 
     priced_items: list[dict] = []
+    source_items: list[dict] = []
     for row in rows:
         name = str(row.get("stock_matched", "") or "").strip()
         if not name or name == "NO MATCH":
@@ -1131,34 +1180,64 @@ def build_sale_voucher_payload(company_name: str, party_name: str, rows: list[di
         info = rate_map.get(name)
         rate = round(float(info["rate"]), 2) if info else 0.0
         discount_pct = round(float(info.get("discount_pct", 0) or 0), 2) if info else 0.0
-        amount = round(quantity * rate, 2)
-        priced_items.append(
+        # Amount is NET: deduct this line's own discount % from the gross (qty x rate).
+        gross = round(quantity * rate, 2)
+        amount = round(gross * (1 - discount_pct / 100.0), 2)
+        rate_source = info["source"] if info else "none"
+        voucher_item = {
+            "stock_item_name": name,
+            "quantity": quantity,
+            "rate": rate,
+            "amount": amount,
+            "discount_pct": discount_pct,
+            "unit": SALE_DEFAULT_UNIT,
+            "godown_name": "Main Location",
+        }
+        priced_items.append({**voucher_item, "rate_source": rate_source})
+        source_items.append(
             {
-                "stock_item_name": name,
-                "quantity": quantity,
-                "rate": rate,
-                "amount": amount,
-                "discount_pct": discount_pct,
-                "unit": SALE_DEFAULT_UNIT,
-                "godown_name": "Main Location",
-                "rate_source": info["source"] if info else "none",
+                **voucher_item,
+                "source": "Matching_Algorithem",
+                "score": format_sale_match_score(row.get("match_score")),
+                "rate_source": rate_source,
             }
         )
 
+    # Net subtotal (each item amount is already after its discount).
     subtotal = round(sum(item["amount"] for item in priced_items), 2)
-    cgst = round(subtotal * SALE_GST_RATE, 2)
-    sgst = round(subtotal * SALE_GST_RATE, 2)
-    total = round(subtotal + cgst + sgst, 2)
+    # discount_total = sum of per-item rupee discounts (gross - net).
+    discount_total = round(
+        sum(
+            round(item["quantity"] * item["rate"], 2) - item["amount"]
+            for item in priced_items
+        ),
+        2,
+    )
+
+    # GST is charged on the NET (discounted) subtotal. Intra-state (party in the
+    # company's home state) books CGST+SGST; otherwise inter-state IGST.
+    party_state = fetch_party_state(party_name)
+    is_intra_state = party_state.strip().casefold() == SALE_HOME_STATE.strip().casefold()
+    tax_entries: list[dict] = []
+    if is_intra_state:
+        cgst = round(subtotal * SALE_GST_RATE, 2)
+        sgst = round(subtotal * SALE_GST_RATE, 2)
+        if cgst > 0:
+            tax_entries.append({"ledger_name": "CGST", "amount": cgst, "is_deemed_positive": False})
+        if sgst > 0:
+            tax_entries.append({"ledger_name": "SGST", "amount": sgst, "is_deemed_positive": False})
+    else:
+        igst = round(subtotal * SALE_IGST_RATE, 2)
+        if igst > 0:
+            tax_entries.append({"ledger_name": "IGST", "amount": igst, "is_deemed_positive": False})
+    total = round(subtotal + sum(entry["amount"] for entry in tax_entries), 2)
     voucher_number = f"SALE-{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
     ledger_entries = [
         {"ledger_name": party_name, "amount": total, "is_deemed_positive": True},
         {"ledger_name": SALE_LEDGER_NAME, "amount": subtotal, "is_deemed_positive": False},
     ]
-    if cgst > 0:
-        ledger_entries.append({"ledger_name": "CGST", "amount": cgst, "is_deemed_positive": False})
-    if sgst > 0:
-        ledger_entries.append({"ledger_name": "SGST", "amount": sgst, "is_deemed_positive": False})
+    ledger_entries.extend(tax_entries)
 
     voucher_payload = {
         "party_name": party_name,
@@ -1166,12 +1245,18 @@ def build_sale_voucher_payload(company_name: str, party_name: str, rows: list[di
         "voucher_number": voucher_number,
         "reference": voucher_number,
         "narration": f"Sales challan {voucher_number}",
+        "discount_total": discount_total,
         "voucher_type": SALE_VOUCHER_TYPE,
         "inventory_ledger_name": SALE_LEDGER_NAME,
         "ledger_entries": ledger_entries,
         "items": [{k: v for k, v in item.items() if k != "rate_source"} for item in priced_items],
     }
-    return {"company_name": company_name, "voucher_payload": voucher_payload}, priced_items
+    source_payload = {"items": source_items}
+    return (
+        {"company_name": company_name, "voucher_payload": voucher_payload, "source_payload": source_payload},
+        priced_items,
+        source_payload,
+    )
 
 
 def _runpod_is_serverless() -> bool:
@@ -1892,6 +1977,13 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                             # was detected, but flag it clearly in the response.
                             if not invoice_number:
                                 payload["invoice"] = "not detected"
+                            # Persist the duplicacy result on the enqueued voucher so it
+                            # is visible on the push_queue row's voucher_payload.
+                            tally_payload = queue_request_payload.get("tally_payload")
+                            if isinstance(tally_payload, dict) and isinstance(
+                                tally_payload.get("voucher_payload"), dict
+                            ):
+                                tally_payload["voucher_payload"]["invoice_exists"] = invoice_exists
                             queue_response = post_to_push_queue(queue_request_payload, company_name)
                             payload["queue_response"] = queue_response
                             payload["saved_queue_response"] = str(
@@ -2001,7 +2093,7 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                             "reason": "No party_name matched in Supabase; cannot build a Sales voucher.",
                         }
                     else:
-                        queue_request_payload, sale_items = build_sale_voucher_payload(
+                        queue_request_payload, sale_items, sale_source_payload = build_sale_voucher_payload(
                             options["company_name"], party_name, payload.get("rows", [])
                         )
                         if not sale_items:
@@ -2013,6 +2105,7 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                         else:
                             payload["sale_voucher_payload"] = queue_request_payload["voucher_payload"]
                             payload["sale_rate_items"] = sale_items
+                            payload["sale_source_payload"] = sale_source_payload
                             payload["queue_response"] = post_to_push_queue(
                                 queue_request_payload, options["company_name"]
                             )

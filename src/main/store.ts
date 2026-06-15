@@ -46,6 +46,7 @@ export interface AppConfig {
   syncToDate: string;
   syncPaused: boolean;
   companies: Company[];
+  migratedToHybridV1: boolean;
 }
 
 export interface TallyCompanySelection {
@@ -64,7 +65,7 @@ export const store = new Store<AppConfig>({
     apiKey: "",
     controlPlaneUrl: "",
     controlPlaneApiKey: "",
-    syncIngestMode: "render",
+    syncIngestMode: "hybrid",
     syncIngestUrl: "",
     syncIngestKey: "",
     syncContractVersion: 1,
@@ -75,6 +76,7 @@ export const store = new Store<AppConfig>({
     syncToDate: "",
     syncPaused: false,
     companies: [],
+    migratedToHybridV1: false,
   },
 });
 

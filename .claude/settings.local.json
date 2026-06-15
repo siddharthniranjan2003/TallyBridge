@@ -1,7 +1,28 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:documenter.getpostman.com)"
+      "WebFetch(domain:documenter.getpostman.com)",
+      "Bash(parsing\\\\.venv-ocrvl\\\\Scripts\\\\pip install *)",
+      "PowerShell($bytes = [System.IO.File]::ReadAllBytes\\(\"D:\\\\Downloads\\\\new_purchase_1.pdf\"\\); $response = Invoke-WebRequest -Uri \"http://127.0.0.1:5003/?type=purchase&company=K%20V%20ENTERPRISES&check=duplicacy&ocr=vlm\" -Method POST -Body $bytes -ContentType \"application/pdf\" -TimeoutSec 600; $response.Content)",
+      "PowerShell(Start-Sleep -Seconds 4; $bytes = [System.IO.File]::ReadAllBytes\\(\"D:\\\\Downloads\\\\new_purchase_1.pdf\"\\); $response = Invoke-WebRequest -Uri \"http://127.0.0.1:5003/?type=purchase&company=K%20V%20ENTERPRISES&check=duplicacy&ocr=vlm\" -Method POST -Body $bytes -ContentType \"application/pdf\" -TimeoutSec 600; $response.Content)",
+      "PowerShell(Start-Sleep -Seconds 4; $bytes = [System.IO.File]::ReadAllBytes\\(\"D:\\\\Downloads\\\\new_purchase_1.pdf\"\\); $response = Invoke-WebRequest -Uri \"http://127.0.0.1:5003/?type=purchase&company=K%20V%20ENTERPRISES&check=duplicacy&ocr=vlm\" -Method POST -Body $bytes -ContentType \"application/pdf\" -TimeoutSec 600; $response.Content | ConvertFrom-Json | Select-Object ok, status, vendor, duplicacy -ExpandProperty ocr | Select-Object ok, status, vendor, duplicacy, @{n='invoice_number';e={$_.header.invoice_number}}, @{n='warnings';e={$_.warnings}})",
+      "PowerShell($bytes = [System.IO.File]::ReadAllBytes\\(\"D:\\\\Downloads\\\\new_purchase_1.pdf\"\\); $r = Invoke-RestMethod -Uri \"http://127.0.0.1:5003/?type=purchase&company=K%20V%20ENTERPRISES&check=duplicacy&ocr=vlm\" -Method POST -Body $bytes -ContentType \"application/pdf\" -TimeoutSec 600; $r | ConvertTo-Json -Depth 1)",
+      "Bash(git push *)",
+      "PowerShell(netstat *)",
+      "Bash(timeout 8 npx tsx src/index.ts)",
+      "Bash(npx tsx *)",
+      "Bash(curl -s http://localhost:3001/)",
+      "Read(//tmp/**)",
+      "Bash(timeout 10 node --import tsx/esm src/index.ts)",
+      "PowerShell(Test-NetConnection *)",
+      "PowerShell(Get-Process *)",
+      "Bash(node -e \"require\\('./dist/index.js'\\)\")",
+      "Bash(node dist/index.js)",
+      "Bash(curl -sv http://localhost:3001/health)",
+      "Bash(netstat -ano)",
+      "PowerShell(Invoke-RestMethod -Uri \"http://localhost:3001/health\" -Method Get)",
+      "mcp__claude_ai_Supabase__execute_sql",
+      "mcp__miro__diagram_get_dsl"
     ]
   }
 }

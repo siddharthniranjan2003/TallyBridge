@@ -14,6 +14,8 @@ extraResources:
     to: python/
   - from: assets/
     to: assets/
+  - from: python-dist/tallybridge-engine.exe
+    to: python-runtime/tallybridge-engine.exe
 
 win:
   icon: assets/icon.ico
@@ -29,4 +31,7 @@ nsis:
   installerIcon: assets/icon.ico
   runAfterFinish: true
 
-publish: null
+publish:
+  provider: github
+  owner: siddharthniranjan2003
+  repo: TallyBridge

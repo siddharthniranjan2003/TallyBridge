@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // Config
   getConfig: () => ipcRenderer.invoke("get-config"),
   saveSettings: (settings: any) => ipcRenderer.invoke("save-settings", settings),
+  getAppVersion: () => ipcRenderer.invoke("get-app-version"),
 
   // Companies
   addCompany: (selection: { name: string; guid?: string; formalName?: string }) =>

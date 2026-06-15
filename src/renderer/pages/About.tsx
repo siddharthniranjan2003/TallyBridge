@@ -1,4 +1,11 @@
+import { useEffect, useState } from "react";
+
 export default function About() {
+  const [version, setVersion] = useState("");
+  useEffect(() => {
+    window.electronAPI.getAppVersion().then(setVersion);
+  }, []);
+
   return (
     <div style={{ padding: 28, maxWidth: 440 }}>
       <h1 style={{ fontSize: 20, fontWeight: 600, marginBottom: 6 }}>TallyBridge</h1>
@@ -8,7 +15,7 @@ export default function About() {
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {[
-          ["Version", "1.0.0"],
+          ["Version", version || "—"],
           ["Built with", "Electron · React · TypeScript · Python"],
           ["TallyPrime API", "XML over HTTP (localhost:9000)"],
           ["Support", "support@yourcompany.com"],

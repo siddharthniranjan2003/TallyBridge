@@ -249,6 +249,7 @@ class PredictionRow:
     similarity: int
     confidence: int
     alternates: list[str]
+    match_score: float = 0.0
 
 
 def load_image_b64(path: Path) -> str:
@@ -1603,6 +1604,17 @@ def build_prediction_rows(items: list[OCRItem], expected: list[str], family_view
         pre_fuzzy_name = build_match_query_text(item)
         matches = match_sets[idx]
         predicted_name = matches[0].name if matches else ""
+        # Fuzzy similarity (0-100) between the normalized OCR read and the matched
+        # stock name. This is the string match quality, distinct from the matcher's
+        # internal ranking score (which adds unbounded domain bonuses and can exceed 100).
+        if predicted_name:
+            query_norm = normalize_text(item.description)
+            predicted_norm = normalize_text(predicted_name)
+            match_score = float(
+                max(int(fuzz.WRatio(query_norm, predicted_norm)), int(fuzz.token_set_ratio(query_norm, predicted_norm)))
+            )
+        else:
+            match_score = 0.0
         expected_name = expected[idx] if idx < len(expected) else ""
         status, similarity = compare_against_reference(predicted_name, expected_name)
         rows.append(
@@ -1618,6 +1630,7 @@ def build_prediction_rows(items: list[OCRItem], expected: list[str], family_view
                 similarity=similarity,
                 confidence=confidence_from_matches(matches),
                 alternates=[match.name for match in matches[1:3]],
+                match_score=match_score,
             )
         )
     return rows

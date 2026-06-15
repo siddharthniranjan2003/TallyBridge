@@ -1370,6 +1370,21 @@ def _extract_customer_name(lines: list[OcrLine], vendor: str) -> str:
 
 
 def _extract_tax_entries(lines: list[OcrLine], vendor: str) -> list[dict[str, Any]]:
+    if vendor == "WIKUS":
+        # WIKUS has no consolidated 'Total Tax Amount' summary table; IGST is printed
+        # per item line as "<rate> % <amount>" (e.g. "18.00 % 963.00"), with the CGST
+        # and SGST columns blank. Sum the per-line IGST amounts. WIKUS bills are always
+        # inter-state (Maharashtra -> Haryana) => IGST only. Recovering the tax here
+        # also fixes the item amounts: without it tax_total is 0, so the builder's
+        # adjust_items_to_target_subtotal rescales the net lines up to the gross total.
+        igst_total = 0.0
+        for line in lines:
+            match = re.search(r"\b\d+(?:\.\d+)?\s*%\s+([0-9][0-9,]*\.\d{1,2})", line.text)
+            if match:
+                igst_total = round(igst_total + _float_from_token(match.group(1)), 2)
+        if igst_total > 0:
+            return [{"ledger_name": "IGST", "amount": igst_total}]
+
     joined = _joined_text(lines)
     summary_patterns = {
         "IGST": [
@@ -1460,6 +1475,74 @@ def _extract_invoice_total(lines: list[OcrLine], vendor: str) -> float:
     return 0.0
 
 
+def _gather_tables(vlm_result: dict[str, Any]) -> list[list[list[str]]]:
+    pages = vlm_result.get("page_markdown")
+    if not isinstance(pages, list) or not pages:
+        pages = [vlm_result.get("markdown", "") or ""]
+    tables: list[list[list[str]]] = []
+    for markdown in pages:
+        markdown = str(markdown or "")
+        tables.extend(_extract_html_tables(markdown))
+        tables.extend(_extract_markdown_tables(markdown))
+    return tables
+
+
+def _cell_amount(cell: str) -> float:
+    match = AMOUNT_RE.search(cell or "")
+    return _float_from_token(match.group(0)) if match else 0.0
+
+
+def _extract_tax_summary(tables: list[list[list[str]]]) -> tuple[float, list[dict[str, Any]], float]:
+    """Read GST from a structured tax-summary table:
+        HSN/SAC | Taxable Value | <IGST|CGST|SGST: Rate, Amount>... | Total Tax Amount
+    (e.g. CP / RR / TOTEM page-2 bottom). These vendors print the tax LABEL in a column
+    header and the AMOUNT in a separate data cell, so the adjacency-based
+    _extract_tax_entries / _extract_invoice_total below cannot see "IGST <amount>"
+    together. Reading by column is reliable. Returns (taxable_value, tax_entries,
+    total_tax), or (0.0, [], 0.0) when no such table is present."""
+    for table in tables:
+        header = next(
+            (
+                row for row in table
+                if "TAXABLE VALUE" in " ".join(row).upper()
+                and "TOTAL TAX AMOUNT" in " ".join(row).upper()
+            ),
+            None,
+        )
+        if header is None:
+            continue
+        header_text = " ".join(header).upper()
+        order = [tax for tax in ("IGST", "CGST", "SGST") if tax in header_text]
+        if not order:
+            continue
+        # Prefer the table's own "Total" row (handles multi-HSN bills); else the last
+        # HSN data row. Both keep blank rate cells, so columns line up by fixed index:
+        # [label, Taxable, (Rate, Amount) per tax type, Total Tax Amount].
+        chosen: list[str] | None = None
+        for row in table:
+            if not row:
+                continue
+            head = row[0].strip().upper()
+            if head == "TOTAL":
+                chosen = row
+                break
+            if re.fullmatch(r"\d{4,}", row[0].strip()):
+                chosen = row
+        if not chosen or len(chosen) < 4:
+            continue
+        entries: list[dict[str, Any]] = []
+        for index, ledger in enumerate(order):
+            amount_index = 3 + 2 * index  # label, taxable, then (rate, amount) pairs
+            if amount_index >= len(chosen) - 1:
+                break
+            amount = round(_cell_amount(chosen[amount_index]), 2)
+            if amount > 0:
+                entries.append({"ledger_name": ledger, "amount": amount})
+        if entries:
+            return round(_cell_amount(chosen[1]), 2), entries, round(_cell_amount(chosen[-1]), 2)
+    return 0.0, [], 0.0
+
+
 def parse_vlm_invoice(vlm_result: dict[str, Any]) -> dict[str, Any]:
     lines = _trim_duplicate_copy_lines(build_ocr_lines(vlm_result))
     if not lines:
@@ -1476,6 +1559,13 @@ def parse_vlm_invoice(vlm_result: dict[str, Any]) -> dict[str, Any]:
         warnings.append(str(exc))
 
     discount_percent, discount_amount = _extract_discount_fields(lines)
+    # Structured GST summary table (e.g. CP/RR/TOTEM page-2 bottom) is the reliable
+    # source for tax + grand total when present; its columnar layout defeats the
+    # adjacency-based _extract_tax_entries / _extract_invoice_total.
+    summary_taxable, summary_tax_entries, summary_total_tax = _extract_tax_summary(_gather_tables(vlm_result))
+    invoice_total = _extract_invoice_total(lines, vendor)
+    if invoice_total <= 0 and summary_taxable > 0:
+        invoice_total = round(summary_taxable + summary_total_tax, 2)
     header_data = {
         "vendor_name": vendor_name,
         "invoice_number": _extract_invoice_number(lines, vendor),
@@ -1483,8 +1573,8 @@ def parse_vlm_invoice(vlm_result: dict[str, Any]) -> dict[str, Any]:
         "customer_name": _extract_customer_name(lines, vendor),
         "discount_percent": discount_percent,
         "discount_amount": discount_amount,
-        "invoice_total": _extract_invoice_total(lines, vendor),
-        "tax_entries": _extract_tax_entries(lines, vendor),
+        "invoice_total": invoice_total,
+        "tax_entries": summary_tax_entries or _extract_tax_entries(lines, vendor),
         "round_off": _extract_round_off(lines),
     }
     return {

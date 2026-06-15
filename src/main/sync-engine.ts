@@ -363,6 +363,7 @@ export class SyncEngine {
         TB_SYNC_TO_DATE: syncToDate,
         TB_SYNC_TRIGGER: trigger,
         TB_MANUAL_BACKFILL_PENDING: shouldUseManualBackfill ? "1" : "",
+        TB_ENABLE_INCREMENTAL_VOUCHER_SYNC: "true",
         BACKEND_URL: controlPlaneUrl,
         API_KEY: controlPlaneApiKey,
         CONTROL_PLANE_URL: controlPlaneUrl,

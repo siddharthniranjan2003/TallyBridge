@@ -19,6 +19,7 @@ declare global {
     electronAPI: {
       getConfig: () => Promise<any>;
       saveSettings: (s: any) => Promise<any>;
+      getAppVersion: () => Promise<string>;
       addCompany: (selection: TallyCompanySelection) => Promise<{ success: boolean; error?: string }>;
       removeCompany: (id: string) => Promise<any>;
       getCompanies: () => Promise<any[]>;

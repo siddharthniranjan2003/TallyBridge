@@ -1482,8 +1482,21 @@ def build_voucher_payload(
     tax_total = round2(sum((decimal_value(entry["amount"]) for entry in tax_entries), Decimal("0")))
     invoice_total = round2(decimal_value(header_data.get("invoice_total", 0)))
 
+    # A discount is present if any line carries a % or a single total discount is
+    # stated in the header. When discounted, we make each item amount NET below and
+    # recompute GST on that net, so we must NOT anchor item amounts to the printed
+    # invoice_total (that would re-scale the rate and hide the discount).
+    has_discount = (
+        any(decimal_value(getattr(item, "discount_pct", 0) or 0) > 0 for item in raw_items)
+        or round2(decimal_value(header_data.get("discount_amount", 0) or 0)) != 0
+        or decimal_value(header_data.get("discount_percent", 0) or 0) > 0
+    )
+    # The document's pre-tax taxable base, used to infer each tax line's effective
+    # rate so GST can be recomputed on our net subtotal.
+    doc_taxable = round2(invoice_total - tax_total) if invoice_total > 0 else Decimal("0")
+
     items = raw_items
-    if invoice_total > 0 and tax_total >= 0:
+    if not has_discount and invoice_total > 0 and tax_total >= 0:
         target_subtotal = round2(invoice_total - tax_total)
         items = adjust_items_to_target_subtotal(items, target_subtotal)
 
@@ -1522,9 +1535,85 @@ def build_voucher_payload(
 
     party_name = resolve_party_ledger_name(vendor, ledgers)
     inventory_ledger_name = resolve_purchase_ledger_name(ledgers)
-    subtotal = round2(sum((decimal_value(item["amount"]) for item in matched_items), Decimal("0")))
-    if invoice_total <= 0:
-        invoice_total = round2(subtotal + tax_total)
+
+    voucher_number = normalize_space(header_data.get("invoice_number", ""))
+    voucher_date = parse_date_to_iso(str(header_data.get("invoice_date", "")))
+    item_discounts = compute_item_discounts(items, header_data)
+    discount_total = round2(sum(item_discounts, Decimal("0")))
+
+    voucher_items = []
+    net_amounts: list[Decimal] = []
+    for index, item in enumerate(matched_items):
+        discount_value = item_discounts[index] if index < len(item_discounts) else Decimal("0")
+        # Derived effective percent: rupee discount over gross (rate x qty). Recovers
+        # the original column percent in the per-line case and yields a sensible
+        # effective percent when a single total was distributed pro-rata.
+        gross = round2(decimal_value(item["rate"]) * decimal_value(item["quantity"]))
+        discount_pct = round2(discount_value / gross * Decimal("100")) if gross > 0 else Decimal("0")
+        # Make the amount NET. Detect whether the parsed amount is already net
+        # (leave it), still gross (deduct the discount), or neither (trust parsed).
+        parsed_amount = round2(decimal_value(item["amount"]))
+        if discount_value <= 0:
+            net_amount = parsed_amount
+        else:
+            expected_net = round2(gross - discount_value)
+            tol = max(Decimal("1"), round2(gross * Decimal("0.01")))
+            if abs(parsed_amount - expected_net) <= tol:
+                net_amount = parsed_amount            # already net -> leave
+            elif abs(parsed_amount - gross) <= tol:
+                net_amount = expected_net             # still gross -> deduct
+            else:
+                net_amount = parsed_amount            # neither -> trust parsed
+        net_amounts.append(net_amount)
+        voucher_items.append(
+            {
+                "stock_item_name": item["stock_item_name"],
+                "quantity": item["quantity"],
+                "rate": item["rate"],
+                "amount": float(net_amount),
+                "unit": item["unit"],
+                "discount": float(discount_value),
+                "discount_pct": float(discount_pct),
+                "godown_name": "Main Location",
+            }
+        )
+
+    # Net subtotal, then GST recomputed on the net (GST is charged after discount).
+    subtotal = round2(sum(net_amounts, Decimal("0")))
+    doc_tax_total = round2(sum((decimal_value(e["amount"]) for e in tax_entries), Decimal("0")))
+    # The document's tax line is often unreliable (some vendors print the *rate*,
+    # e.g. "18", instead of the rupee amount). When the printed grand total is
+    # available we trust (grand_total - net) as the real tax and split it across the
+    # document's tax ledgers (CGST/SGST split equally; a lone IGST takes it all).
+    implied_tax = round2(invoice_total - subtotal) if invoice_total > 0 else Decimal("-1")
+    if (
+        tax_entries
+        and implied_tax > 0
+        and (doc_tax_total <= 0 or abs(doc_tax_total - implied_tax) > implied_tax * Decimal("0.2"))
+    ):
+        count = len(tax_entries)
+        per = round2(implied_tax / count)
+        recomputed_tax_entries = []
+        running = Decimal("0")
+        for idx, entry in enumerate(tax_entries):
+            amt = per if idx < count - 1 else round2(implied_tax - running)
+            running += amt
+            recomputed_tax_entries.append({"ledger_name": entry["ledger_name"], "amount": float(amt)})
+    elif has_discount and doc_taxable > 0:
+        # Printed total missing/uninformative: keep each tax line's document rate
+        # (inferred from the doc's taxable base) and scale to the discounted subtotal.
+        scale = subtotal / doc_taxable
+        recomputed_tax_entries = [
+            {"ledger_name": e["ledger_name"], "amount": float(round2(decimal_value(e["amount"]) * scale))}
+            for e in tax_entries
+        ]
+    else:
+        recomputed_tax_entries = [
+            {"ledger_name": e["ledger_name"], "amount": float(round2(decimal_value(e["amount"])))}
+            for e in tax_entries
+        ]
+    tax_total = round2(sum((decimal_value(e["amount"]) for e in recomputed_tax_entries), Decimal("0")))
+    invoice_total = round2(subtotal + tax_total)
 
     ledger_entries = [
         {
@@ -1538,7 +1627,7 @@ def build_voucher_payload(
             "is_deemed_positive": True,
         },
     ]
-    for entry in tax_entries:
+    for entry in recomputed_tax_entries:
         ledger_entries.append(
             {
                 "ledger_name": entry["ledger_name"],
@@ -1547,30 +1636,6 @@ def build_voucher_payload(
             }
         )
 
-    voucher_number = normalize_space(header_data.get("invoice_number", ""))
-    voucher_date = parse_date_to_iso(str(header_data.get("invoice_date", "")))
-    item_discounts = compute_item_discounts(items, header_data)
-    discount_total = round2(sum(item_discounts, Decimal("0")))
-    voucher_items = []
-    for index, item in enumerate(matched_items):
-        discount_value = item_discounts[index] if index < len(item_discounts) else Decimal("0")
-        # Derived effective percent: rupee discount over gross (rate x qty). Recovers
-        # the original column percent in the per-line case and yields a sensible
-        # effective percent when a single total was distributed pro-rata.
-        gross = round2(decimal_value(item["rate"]) * decimal_value(item["quantity"]))
-        discount_pct = round2(discount_value / gross * Decimal("100")) if gross > 0 else Decimal("0")
-        voucher_items.append(
-            {
-                "stock_item_name": item["stock_item_name"],
-                "quantity": item["quantity"],
-                "rate": item["rate"],
-                "amount": item["amount"],
-                "unit": item["unit"],
-                "discount": float(discount_value),
-                "discount_pct": float(discount_pct),
-                "godown_name": "Main Location",
-            }
-        )
     voucher_payload = {
         "party_name": party_name,
         "date": voucher_date,

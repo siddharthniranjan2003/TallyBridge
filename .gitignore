@@ -10,3 +10,7 @@ src/python/build/
 git_status*.txt
 out*.txt
 backend/.env
+
+# graphify skill generated output
+src/graphify-out/
+graphify-out/
