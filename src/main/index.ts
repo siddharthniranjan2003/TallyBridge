@@ -91,7 +91,11 @@ app.whenReady().then(() => {
   if (syncEngine.isPaused()) {
     trayController.setStatus("paused");
   }
-  syncEngine.start();
+  // Defer the first sync so the startup voucher backfill doesn't collide with the
+  // app window and TallyPrime both still warming up. TallyPrime's gateway shares a
+  // single engine with its UI, so an immediate backfill freezes the user's first
+  // interactions; give them a head start before background reads begin.
+  setTimeout(() => syncEngine.start(), 8000);
   pushQueuePoller.start();
 
   if (!isDev) {

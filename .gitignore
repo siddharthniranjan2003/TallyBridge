@@ -14,3 +14,16 @@ backend/.env
 # graphify skill generated output
 src/graphify-out/
 graphify-out/
+
+# secrets (never commit)
+.env
+.env_clinet
+.env_client
+
+# local scratch / probe / report files
+_tb_*.py
+_*.json
+_*.xml
+*.canvas
+.tmp-userdata/
+.tmp-restore/

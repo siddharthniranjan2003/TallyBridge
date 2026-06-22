@@ -917,6 +917,31 @@ def render_pdf_bytes_to_jpeg_pages(pdf_bytes: bytes, dpi: int | None = None) -> 
     return result
 
 
+# DPI for the per-page JPEGs stored against the push_queue row (shown in the app's
+# queue/history Image tab). Lower than the OCR render DPI to keep the forwarded
+# payload small; still legible on a phone.
+INVOICE_IMAGE_DPI = int(env_value("INVOICE_IMAGE_DPI", "150"))
+
+
+def scanned_pages_b64(file_bytes: bytes) -> list[str]:
+    """Render an uploaded document to per-page JPEG base64 strings for storage.
+
+    A PDF becomes one JPEG per page; a single uploaded image becomes one entry.
+    Best-effort: any failure yields an empty list so it never blocks the push to
+    the backend queue (the voucher, not the image, is the source of truth)."""
+    try:
+        if is_pdf_bytes(file_bytes):
+            pages = render_pdf_bytes_to_jpeg_pages(file_bytes, dpi=INVOICE_IMAGE_DPI)
+        elif is_image_bytes(file_bytes):
+            pages = [file_bytes]
+        else:
+            return []
+        return [base64.b64encode(page).decode("ascii") for page in pages]
+    except Exception as exc:
+        print(f"[scanned_pages_b64] render failed, skipping images: {exc}")
+        return []
+
+
 def markdown_to_basic_html(markdown: str) -> str:
     lines = str(markdown or "").splitlines()
     parts: list[str] = [
@@ -1044,6 +1069,29 @@ def _supabase_session() -> requests.Session:
     session = requests.Session()
     session.trust_env = False
     return session
+
+
+def delete_scan_job(job_id: str | None) -> None:
+    """Drain the shared scan_jobs row for this scan so the app's "Processing…"
+    badge clears on every client — the realtime DELETE reaches the scanning phone
+    AND any open web session. Called right after the push_queue invoice row is
+    inserted (its arrival is what the badge was waiting on). Best-effort: on
+    failure, clients drop the row at their 300s safety TTL. No-op when the request
+    carried no job_id (older app build, or a direct/manual call). job_id is
+    validated as a UUID before it goes into the PostgREST filter."""
+    if not (job_id and SUPABASE_URL and SUPABASE_KEY):
+        return
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", job_id):
+        return
+    try:
+        url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/scan_jobs?id=eq.{job_id}"
+        _supabase_session().delete(
+            url,
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+            timeout=PUSH_QUEUE_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        pass
 
 
 def fetch_latest_rates_for_party(party_name: str) -> dict[str, dict]:
@@ -1190,7 +1238,7 @@ def build_sale_voucher_payload(company_name: str, party_name: str, rows: list[di
             "rate": rate,
             "amount": amount,
             "discount_pct": discount_pct,
-            "unit": SALE_DEFAULT_UNIT,
+            "unit": str(row.get("unit") or "").strip() or SALE_DEFAULT_UNIT,
             "godown_name": "Main Location",
         }
         priced_items.append({**voucher_item, "rate_source": rate_source})
@@ -1506,6 +1554,40 @@ def load_sale_stock(pipeline, company_name: str | None):
     return pipeline.load_stock(pipeline.STOCK_CSV)
 
 
+def build_stock_unit_map(stock) -> dict[str, str]:
+    """name(casefold) -> unit, from the loaded stock catalog DataFrame.
+
+    Lets each matched sale line carry its real Tally unit (stock_items.unit) so
+    the pushed voucher (and the Tally XML built from it) uses the same unit as
+    the stock master, instead of the SALE_DEFAULT_UNIT fallback."""
+    unit_map: dict[str, str] = {}
+    try:
+        records = list(stock[["name", "unit"]].itertuples(index=False, name=None))
+    except Exception:
+        return unit_map
+    for name, unit in records:
+        key = collapse_spaces(str(name)).casefold()
+        value = collapse_spaces(str(unit))
+        if key and value:
+            unit_map.setdefault(key, value)
+    return unit_map
+
+
+def apply_stock_units(rows: list[dict], stock) -> None:
+    """Stamp each serialized row's matched-stock unit (best-effort).
+
+    Rows without a stock match (or whose stock has no unit) are left untouched so
+    build_sale_voucher_payload falls back to SALE_DEFAULT_UNIT for them."""
+    unit_map = build_stock_unit_map(stock)
+    if not unit_map:
+        return
+    for row in rows:
+        matched = collapse_spaces(str(row.get("stock_matched", "") or "")).casefold()
+        unit = unit_map.get(matched)
+        if unit:
+            row["unit"] = unit
+
+
 def run_pipeline_for_image(
     image_path: Path, benchmark_path: Path | None = None, company_name: str | None = None
 ) -> dict:
@@ -1523,6 +1605,7 @@ def run_pipeline_for_image(
 
     prediction_rows = pipeline.build_prediction_rows(items, expected, family_views)
     rows = serialize_rows(prediction_rows)
+    apply_stock_units(rows, stock)
     summary = summarize_rows(rows, pipeline.MODEL, elapsed)
     gsheet = build_gsheet_rows(rows)
     party_name_match = extract_party_name(image_path, pipeline)
@@ -1776,6 +1859,10 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             current_path = normalized_request_path(self.path)
+            # The app tags each scan upload with ?job_id=<scan_jobs row id> so we
+            # can delete that exact row once the invoice lands, draining the
+            # "Processing…" badge on every client. Absent for non-app callers.
+            job_id = optional_query_string(self.path, "job_id")
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > MAX_UPLOAD_BYTES:
                 self._send_json(400, {"ok": False, "error": "Bad request size"})
@@ -1984,8 +2071,12 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                                 tally_payload.get("voucher_payload"), dict
                             ):
                                 tally_payload["voucher_payload"]["invoice_exists"] = invoice_exists
+                            # Forward the scanned page images so the backend can store
+                            # them in GCS mapped to the new push_queue row id.
+                            queue_request_payload["scanned_images_b64"] = scanned_pages_b64(file_bytes)
                             queue_response = post_to_push_queue(queue_request_payload, company_name)
                             payload["queue_response"] = queue_response
+                            delete_scan_job(job_id)
                             payload["saved_queue_response"] = str(
                                 save_result(
                                     OUTPUT_DIR,
@@ -2106,9 +2197,14 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                             payload["sale_voucher_payload"] = queue_request_payload["voucher_payload"]
                             payload["sale_rate_items"] = sale_items
                             payload["sale_source_payload"] = sale_source_payload
+                            # Forward the scanned page images (rendered per-page from
+                            # the original upload) so the backend stores them in GCS
+                            # mapped to the new push_queue row id.
+                            queue_request_payload["scanned_images_b64"] = scanned_pages_b64(body)
                             payload["queue_response"] = post_to_push_queue(
                                 queue_request_payload, options["company_name"]
                             )
+                            delete_scan_job(job_id)
             self._send_json(200, payload)
         except Exception as exc:
             self._send_json(

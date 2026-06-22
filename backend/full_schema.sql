@@ -140,6 +140,7 @@ CREATE TABLE IF NOT EXISTS stock_items (
   closing_qty NUMERIC DEFAULT 0,
   closing_value NUMERIC DEFAULT 0,
   rate NUMERIC DEFAULT 0,
+  part_code TEXT,
   synced_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(company_id, name)
 );
@@ -203,6 +204,9 @@ CREATE TABLE IF NOT EXISTS push_queue (
   source_payload JSONB,
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'push_now', 'pushed', 'failed')),
+  -- App-set queue edit lifecycle tag (see supabase_push_queue_edit_state.sql).
+  edit_state TEXT
+    CHECK (edit_state IS NULL OR edit_state IN ('under_edit', 'edited')),
   error_message TEXT,
   tally_response JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

@@ -420,6 +420,27 @@ def parse_voucher_headers(xml_text: str) -> list:
 
 # ── stock summary ─────────────────────────────────────────────────
 
+def _stock_part_code(item: dict) -> str:
+    """Extract the stock item's part code (Tally 'Part No.' == Mailing Name).
+
+    Tally serializes it nested as
+        <MAILINGNAME.LIST><MAILINGNAME>07PU-...</MAILINGNAME></MAILINGNAME.LIST>
+    so a plain item.get("MAILINGNAME") misses it. Tolerates list wrappers and a
+    flat <MAILINGNAME> string for safety across Tally versions.
+    """
+    wrapper = item.get("MAILINGNAME.LIST")
+    if wrapper is None:
+        wrapper = item.get("MAILINGNAME")
+    if isinstance(wrapper, list):
+        wrapper = wrapper[0] if wrapper else None
+    if isinstance(wrapper, dict):
+        inner = wrapper.get("MAILINGNAME", wrapper)
+        if isinstance(inner, list):
+            inner = inner[0] if inner else None
+        return safe_str(inner)
+    return safe_str(wrapper)
+
+
 def parse_stock(xml_text: str) -> list:
     try:
         cleaned = clean_xml(xml_text)
@@ -458,6 +479,7 @@ def parse_stock(xml_text: str) -> list:
                     "closing_qty":   abs(safe_float(qty_val)),
                     "closing_value": abs(safe_float(value_val)),
                     "rate":          safe_float(rate_val),
+                    "part_code":     _stock_part_code(item),
                 })
 
             if result:
@@ -484,6 +506,7 @@ def parse_stock(xml_text: str) -> list:
                 "closing_qty":   abs(safe_float(qty_parts[0])) if qty_parts else 0.0,
                 "closing_value": abs(safe_float(values[i])) if i < len(values) else 0.0,
                 "rate":          safe_float(rates[i]) if i < len(rates) else 0.0,
+                "part_code":     "",
             })
         return result
     except Exception as e:

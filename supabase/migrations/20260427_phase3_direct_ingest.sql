@@ -147,6 +147,7 @@ BEGIN
       closing_qty,
       closing_value,
       rate,
+      part_code,
       synced_at
     )
     SELECT
@@ -157,6 +158,7 @@ BEGIN
       COALESCE(NULLIF(TRIM(stock_row->>'closing_qty'), '')::NUMERIC, 0),
       COALESCE(NULLIF(TRIM(stock_row->>'closing_value'), '')::NUMERIC, 0),
       COALESCE(NULLIF(TRIM(stock_row->>'rate'), '')::NUMERIC, 0),
+      NULLIF(TRIM(stock_row->>'part_code'), ''),
       v_synced_at
     FROM jsonb_array_elements(COALESCE(p_stock_items, '[]'::jsonb)) AS stock_row
     WHERE NULLIF(TRIM(stock_row->>'name'), '') IS NOT NULL
@@ -166,6 +168,7 @@ BEGIN
           closing_qty = EXCLUDED.closing_qty,
           closing_value = EXCLUDED.closing_value,
           rate = EXCLUDED.rate,
+          part_code = EXCLUDED.part_code,
           synced_at = EXCLUDED.synced_at;
 
     v_result := v_result || jsonb_build_object(

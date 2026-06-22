@@ -1,8 +1,14 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
-import { timingSafeEqual } from "crypto";
+import { timingSafeEqual, randomUUID } from "crypto";
 import { createClient } from "@supabase/supabase-js";
 import { supabase } from "../db/supabase.js";
 import { requireApiKey } from "../middleware/auth.js";
+import {
+  invoiceStorageEnabled,
+  uploadInvoicePages,
+  invoicePageExists,
+  invoicePageReadStream,
+} from "../db/gcs.js";
 
 // ── /reorder-levels client overrides (THIS endpoint only) ───────────────────
 // The reorder-levels endpoint serves a separate (client) Supabase project and
@@ -163,6 +169,11 @@ function normalizePushVoucherPayload(value: unknown) {
     return { error: "voucher_payload must be an object" };
   }
 
+  // Alien (unrecognized-supplier) vouchers carry raw OCR items the user will edit in
+  // the app before activating. Relax per-item validation so they are not rejected at
+  // enqueue, and persist the flag so the app/poller can mark them for review.
+  const alien = normalizeBoolean(raw.alien) ?? false;
+
   const voucherType = normalizeTrimmedString(raw.voucher_type);
   if (!voucherType) {
     return { error: "voucher_payload.voucher_type is required" };
@@ -237,32 +248,36 @@ function normalizePushVoucherPayload(value: unknown) {
     }
 
     const stockItemName = normalizeTrimmedString(rawItem.stock_item_name);
-    if (!stockItemName) {
+    if (!stockItemName && !alien) {
       return { error: `voucher_payload.items[${index}].stock_item_name is required` };
     }
 
-    const quantity = normalizeFiniteNumber(rawItem.quantity);
-    if (quantity == null || quantity <= 0) {
+    const quantityValue = normalizeFiniteNumber(rawItem.quantity);
+    if (!alien && (quantityValue == null || quantityValue <= 0)) {
       return { error: `voucher_payload.items[${index}].quantity must be greater than zero` };
     }
+    const quantity = quantityValue ?? 0;
 
-    const unit = normalizeTrimmedString(rawItem.unit);
-    if (!unit) {
+    const unitValue = normalizeTrimmedString(rawItem.unit);
+    if (!unitValue && !alien) {
       return { error: `voucher_payload.items[${index}].unit is required` };
     }
+    const unit = unitValue || "NOS";
 
-    const rate = normalizeFiniteNumber(rawItem.rate);
-    if (rate == null) {
+    const rateValue = normalizeFiniteNumber(rawItem.rate);
+    if (rateValue == null && !alien) {
       return { error: `voucher_payload.items[${index}].rate must be numeric` };
     }
+    const rate = rateValue ?? 0;
 
-    const amount = normalizeFiniteNumber(rawItem.amount);
-    if (amount == null) {
+    const amountValue = normalizeFiniteNumber(rawItem.amount);
+    if (amountValue == null && !alien) {
       return { error: `voucher_payload.items[${index}].amount must be numeric` };
     }
+    const amount = amountValue ?? 0;
 
     items.push({
-      stock_item_name: stockItemName,
+      stock_item_name: stockItemName || `Item ${index + 1}`,
       quantity,
       unit,
       rate,
@@ -286,6 +301,7 @@ function normalizePushVoucherPayload(value: unknown) {
       inventory_ledger_name: normalizeTrimmedString(raw.inventory_ledger_name),
       stock_ledger_name: normalizeTrimmedString(raw.stock_ledger_name),
       invoice_exists: normalizeBoolean(raw.invoice_exists) ?? false,
+      ...(alien ? { alien: true } : {}),
       ledger_entries,
       items,
     },
@@ -2259,6 +2275,13 @@ router.post("/push-queue", requireApiKey, async (req, res) => {
   const company_guid = requestPayload.company_guid ?? rawBody.company_guid ?? rawQuery.company_guid;
   const company_name = requestPayload.company_name ?? rawBody.company_name ?? rawQuery.company_name;
   const source_payload = rawBody.source_payload ?? null;
+  // Scanned page images (base64 JPEGs) the parsing service forwards alongside the
+  // voucher. Stored in GCS mapped to the inserted row id; never persisted to the DB.
+  const scannedImagesB64 = Array.isArray(rawBody.scanned_images_b64)
+    ? (rawBody.scanned_images_b64 as unknown[]).filter(
+        (s): s is string => typeof s === "string" && s.length > 0,
+      )
+    : [];
   const voucher_payload = requestPayload.voucher_payload
     ?? rawBody.voucher_payload
     ?? tallyPushQueuePayload?.voucher_payload
@@ -2281,12 +2304,26 @@ router.post("/push-queue", requireApiKey, async (req, res) => {
   }
 
   try {
+    // Generate the row id up front so the scanned images can be stored under it.
+    const rowId = randomUUID();
+    const pageCount = invoiceStorageEnabled ? scannedImagesB64.length : 0;
+    // Record the page count on source_payload so the app knows to show the Image
+    // tab and how many pages to request. Image bytes go to GCS, never the DB.
+    const sourcePayloadWithScan =
+      pageCount > 0
+        ? {
+            ...(source_payload && typeof source_payload === "object" ? source_payload : {}),
+            scan: { pages: pageCount },
+          }
+        : source_payload;
+
     const { data, error } = await supabase
       .from("push_queue")
       .insert({
+        id: rowId,
         company_id: companyLookup.companyId,
         voucher_payload: normalizedVoucher.voucher,
-        source_payload,
+        source_payload: sourcePayloadWithScan,
         status: "pending",
       })
       .select("id, status, created_at")
@@ -2296,6 +2333,17 @@ router.post("/push-queue", requireApiKey, async (req, res) => {
       throw new Error(`Push queue insert failed: ${error?.message}`);
     }
 
+    // Best-effort image storage — a failure here must not fail the enqueue, since
+    // the voucher (not the image) is the source of truth for the push.
+    if (pageCount > 0) {
+      try {
+        const buffers = scannedImagesB64.map((b64) => Buffer.from(b64, "base64"));
+        await uploadInvoicePages(data.id, buffers);
+      } catch (uploadErr: any) {
+        console.error("[PushQueue] Invoice image upload failed:", uploadErr?.message || uploadErr);
+      }
+    }
+
     return res.json({
       success: true,
       job: data,
@@ -2303,6 +2351,41 @@ router.post("/push-queue", requireApiKey, async (req, res) => {
   } catch (err: any) {
     const errorMessage = withSupabaseSchemaGuidance(err.message || "Could not enqueue push voucher");
     console.error("[PushQueue] Enqueue error:", errorMessage);
+    return res.status(500).json({ error: errorMessage });
+  }
+});
+
+// Streams a single scanned invoice page (JPEG) for a push_queue row from GCS.
+// Auth via requireApiKey (x-api-key or Firebase Bearer), same as the rest of
+// /api/sync. The app discovers the page count from source_payload.scan.pages and
+// requests pages 0..N-1.
+router.get("/push-queue/:id/image/:page", requireApiKey, async (req, res) => {
+  if (!invoiceStorageEnabled) {
+    return res.status(404).json({ error: "Invoice image storage is not configured" });
+  }
+  const id = normalizeTrimmedString(req.params.id);
+  const page = Number.parseInt(String(req.params.page ?? ""), 10);
+  if (!id || !Number.isInteger(page) || page < 0) {
+    return res.status(400).json({ error: "Invalid id or page" });
+  }
+
+  try {
+    const exists = await invoicePageExists(id, page);
+    if (!exists) {
+      return res.status(404).json({ error: "Image not found" });
+    }
+    res.setHeader("Content-Type", "image/jpeg");
+    res.setHeader("Cache-Control", "private, max-age=86400");
+    const stream = invoicePageReadStream(id, page);
+    stream.on("error", (streamErr: any) => {
+      console.error("[PushQueue] Image stream error:", streamErr?.message || streamErr);
+      if (!res.headersSent) res.status(500).json({ error: "Image read failed" });
+      else res.destroy();
+    });
+    stream.pipe(res);
+  } catch (err: any) {
+    const errorMessage = err?.message || "Could not read invoice image";
+    console.error("[PushQueue] Image fetch error:", errorMessage);
     return res.status(500).json({ error: errorMessage });
   }
 });

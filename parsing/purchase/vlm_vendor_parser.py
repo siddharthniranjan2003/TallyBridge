@@ -1125,6 +1125,164 @@ def _parse_vendor_items(vendor: str, lines: list[OcrLine]) -> tuple[list[dict[st
     raise ValueError(f"Unsupported purchase OCR vendor parser: {vendor}")
 
 
+# --- Generic (alien) item parser ---------------------------------------------
+# For invoices from suppliers we have no vendor rules for, parse the item table by
+# matching column headers instead of a vendor-specific row regex. No description
+# repair, no stock matching: descriptions are returned as plain OCR text.
+
+_GENERIC_COL_KEYWORDS: dict[str, tuple[str, ...]] = {
+    # Order matters: each column is claimed by the first field (in this order) whose
+    # keyword it contains. rate/amount are resolved BEFORE unit so a "Unit Price" or
+    # "Rate Per Unit" header is taken as the rate, not the unit. "description" is last
+    # so the specific columns claim their cells first.
+    "hsn": ("HSN", "SAC"),
+    "item_code": ("ITEM CODE", "PART NO", "PART NUMBER", "PRODUCT CODE", "MATERIAL CODE", "SKU", "CAT NO", "CATALOGUE NO"),
+    "qty": ("QTY", "QUANTITY", "QNTY", "QNT"),
+    "rate": ("RATE", "PRICE"),
+    "amount": ("AMOUNT", "TAXABLE VALUE", "TAXABLE", "NET VALUE", "NET AMOUNT", "VALUE", "TOTAL"),
+    "unit": ("UOM", "U.O.M", "UNIT", "PER"),
+    "description": (
+        "DESCRIPTION", "PARTICULARS", "NATURE OF GOODS", "GOODS DESCRIPTION", "GOODS",
+        "PRODUCT NAME", "PRODUCT", "ITEM NAME", "ITEM DESCRIPTION", "MATERIAL DESCRIPTION",
+        "COMMODITY", "ITEM", "MATERIAL",
+    ),
+}
+_GENERIC_ROW_SKIP = (
+    "TOTAL", "SUBTOTAL", "SUB TOTAL", "GRAND", "CGST", "SGST", "IGST", "ROUND",
+    "DISCOUNT", "FREIGHT", "CARRIAGE", "PACKING", "INSURANCE", "IN WORDS",
+    "TAXABLE VALUE", "TERMS", "DECLARATION", "SIGNATURE", "E.& O.E", "E & O E",
+)
+
+
+def _cell_number(cell: str) -> float:
+    match = re.search(r"-?[0-9][0-9,]*(?:\.[0-9]+)?", cell or "")
+    if not match:
+        return 0.0
+    try:
+        return float(match.group(0).replace(",", ""))
+    except ValueError:
+        return 0.0
+
+
+def _matches_skip_token(text: str) -> bool:
+    # Word-boundary match (alphanumeric edges only) so skip tokens fire on "TOTAL",
+    # "GRAND TOTAL", "CGST 9%" etc. but not inside a larger word like "TOTALINE".
+    for token in _GENERIC_ROW_SKIP:
+        if re.search(r"(?<![A-Z0-9])" + re.escape(token) + r"(?![A-Z0-9])", text):
+            return True
+    return False
+
+
+def _match_generic_columns(header_cells: list[str]) -> dict[str, int]:
+    uppers = [normalize_space(cell).upper() for cell in header_cells]
+    mapping: dict[str, int] = {}
+    taken: set[int] = set()
+    for field, keywords in _GENERIC_COL_KEYWORDS.items():
+        for index, cell in enumerate(uppers):
+            if index in taken or not cell:
+                continue
+            if any(keyword in cell for keyword in keywords):
+                mapping[field] = index
+                taken.add(index)
+                break
+    return mapping
+
+
+def _is_generic_item_header(header_cells: list[str]) -> dict[str, int] | None:
+    joined = " ".join(header_cells).upper()
+    # The GST tax-summary table also carries "TAXABLE"/"AMOUNT"; never treat it as the
+    # item table (its rows are HSN totals, not line items).
+    if "TAXABLE VALUE" in joined and "TOTAL TAX AMOUNT" in joined:
+        return None
+    mapping = _match_generic_columns(header_cells)
+    has_desc = "description" in mapping
+    numeric_cols = sum(1 for field in ("qty", "rate", "amount") if field in mapping)
+    if has_desc and numeric_cols >= 2:
+        return mapping
+    if has_desc and "amount" in mapping and ("qty" in mapping or "rate" in mapping):
+        return mapping
+    return None
+
+
+def _parse_generic_table(table: list[list[str]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    header_index = -1
+    mapping: dict[str, int] = {}
+    for index, row in enumerate(table):
+        found = _is_generic_item_header(row)
+        if found is not None:
+            header_index = index
+            mapping = found
+            break
+    if header_index < 0:
+        return [], []
+
+    # _is_generic_item_header only accepts a header that maps a description column, so
+    # cell("description") is always available here.
+    description_rows: list[dict[str, Any]] = []
+    numeric_rows: list[dict[str, Any]] = []
+    row_no = 0
+    for row in table[header_index + 1 :]:
+        if not any(cell.strip() for cell in row):
+            continue
+
+        def cell(field: str) -> str:
+            idx = mapping.get(field)
+            if idx is None or idx >= len(row):
+                return ""
+            return normalize_space(row[idx])
+
+        description = cell("description")
+        # Skip total / tax / footer rows. Match by word boundary on the description cell
+        # so a real product (e.g. "TOTALINE COMPRESSOR") is not dropped for merely
+        # containing "TOTAL" as a substring.
+        target = description.upper() if description else " ".join(row).upper()
+        if _matches_skip_token(target):
+            continue
+
+        qty = _cell_number(cell("qty"))
+        rate = _cell_number(cell("rate"))
+        amount = _cell_number(cell("amount"))
+        if not description or (qty <= 0 and rate <= 0 and amount <= 0):
+            continue
+
+        unit = cell("unit")
+        if not unit:
+            qty_cell = cell("qty")
+            unit_match = re.search(r"[A-Za-z]{1,6}", qty_cell)
+            unit = unit_match.group(0) if unit_match else ""
+
+        row_no += 1
+        description_rows.append(
+            {
+                "item_code": normalize_space(cell("item_code")),
+                "raw_description": description,
+                "hsn_code": normalize_space(cell("hsn")),
+                "row_no": row_no,
+            }
+        )
+        numeric_rows.append(
+            {
+                "quantity": qty,
+                "unit": normalize_space(unit),
+                "rate": rate,
+                "amount": amount,
+            }
+        )
+    return description_rows, numeric_rows
+
+
+def _parse_generic_items(vlm_result: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    best_desc: list[dict[str, Any]] = []
+    best_num: list[dict[str, Any]] = []
+    for table in _gather_tables(vlm_result):
+        description_rows, numeric_rows = _parse_generic_table(table)
+        if len(description_rows) > len(best_desc):
+            best_desc, best_num = description_rows, numeric_rows
+    if not best_desc:
+        raise ValueError("No purchase item rows could be parsed from the generic invoice table.")
+    return best_desc, best_num
+
+
 def _trim_vendor_candidate(text: str) -> str:
     candidate = normalize_space(text)
     if not candidate:
@@ -1230,7 +1388,61 @@ def _extract_vendor_name(lines: list[OcrLine]) -> str:
             candidate = _trim_vendor_candidate(line.text)
             if candidate:
                 return candidate
-    raise ValueError("Could not determine supplier name from the OCR header.")
+    # No known vendor token matched: this is an alien invoice. Return a best-effort
+    # supplier name read straight from the header instead of raising, so the generic
+    # passthrough path can still run. Empty string is acceptable downstream.
+    return _generic_supplier_name(lines)
+
+
+_SUPPLIER_SKIP_TOKENS = (
+    "TAX INVOICE",
+    "INVOICE",
+    "GSTIN",
+    "GST NO",
+    "STATE",
+    "PHONE",
+    "PH:",
+    "MOBILE",
+    "EMAIL",
+    "WWW.",
+    "HTTP",
+    "ORIGINAL",
+    "DUPLICATE",
+    "TRIPLICATE",
+    "BILL OF SUPPLY",
+    "CREDIT NOTE",
+    "DEBIT NOTE",
+    "PAGE ",
+)
+
+
+def _generic_supplier_name(lines: list[OcrLine]) -> str:
+    # The supplier name is almost always the first prominent company line in the
+    # header block. Pick the earliest line that reads like a name (enough letters,
+    # not a label/contact/date row), preferring lines with a company suffix.
+    best = ""
+    for line in lines[:18]:
+        candidate = _trim_vendor_candidate(line.text)
+        if not candidate:
+            continue
+        upper = candidate.upper()
+        if any(token in upper for token in _SUPPLIER_SKIP_TOKENS):
+            continue
+        # Skip a flattened item-table header row (e.g. "Description Qty Rate Amount");
+        # it is never the supplier name.
+        if sum(1 for kw in ("DESCRIPTION", "PARTICULARS", "QTY", "QUANTITY", "RATE", "AMOUNT", "HSN", "SAC", "UOM", "TAXABLE") if kw in upper) >= 2:
+            continue
+        letters = sum(1 for ch in candidate if ch.isalpha())
+        if letters < 4 or DATE_RE.search(candidate):
+            continue
+        if re.fullmatch(r"[A-Z0-9 ./,&-]*\d[A-Z0-9 ./,&-]*", upper) and letters < len(candidate) / 2:
+            # mostly digits/codes (address line, GSTIN, etc.)
+            continue
+        if any(suffix in upper for suffix in ("LIMITED", "LTD", "PRIVATE", "LLP", "INDUSTRIES", "ENTERPRISES", "TRADERS", "COMPANY", "CORPORATION", "& CO", "PVT")):
+            return candidate
+        if not best:
+            best = candidate
+    return best
 
 
 def _extract_invoice_number(lines: list[OcrLine], vendor: str) -> str:
@@ -1543,6 +1755,46 @@ def _extract_tax_summary(tables: list[list[list[str]]]) -> tuple[float, list[dic
     return 0.0, [], 0.0
 
 
+# Freight/courier/cartage a supplier "recovers" on the invoice (e.g.
+# "Courier Charges Recovered 1,755.00"). Vendor-agnostic: a line must carry BOTH a
+# freight keyword AND a charge-indicator word, which distinguishes a charge line
+# from the transporter's name ("Dispatched through: SHREE MARUTI COURIER"). The OCR
+# usually orphans the amount from its label, so amount is best-effort here; the
+# reliable amount is derived in voucher_builder from the taxable-base gap, and the
+# charge is booked to CARTAGE INWARD (included in the GST assessable value).
+_CHARGE_FREIGHT_RE = re.compile(r"\b(courier|freight|cartage|carriage|transport(?:ation)?)\b", re.IGNORECASE)
+_CHARGE_WORD_RE = re.compile(r"\b(charges?|recover(?:ed|y)?|forwarding|handling|incidental|expenses?|p\s*&\s*f)\b", re.IGNORECASE)
+_CHARGE_EXCLUDE_RE = re.compile(r"gstin|state\s*name|dispatch|despatch|through|ifsc|a/?c\s*no|account\s*no|@", re.IGNORECASE)
+_CHARGE_AMOUNT_RE = re.compile(r"\d{1,3}(?:,\d{2,3})+(?:\.\d{1,2})?|\d+\.\d{1,2}|\d+")
+
+
+def _extract_other_charges(lines: list[OcrLine]) -> list[dict[str, Any]]:
+    charges: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for line in lines:
+        text = getattr(line, "text", "") or ""
+        if _CHARGE_EXCLUDE_RE.search(text):
+            continue
+        if not (_CHARGE_FREIGHT_RE.search(text) and _CHARGE_WORD_RE.search(text)):
+            continue
+        amount = None
+        for token in reversed(_CHARGE_AMOUNT_RE.findall(text)):
+            try:
+                value = float(token.replace(",", ""))
+            except ValueError:
+                continue
+            if value > 0:
+                amount = round(value, 2)
+                break
+        label = re.sub(r"\s+", " ", text).strip()
+        key = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        charges.append({"amount": amount, "label": label})
+    return charges
+
+
 def parse_vlm_invoice(vlm_result: dict[str, Any]) -> dict[str, Any]:
     lines = _trim_duplicate_copy_lines(build_ocr_lines(vlm_result))
     if not lines:
@@ -1554,7 +1806,11 @@ def parse_vlm_invoice(vlm_result: dict[str, Any]) -> dict[str, Any]:
     description_rows: list[dict[str, Any]] = []
     numeric_rows: list[dict[str, Any]] = []
     try:
-        description_rows, numeric_rows = _parse_vendor_items(vendor, lines)
+        if vendor:
+            description_rows, numeric_rows = _parse_vendor_items(vendor, lines)
+        else:
+            # Alien invoice: no vendor rules, parse the item table generically.
+            description_rows, numeric_rows = _parse_generic_items(vlm_result)
     except Exception as exc:
         warnings.append(str(exc))
 
@@ -1576,6 +1832,7 @@ def parse_vlm_invoice(vlm_result: dict[str, Any]) -> dict[str, Any]:
         "invoice_total": invoice_total,
         "tax_entries": summary_tax_entries or _extract_tax_entries(lines, vendor),
         "round_off": _extract_round_off(lines),
+        "charges": _extract_other_charges(lines),
     }
     return {
         "vendor": vendor,

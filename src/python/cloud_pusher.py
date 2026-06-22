@@ -27,6 +27,9 @@ TALLY_COMPANY = os.environ.get("TALLY_COMPANY", "").strip()
 TALLY_COMPANY_GUID = os.environ.get("TALLY_COMPANY_GUID", "").strip()
 LAST_PUSH_ERROR = ""
 LAST_PUSH_STATS: dict[str, object] = {}
+# Cached per process: the resolved Supabase company id for the direct (PostgREST)
+# transport, so we resolve/upsert the company once per sync run, not per request.
+_DIRECT_COMPANY_ID: str | None = None
 DIRECT_INGEST_SECTION_KEYS = (
     "groups",
     "ledgers",
@@ -161,6 +164,195 @@ def _build_ingest_target(transport: str) -> tuple[str, dict[str, str], str | Non
         },
         None,
     )
+
+
+# ── Direct ingest via PostgREST ──────────────────────────────────
+# The Supabase Edge Function endpoint (functions/v1/ingest-sync) intermittently
+# stalls on POST regardless of body size (~37% even at 160 KB), causing HTTP 503.
+# PostgREST (rest/v1) is reliable, so the direct transport calls the ingest RPCs
+# there using the configured publishable key. This replicates what the edge
+# function did (resolve the company, then call the masters / voucher RPCs).
+
+_COMPANY_INFO_FIELDS = (
+    "books_from", "books_to", "books_from_raw", "books_to_raw", "gstin",
+    "address", "guid", "state", "country", "pincode", "email", "phone",
+    "gst_type", "pan",
+)
+_COMPANY_ALTER_FIELDS = ("alter_id", "alt_vch_id", "alt_mst_id", "last_voucher_date")
+
+
+def _postgrest_base() -> str:
+    if SYNC_INGEST_URL and "/functions/" in SYNC_INGEST_URL:
+        return SYNC_INGEST_URL.split("/functions/", 1)[0] + "/rest/v1"
+    return ""
+
+
+def _postgrest_headers() -> dict[str, str]:
+    return {
+        "apikey": SYNC_INGEST_KEY,
+        "Authorization": f"Bearer {SYNC_INGEST_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+def _build_company_update(company_guid: str | None, company_info, alter_ids) -> dict:
+    """Mirror the edge function's company upsert payload (metadata only)."""
+    update: dict[str, object] = {}
+    if isinstance(company_info, dict):
+        for key in _COMPANY_INFO_FIELDS:
+            value = company_info.get(key)
+            if value in (None, ""):
+                continue
+            if key == "guid" and company_guid:
+                continue
+            update[key] = value
+        master_id = company_info.get("master_id")
+        if isinstance(master_id, (int, float)) and not isinstance(master_id, bool):
+            update["master_id"] = int(master_id)
+    if isinstance(alter_ids, dict):
+        for key in _COMPANY_ALTER_FIELDS:
+            value = alter_ids.get(key)
+            if value not in (None, ""):
+                update[key] = value
+    return update
+
+
+def _resolve_direct_company_id(rest: str, headers: dict, payload: dict) -> str:
+    """Find (or insert) the company by GUID/name and apply any metadata in this
+    payload — same resolution order as the edge function's upsertCompanyRecord."""
+    global _DIRECT_COMPANY_ID
+    name = (payload.get("company_name") or "").strip()
+    guid = (payload.get("company_guid") or "").strip() or None
+    update = _build_company_update(guid, payload.get("company_info"), payload.get("alter_ids"))
+    timeout = get_backend_timeout_seconds()
+
+    if _DIRECT_COMPANY_ID is None:
+        if guid:
+            rows = requests.get(f"{rest}/companies", headers=headers,
+                                params={"guid": f"eq.{guid}", "select": "id"}, timeout=timeout)
+            rows.raise_for_status()
+            data = rows.json()
+            if data:
+                _DIRECT_COMPANY_ID = data[0]["id"]
+        if _DIRECT_COMPANY_ID is None and name:
+            rows = requests.get(f"{rest}/companies", headers=headers,
+                                params={"name": f"eq.{name}", "select": "id,guid", "limit": "2"},
+                                timeout=timeout)
+            rows.raise_for_status()
+            data = rows.json()
+            if len(data) > 1:
+                raise RuntimeError("Multiple companies share this name; re-add with a Tally GUID.")
+            if data and (not data[0].get("guid") or data[0].get("guid") == guid):
+                _DIRECT_COMPANY_ID = data[0]["id"]
+        if _DIRECT_COMPANY_ID is None:
+            insert = {"name": name}
+            if guid:
+                insert["guid"] = guid
+            insert.update(update)
+            created = requests.post(f"{rest}/companies", headers={**headers, "Prefer": "return=representation"},
+                                    params={"select": "id"}, json=[insert], timeout=timeout)
+            created.raise_for_status()
+            _DIRECT_COMPANY_ID = created.json()[0]["id"]
+            return _DIRECT_COMPANY_ID  # insert already carried the metadata
+
+    if update:
+        patched = requests.patch(f"{rest}/companies", headers=headers,
+                                 params={"id": f"eq.{_DIRECT_COMPANY_ID}"}, json=update, timeout=timeout)
+        patched.raise_for_status()
+    return _DIRECT_COMPANY_ID
+
+
+def _direct_error_result(step_label, target_url, status, error, *, http_status=None, duration_ms=None):
+    stats: dict[str, object] = {
+        "step": step_label, "transport": "direct", "target_url": target_url, "status": status,
+    }
+    if http_status is not None:
+        stats["http_status"] = http_status
+    if duration_ms is not None:
+        stats["request_duration_ms"] = duration_ms
+    return {"ok": False, "error": error, "records": {}, "stats": stats}
+
+
+def _post_direct_via_postgrest(payload: dict, step_label: str) -> dict[str, object]:
+    rest = _postgrest_base()
+    if not rest:
+        msg = "Direct ingest needs SYNC_INGEST_URL to derive the Supabase REST endpoint."
+        print(f"[Ingest][{step_label}] {msg}")
+        return _direct_error_result(step_label, rest, "not_configured", msg)
+    if not SYNC_INGEST_KEY:
+        msg = "Direct ingest mode is enabled but SYNC_INGEST_KEY is not configured."
+        print(f"[Ingest][{step_label}] {msg}")
+        return _direct_error_result(step_label, rest, "not_configured", msg)
+
+    headers = _postgrest_headers()
+    synced_at = payload.get("sync_run_synced_at") or datetime.now(timezone.utc).isoformat()
+    started = time.perf_counter()
+    print(f"[Ingest][{step_label}] Uploading via PostgREST to {rest}")
+    try:
+        company_id = _resolve_direct_company_id(rest, headers, payload)
+
+        if payload.get("vouchers") is not None:
+            meta = payload.get("sync_meta") if isinstance(payload.get("sync_meta"), dict) else {}
+            rpc = "tb_ingest_vouchers"
+            body = {
+                "p_company_id": company_id,
+                "p_synced_at": synced_at,
+                "p_vouchers": payload.get("vouchers") or [],
+                "p_sync_meta": meta,
+                "p_alter_ids": payload.get("alter_ids") or {},
+                "p_is_final_chunk": bool(meta.get("is_final_chunk")),
+                "p_record_counts": meta.get("record_counts") or {},
+            }
+        else:
+            rpc = "tb_ingest_phase3_hybrid"
+            body = {
+                "p_company_id": company_id,
+                "p_synced_at": synced_at,
+                "p_groups": payload.get("groups"),
+                "p_ledgers": payload.get("ledgers"),
+                "p_stock_items": payload.get("stock_items"),
+                "p_outstanding": payload.get("outstanding"),
+                "p_profit_loss": payload.get("profit_loss"),
+                "p_balance_sheet": payload.get("balance_sheet"),
+                "p_trial_balance": payload.get("trial_balance"),
+            }
+
+        response = requests.post(f"{rest}/rpc/{rpc}", headers=headers, json=body,
+                                 timeout=get_backend_timeout_seconds())
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        if not response.ok:
+            message = _extract_backend_error(response)
+            print(f"[Ingest][{step_label}] Upload failed: HTTP {response.status_code}")
+            print(f"[Ingest][{step_label}] Response: {message}")
+            return _direct_error_result(step_label, rest, "http_error", message,
+                                        http_status=response.status_code, duration_ms=duration_ms)
+
+        records = response.json() if response.content else {}
+        if not isinstance(records, dict):
+            records = {}
+        print(f"[Ingest][{step_label}] Upload successful in {duration_ms} ms")
+        return {
+            "ok": True,
+            "error": "",
+            "records": records,
+            "stats": {
+                "step": step_label,
+                "transport": "direct",
+                "target_url": rest,
+                "status": "ok",
+                "http_status": response.status_code,
+                "request_duration_ms": duration_ms,
+            },
+        }
+    except requests.exceptions.RequestException as error:
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        message = f"PostgREST ingest request failed: {error}"
+        print(f"[Ingest][{step_label}] {message}")
+        return _direct_error_result(step_label, rest, "exception", message, duration_ms=duration_ms)
+    except Exception as error:
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        print(f"[Ingest][{step_label}] Upload error: {error}")
+        return _direct_error_result(step_label, rest, "exception", str(error), duration_ms=duration_ms)
 
 
 def _clone_sync_meta(payload: dict, ingest_role: str) -> dict:
@@ -454,6 +646,9 @@ def _post_sync_payload(
     *,
     verify_after_timeout: bool = False,
 ) -> dict[str, object]:
+    if transport == "direct":
+        return _post_direct_via_postgrest(payload, step_label)
+
     target_url, headers, config_error = _build_ingest_target(transport)
     if config_error:
         print(f"[Ingest][{step_label}] {config_error}")
@@ -633,6 +828,8 @@ def _post_sync_payload(
 
 
 def push(payload: dict) -> bool:
+    global _DIRECT_COMPANY_ID
+    _DIRECT_COMPANY_ID = None
     _set_last_push_error("")
     _set_last_push_stats({})
     request_payload = dict(payload)

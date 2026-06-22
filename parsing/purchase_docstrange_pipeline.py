@@ -9,6 +9,7 @@ from lib.env import make_env_loader
 from lib.numeric import round2
 from purchase.vlm_vendor_parser import build_ocr_lines, parse_vlm_invoice
 from purchase.voucher_builder import (
+    build_alien_voucher_payload,
     build_purchase_queue_payload,
     combine_ocr_items,
 )
@@ -119,6 +120,7 @@ def run_docstrange_purchase_all_pipeline(
     description_rows = list(parsed.get("description_rows", []) or [])
     numeric_rows = list(parsed.get("numeric_rows", []) or [])
 
+    is_alien = not vendor
     raw_items: list[PurchaseRawItem] = []
     if vendor:
         raw_items, item_warnings = combine_ocr_items(
@@ -126,6 +128,16 @@ def run_docstrange_purchase_all_pipeline(
             description_rows,
             numeric_rows,
             repair_descriptions=False,
+        )
+        warnings.extend(item_warnings)
+    else:
+        # Alien invoice: keep the plain OCR description as-is (no repair, no matching).
+        raw_items, item_warnings = combine_ocr_items(
+            "",
+            description_rows,
+            numeric_rows,
+            repair_descriptions=False,
+            preserve_raw=True,
         )
         warnings.extend(item_warnings)
 
@@ -138,6 +150,7 @@ def run_docstrange_purchase_all_pipeline(
         "company_name": company_name,
         "master_source": "none",
         "vendor": vendor,
+        "alien": is_alien,
         "description_repair_enabled": False,
         "summary": {
             "row_count": len(raw_items) or max(len(description_rows), len(numeric_rows)),
@@ -172,9 +185,48 @@ def run_docstrange_purchase_all_pipeline(
         "html": html,
     }
 
-    if not vendor:
-        warnings.append("Matching skipped: vendor could not be determined from DocStrange markdown.")
-        return base_payload
+    if is_alien:
+        # Unrecognized supplier: skip the rule engine entirely and return the items
+        # exactly as OCR'd inside a passthrough voucher flagged alien:true. The user
+        # edits the items in the cloud before the voucher is activated and pushed.
+        if not raw_items:
+            warnings.append("Alien invoice: no usable purchase item rows could be parsed.")
+            return base_payload
+        build_result = build_alien_voucher_payload(company_name, header_data, raw_items)
+        push_queue_payload = build_purchase_queue_payload(
+            company_name,
+            build_result["voucher_payload"],
+            build_result.get("source_payload"),
+        )
+        request_payload = _queue_request_payload(company_name, build_result)
+        return {
+            **base_payload,
+            "status": "success",
+            "master_source": "alien_passthrough",
+            "summary": {
+                **base_payload["summary"],
+                "inference_seconds": round(time.time() - started_at, 2),
+                "master_source": "alien_passthrough",
+                "matching_mode": "alien_passthrough",
+            },
+            "party_name": build_result["party_name"],
+            "voucher_payload": build_result["voucher_payload"],
+            "push_queue_payload": push_queue_payload,
+            "push_queue_request_payload": request_payload,
+            "source_payload": build_result.get("source_payload", {"items": []}),
+            "n8n": {
+                "type": "purchase",
+                "alien": True,
+                "company_name": company_name,
+                "vendor": "",
+                "party_name": build_result["party_name"],
+                "voucher_payload": build_result["voucher_payload"],
+                "push_queue_payload": push_queue_payload,
+                "push_queue_request_payload": request_payload,
+                "source_payload": build_result.get("source_payload", {"items": []}),
+                "parsed_header": header_data,
+            },
+        }
     if not raw_items:
         warnings.append("Matching skipped: vendor parser did not yield usable purchase item rows.")
         return base_payload

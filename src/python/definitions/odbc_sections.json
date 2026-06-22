@@ -214,7 +214,7 @@
     }
   },
   "stock_items": {
-    "query": "Select $Name, $Parent, $BaseUnits, $ClosingBalance, $ClosingValue, $ClosingRate from StockItem",
+    "query": "Select $Name, $Parent, $BaseUnits, $ClosingBalance, $ClosingValue, $ClosingRate, $MailingName from StockItem",
     "required_field": "name",
     "fields": {
       "name": {
@@ -264,6 +264,15 @@
           "ClosingRate"
         ],
         "transform": "float"
+      },
+      "part_code": {
+        "sources": [
+          "$MailingName",
+          "MAILINGNAME",
+          "MailingName"
+        ],
+        "transform": "string",
+        "default": ""
       }
     }
   }

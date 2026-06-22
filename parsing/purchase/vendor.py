@@ -24,4 +24,7 @@ def detect_vendor(value: str) -> str:
         return "STANLEY"
     if "WIKUS" in upper:
         return "WIKUS"
-    raise ValueError(f"Could not determine purchase vendor from OCR header: {value}")
+    # Unrecognized ("alien") supplier: return an empty code instead of raising so the
+    # pipeline can fall back to a generic, rule-engine-free passthrough that returns
+    # the items exactly as OCR'd. detect_vendor("") == "" is the alien sentinel.
+    return ""

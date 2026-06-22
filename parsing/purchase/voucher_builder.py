@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from decimal import Decimal
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -18,6 +19,10 @@ from purchase.models import PurchaseRawItem, StockMatch
 
 _env = make_env_loader(Path(__file__).resolve().parents[1] / ".env")
 DEFAULT_PURCHASE_LEDGER = _env("MINICPM_PURCHASE_LEDGER", "PURCHASE GST") or "PURCHASE GST"
+# Supplier-recovered freight/courier/cartage is booked to this ledger. It must
+# exist in the target Tally company, set to "Appropriate for: GST" so the amount
+# folds into the assessable value. Override per deployment via MINICPM_FREIGHT_LEDGER.
+FREIGHT_LEDGER = _env("MINICPM_FREIGHT_LEDGER", "CARTAGE INWARD") or "CARTAGE INWARD"
 
 
 LEDGER_NAME_HINTS = {
@@ -1294,6 +1299,7 @@ def combine_ocr_items(
     numeric_rows: list[dict[str, Any]],
     *,
     repair_descriptions: bool = True,
+    preserve_raw: bool = False,
 ) -> tuple[list[PurchaseRawItem], list[str]]:
     warnings: list[str] = []
     if len(description_rows) != len(numeric_rows):
@@ -1306,11 +1312,14 @@ def combine_ocr_items(
         description_row = description_rows[index] or {}
         numeric_row = numeric_rows[index] or {}
         raw_text = description_row.get("raw_description", "")
-        raw_description = (
-            repair_description(raw_text, vendor)
-            if repair_descriptions
-            else normalize_space(raw_text).upper()
-        )
+        # preserve_raw keeps the plain OCR text verbatim (alien passthrough); the
+        # default non-repair path upper-cases for the vendor matching algorithm.
+        if preserve_raw:
+            raw_description = normalize_space(raw_text)
+        elif repair_descriptions:
+            raw_description = repair_description(raw_text, vendor)
+        else:
+            raw_description = normalize_space(raw_text).upper()
         if not raw_description:
             continue
         quantity = decimal_value(numeric_row.get("quantity", 0))
@@ -1581,11 +1590,38 @@ def build_voucher_payload(
     # Net subtotal, then GST recomputed on the net (GST is charged after discount).
     subtotal = round2(sum(net_amounts, Decimal("0")))
     doc_tax_total = round2(sum((decimal_value(e["amount"]) for e in tax_entries), Decimal("0")))
+
+    # Supplier-recovered freight/courier/cartage. The OCR usually orphans the amount
+    # from its label, but it is reliably the gap between the document's pre-tax
+    # taxable base (grand total - tax, both from the GST summary) and the items'
+    # subtotal. When a freight/courier label is present and that gap is sane, book it
+    # to CARTAGE INWARD and include it in the assessable value, so the single GST
+    # line (charged on items + freight) reconciles. Falls back to a same-line amount
+    # if one was captured; otherwise no charge is invented.
+    charge_amount = Decimal("0")
+    if header_data.get("charges"):
+        gap = round2(doc_taxable - subtotal) if doc_taxable > 0 else Decimal("0")
+        same_line = round2(
+            sum(
+                (decimal_value(c.get("amount")) for c in header_data["charges"]
+                 if isinstance(c, dict) and c.get("amount")),
+                Decimal("0"),
+            )
+        )
+        cap = round2(subtotal * Decimal("0.5"))
+        if Decimal("1") <= gap <= cap:
+            charge_amount = gap
+        elif Decimal("1") <= same_line <= cap:
+            charge_amount = same_line
+    taxable_base = round2(subtotal + charge_amount)
+
     # The document's tax line is often unreliable (some vendors print the *rate*,
     # e.g. "18", instead of the rupee amount). When the printed grand total is
-    # available we trust (grand_total - net) as the real tax and split it across the
-    # document's tax ledgers (CGST/SGST split equally; a lone IGST takes it all).
-    implied_tax = round2(invoice_total - subtotal) if invoice_total > 0 else Decimal("-1")
+    # available we trust (grand_total - taxable_base) as the real tax and split it
+    # across the document's tax ledgers (CGST/SGST split equally; a lone IGST takes
+    # it all). taxable_base includes any freight booked above so GST stays on
+    # items + freight.
+    implied_tax = round2(invoice_total - taxable_base) if invoice_total > 0 else Decimal("-1")
     if (
         tax_entries
         and implied_tax > 0
@@ -1601,8 +1637,8 @@ def build_voucher_payload(
             recomputed_tax_entries.append({"ledger_name": entry["ledger_name"], "amount": float(amt)})
     elif has_discount and doc_taxable > 0:
         # Printed total missing/uninformative: keep each tax line's document rate
-        # (inferred from the doc's taxable base) and scale to the discounted subtotal.
-        scale = subtotal / doc_taxable
+        # (inferred from the doc's taxable base) and scale to our taxable base.
+        scale = taxable_base / doc_taxable
         recomputed_tax_entries = [
             {"ledger_name": e["ledger_name"], "amount": float(round2(decimal_value(e["amount"]) * scale))}
             for e in tax_entries
@@ -1613,7 +1649,7 @@ def build_voucher_payload(
             for e in tax_entries
         ]
     tax_total = round2(sum((decimal_value(e["amount"]) for e in recomputed_tax_entries), Decimal("0")))
-    invoice_total = round2(subtotal + tax_total)
+    invoice_total = round2(taxable_base + tax_total)
 
     ledger_entries = [
         {
@@ -1627,6 +1663,14 @@ def build_voucher_payload(
             "is_deemed_positive": True,
         },
     ]
+    if charge_amount > 0:
+        ledger_entries.append(
+            {
+                "ledger_name": FREIGHT_LEDGER,
+                "amount": float(charge_amount),
+                "is_deemed_positive": True,
+            }
+        )
     for entry in recomputed_tax_entries:
         ledger_entries.append(
             {
@@ -1658,6 +1702,105 @@ def build_voucher_payload(
         },
         "matched_items": matched_items,
         "weak_matches": weak_matches,
+        "subtotal": float(subtotal),
+        "invoice_total": float(invoice_total),
+        "tax_total": float(tax_total),
+    }
+
+
+def _alien_invoice_date(value: Any) -> str:
+    # Aliens must still produce a backend-valid date. parse_date_to_iso returns "" for
+    # an empty input and can raise on exotic tokens; in either case fall back to today
+    # (a visible placeholder the user corrects) so the voucher always enqueues.
+    try:
+        parsed = parse_date_to_iso(str(value or ""))
+    except Exception:  # noqa: BLE001 - never let an odd date format break the passthrough
+        parsed = ""
+    return parsed or date.today().isoformat()
+
+
+def build_alien_voucher_payload(
+    company_name: str,
+    header_data: dict[str, Any],
+    raw_items: list[PurchaseRawItem],
+) -> dict[str, Any]:
+    """Passthrough voucher for an unrecognized ("alien") supplier.
+
+    No stock matching and no description repair: each item's stock_item_name is the
+    plain OCR description. Party + purchase ledgers fall back to best-effort names
+    read from the invoice header, so no Supabase master data is required. The voucher
+    is flagged ``alien: True`` so the cloud/app marks it for manual review (the user
+    edits the items) before it is activated and pushed to Tally.
+    """
+    # Party + date must still satisfy the backend's voucher-level guards (which are not
+    # relaxed for aliens), so fall back to visible placeholders the user corrects in the
+    # app rather than emitting empty values that would 400/500 the enqueue.
+    party_name = best_effort_party_ledger_name("", header_data) or "Unknown Supplier"
+    inventory_ledger_name = best_effort_purchase_ledger_name()
+    tax_entries = normalize_tax_entries(header_data.get("tax_entries", []))
+
+    voucher_items: list[dict[str, Any]] = []
+    for item in raw_items:
+        amount = round2(decimal_value(item.amount))
+        rate = round2(decimal_value(item.rate))
+        if rate <= 0 and item.quantity > 0 and amount > 0:
+            rate = round2(amount / decimal_value(item.quantity))
+        voucher_items.append(
+            {
+                "stock_item_name": item.raw_description,
+                "quantity": float(item.quantity),
+                "rate": float(rate),
+                "amount": float(amount),
+                "unit": item.unit or "NOS",
+                "discount": 0.0,
+                "discount_pct": 0.0,
+                "godown_name": "Main Location",
+            }
+        )
+
+    subtotal = round2(sum((decimal_value(it["amount"]) for it in voucher_items), Decimal("0")))
+    tax_total = round2(sum((decimal_value(e["amount"]) for e in tax_entries), Decimal("0")))
+    invoice_total = round2(decimal_value(header_data.get("invoice_total", 0)))
+    if invoice_total <= 0:
+        invoice_total = round2(subtotal + tax_total)
+
+    ledger_entries = [
+        {"ledger_name": party_name, "amount": float(invoice_total), "is_deemed_positive": False},
+        {"ledger_name": inventory_ledger_name, "amount": float(subtotal), "is_deemed_positive": True},
+    ]
+    for entry in tax_entries:
+        ledger_entries.append(
+            {
+                "ledger_name": entry["ledger_name"],
+                "amount": float(round2(decimal_value(entry["amount"]))),
+                "is_deemed_positive": True,
+            }
+        )
+
+    voucher_number = normalize_space(header_data.get("invoice_number", ""))
+    voucher_date = _alien_invoice_date(header_data.get("invoice_date", ""))
+    voucher_payload = {
+        "party_name": party_name,
+        "date": voucher_date,
+        "voucher_number": voucher_number,
+        "reference": voucher_number,
+        "narration": (f"Purchase invoice {voucher_number}").strip(),
+        "discount_total": 0.0,
+        "voucher_type": "Purchase",
+        "inventory_ledger_name": inventory_ledger_name,
+        "alien": True,
+        "ledger_entries": ledger_entries,
+        "items": voucher_items,
+    }
+    source_items = [{**it, "source": "Alien_Passthrough", "score": ""} for it in voucher_items]
+    return {
+        "company_name": company_name,
+        "vendor": "",
+        "party_name": party_name,
+        "voucher_payload": voucher_payload,
+        "source_payload": {"items": source_items, "alien": True},
+        "matched_items": [],
+        "weak_matches": [],
         "subtotal": float(subtotal),
         "invoice_total": float(invoice_total),
         "tax_total": float(tax_total),

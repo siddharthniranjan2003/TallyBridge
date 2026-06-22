@@ -539,7 +539,7 @@ def get_stock_items() -> str:
             <TDLMESSAGE>
               <COLLECTION NAME="StockItem" ISMODIFY="No">
                 <TYPE>StockItem</TYPE>
-                <FETCH>NAME, PARENT, BASEUNITS, CLOSINGBALANCE, CLOSINGVALUE, CLOSINGRATE</FETCH>
+                <FETCH>NAME, PARENT, BASEUNITS, CLOSINGBALANCE, CLOSINGVALUE, CLOSINGRATE, MAILINGNAME</FETCH>
               </COLLECTION>
             </TDLMESSAGE>
           </TDL>

@@ -899,7 +899,8 @@
         "BASEUNITS",
         "CLOSINGBALANCE",
         "CLOSINGVALUE",
-        "CLOSINGRATE"
+        "CLOSINGRATE",
+        "MAILINGNAME"
       ]
     },
     "response": {
@@ -954,6 +955,14 @@
             "RATE"
           ],
           "transform": "float"
+        },
+        "part_code": {
+          "sources": [
+            "MAILINGNAME.LIST",
+            "MAILINGNAME"
+          ],
+          "transform": "mailing_name",
+          "default": ""
         }
       }
     }

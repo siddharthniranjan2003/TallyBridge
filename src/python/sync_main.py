@@ -128,6 +128,28 @@ except ValueError:
     SYNC_CONTRACT_VERSION = 1
 VOUCHER_OVERLAP_DAYS = 7
 ERP9_DETAIL_BATCH_SIZE = 25
+try:
+    # Optional extra gap (ms) between consecutive Tally requests. OFF by default:
+    # smaller voucher windows (TB_VOUCHER_WINDOW_DAYS) are the primary mechanism
+    # for keeping the single-threaded engine responsive; live testing showed pacing
+    # adds time without reducing the per-window freeze. Available as a tuning knob.
+    TALLY_PACING_MS = max(0, int(os.environ.get("TB_TALLY_PACING_MS", "0") or "0"))
+except ValueError:
+    TALLY_PACING_MS = 0
+try:
+    # Max days per voucher export window. Smaller windows = smaller per-request
+    # Tally compute = shorter UI freezes (the single engine serializes reads with
+    # the interactive UI). 0 = legacy one-window-per-calendar-month.
+    VOUCHER_WINDOW_DAYS = max(0, int(os.environ.get("TB_VOUCHER_WINDOW_DAYS", "7") or "7"))
+except ValueError:
+    VOUCHER_WINDOW_DAYS = 7
+
+
+def pace_tally() -> None:
+    """Briefly yield Tally's single-threaded engine between requests so its UI
+    stays responsive during a sync. Disable/tune via TB_TALLY_PACING_MS (0 = off)."""
+    if TALLY_PACING_MS > 0:
+        time.sleep(TALLY_PACING_MS / 1000)
 
 
 def resolve_cache_file() -> str:
@@ -454,8 +476,11 @@ def build_month_windows(from_date: str, to_date: str) -> list[tuple[str, str]]:
     windows: list[tuple[str, str]] = []
     cursor = start
     while cursor <= end:
-        next_month = (cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
-        window_end = min(next_month - timedelta(days=1), end)
+        if VOUCHER_WINDOW_DAYS > 0:
+            window_end = min(cursor + timedelta(days=VOUCHER_WINDOW_DAYS - 1), end)
+        else:
+            next_month = (cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
+            window_end = min(next_month - timedelta(days=1), end)
         windows.append((format_tally_compact(cursor), format_tally_compact(window_end)))
         cursor = window_end + timedelta(days=1)
     return windows
@@ -831,6 +856,7 @@ def fetch_vouchers_with_batches(
     def fetch_recursive(window_from: str, window_to: str, depth: int = 0) -> list[dict]:
         indent = "  " * depth
         print(f"[Tally] Voucher window {window_from} to {window_to}")
+        pace_tally()
         try:
             if prefer_day_book:
                 rows = fetch_erp9_two_pass_vouchers(window_from, window_to)
@@ -1512,6 +1538,7 @@ def main() -> int:
                 log_section_metric(section_name, section_metrics[section_name])
 
         if sync_plan.get("need_groups"):
+            pace_tally()
             groups_started_at = time.perf_counter()
             print("[Tally] Fetching groups...")
             used_odbc = False
@@ -1544,6 +1571,7 @@ def main() -> int:
             print(f"[Tally] Got {len(groups)} groups")
 
         if sync_plan.get("need_ledgers"):
+            pace_tally()
             ledgers_started_at = time.perf_counter()
             print("[Tally] Fetching ledgers...")
             used_odbc = False
@@ -1576,6 +1604,7 @@ def main() -> int:
             print(f"[Tally] Got {len(ledgers)} ledgers")
 
         if sync_plan.get("need_vouchers") and not voucher_family_skipped:
+            pace_tally()
             vouchers_started_at = time.perf_counter()
             voucher_from_date = sync_plan.get("voucher_from_date", from_date)
             voucher_to_date = sync_plan.get("voucher_to_date", to_date)
@@ -1623,6 +1652,7 @@ def main() -> int:
                 vouchers = None
 
         if sync_plan.get("need_stock"):
+            pace_tally()
             stock_started_at = time.perf_counter()
             print("[Tally] Fetching stock items...")
             used_odbc = False
@@ -1654,6 +1684,7 @@ def main() -> int:
             log_section_metric("stock_items", section_metrics["stock_items"])
 
         if sync_plan.get("need_outstanding") and not voucher_family_skipped:
+            pace_tally()
             outstanding_started_at = time.perf_counter()
             print("[Tally] Fetching outstanding...")
             try:
@@ -1682,6 +1713,7 @@ def main() -> int:
             print(f"[Tally] Got {len(outstanding)} outstanding entries")
 
         if sync_plan.get("need_reports") and not voucher_family_skipped:
+            pace_tally()
             profit_loss_started_at = time.perf_counter()
             print("[Tally] Fetching Profit & Loss...")
             try:
@@ -1708,6 +1740,7 @@ def main() -> int:
             log_section_metric("profit_loss", section_metrics["profit_loss"])
             print(f"[Tally] Got {len(profit_loss)} P&L line items")
 
+            pace_tally()
             balance_sheet_started_at = time.perf_counter()
             print("[Tally] Fetching Balance Sheet...")
             try:
@@ -1734,6 +1767,7 @@ def main() -> int:
             log_section_metric("balance_sheet", section_metrics["balance_sheet"])
             print(f"[Tally] Got {len(balance_sheet)} Balance Sheet items")
 
+            pace_tally()
             trial_balance_started_at = time.perf_counter()
             print("[Tally] Fetching Trial Balance...")
             try:

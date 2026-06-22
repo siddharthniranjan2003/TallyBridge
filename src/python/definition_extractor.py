@@ -304,6 +304,8 @@ def _transform_value(value, field_def: dict):
         result = abs(_quantity_value(value))
     elif transform == "quantity_unit":
         result = _quantity_unit(value)
+    elif transform == "mailing_name":
+        result = _mailing_name_value(value)
     elif transform == "bool_yesno":
         result = _stringify(value).lower() == "yes"
     else:
@@ -327,6 +329,23 @@ def _quantity_value(value) -> float:
     if not text:
         return 0.0
     return safe_float(text.split()[0])
+
+
+def _mailing_name_value(value) -> str:
+    """Unwrap a Tally MAILINGNAME.LIST node to its inner text (the part code).
+
+    The resolver lands on the wrapper dict {'MAILINGNAME': {'#text': '07PU-...'}}
+    because the dotted '.LIST' tag can't be descended via a dotted source path.
+    Also tolerates list wrappers and a flat <MAILINGNAME> string.
+    """
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, dict):
+        inner = value.get("MAILINGNAME", value)
+        if isinstance(inner, list):
+            inner = inner[0] if inner else None
+        return _stringify(inner)
+    return _stringify(value)
 
 
 def _quantity_unit(value) -> str:

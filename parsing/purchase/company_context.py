@@ -17,7 +17,7 @@ CONTEXT_CACHE_TTL_SECONDS = max(
     int(_env("MINICPM_SUPABASE_CACHE_SECONDS", _env("MINICPM_TALLY_CACHE_SECONDS", "300")) or "300"),
 )
 SUPABASE_PAGE_SIZE = max(100, int(_env("MINICPM_SUPABASE_PAGE_SIZE", "1000") or "1000"))
-SUPABASE_MAX_PAGES = max(1, int(_env("MINICPM_SUPABASE_MAX_PAGES", "10") or "10"))
+SUPABASE_MAX_PAGES = max(1, int(_env("MINICPM_SUPABASE_MAX_PAGES", "20") or "20"))
 SUPABASE_TIMEOUT_SECONDS = max(5, int(_env("MINICPM_SUPABASE_TIMEOUT_SECONDS", "20") or "20"))
 _CONTEXT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _PURCHASE_MATCHING_EXACT_CACHE: tuple[float, dict[str, str]] | None = None
