@@ -5,6 +5,7 @@ import path from "path";
 import isDev from "electron-is-dev";
 
 import { store } from "./store";
+import { shipSyncLog } from "./remote-log";
 
 const DEFAULT_LOCAL_PUSH_HOST = "127.0.0.1";
 const DEFAULT_LOCAL_PUSH_PORT = 3002;
@@ -267,6 +268,7 @@ export class LocalPushServer {
 
   private log(line: string) {
     console.log(line);
+    shipSyncLog({ company: "Push API", line });
     if (!this.mainWindow.isDestroyed()) {
       this.mainWindow.webContents.send("sync-log", {
         company: "Push API",

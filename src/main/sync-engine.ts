@@ -15,6 +15,7 @@ import {
   SyncRecordCounts,
   updateCompanyStatus,
 } from "./store";
+import { shipSyncLog, setLogContext } from "./remote-log";
 
 type SyncLifecycleCallbacks = {
   onSyncStart?: () => void;
@@ -324,6 +325,23 @@ export class SyncEngine {
       const syncToDate = shouldUseManualBackfill ? configuredSyncToDate : "";
       const forceFullSync = !company.lastSyncedAt || shouldUseManualBackfill;
 
+      // Tag remote logs with this company's identity + ingest target so the
+      // real client (prod Supabase) is distinguishable from testers (testing).
+      let ingestHost = "";
+      try {
+        const ingestTarget = syncIngestUrl || controlPlaneUrl;
+        if (ingestTarget) ingestHost = new URL(ingestTarget).host;
+      } catch {
+        // leave ingestHost empty if the URL can't be parsed
+      }
+      setLogContext({
+        company: companyName,
+        tally_guid: company.tallyGuid,
+        company_local_id: companyId,
+        ingest_host: ingestHost,
+        ingest_mode: syncIngestMode,
+      });
+
       this.emit("sync-log", {
         company: companyName,
         line: `[TallyBridge] Sync trigger: ${trigger}`,
@@ -561,6 +579,9 @@ export class SyncEngine {
   }
 
   private emit(channel: string, data: any) {
+    if (channel === "sync-log") {
+      shipSyncLog(data);
+    }
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
       this.mainWindow.webContents.send(channel, data);
     }

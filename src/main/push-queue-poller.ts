@@ -5,6 +5,7 @@ import path from "path";
 
 import { Company, resolveControlPlaneApiKey, resolveControlPlaneUrl, store } from "./store";
 import { SyncEngine } from "./sync-engine";
+import { shipSyncLog } from "./remote-log";
 
 const DEFAULT_PUSH_QUEUE_POLL_INTERVAL_MS = 5000;
 const INITIAL_PUSH_QUEUE_POLL_DELAY_MS = 5000;
@@ -198,6 +199,7 @@ export class PushQueuePoller {
 
   private log(company: string, line: string) {
     console.log(line);
+    shipSyncLog({ company, line });
     if (!this.mainWindow.isDestroyed()) {
       this.mainWindow.webContents.send("sync-log", {
         company,
