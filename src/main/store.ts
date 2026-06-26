@@ -47,6 +47,7 @@ export interface AppConfig {
   syncPaused: boolean;
   companies: Company[];
   migratedToHybridV1: boolean;
+  migratedSyncInterval6hV1: boolean;
 }
 
 export interface TallyCompanySelection {
@@ -60,7 +61,7 @@ export const store = new Store<AppConfig>({
   name: "tallybridge-config",
   defaults: {
     tallyUrl: "http://localhost:9000",
-    syncIntervalMinutes: 5,
+    syncIntervalMinutes: 360,
     backendUrl: "",
     apiKey: "",
     controlPlaneUrl: "",
@@ -77,6 +78,7 @@ export const store = new Store<AppConfig>({
     syncPaused: false,
     companies: [],
     migratedToHybridV1: false,
+    migratedSyncInterval6hV1: false,
   },
 });
 

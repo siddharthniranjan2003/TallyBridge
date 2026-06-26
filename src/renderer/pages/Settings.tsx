@@ -31,7 +31,7 @@ type SettingsForm = {
 
 const DEFAULT_FORM: SettingsForm = {
   tallyUrl: "http://localhost:9000",
-  syncIntervalMinutes: 5,
+  syncIntervalMinutes: 360,
   controlPlaneUrl: "",
   controlPlaneApiKey: "",
   syncIngestMode: "render",
@@ -284,15 +284,17 @@ export default function Settings() {
           )}
         </Field>
 
-        <Field label="Sync Interval" hint="How often to sync (1-60 minutes)">
+        <Field label="Sync Interval" hint="How often to sync (default 6 hours)">
           <select
             value={form.syncIntervalMinutes}
             onChange={(e) => set("syncIntervalMinutes", Number(e.target.value))}
             style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: "1px solid #dee2e6", background: "#fff" }}
           >
-            {[1, 2, 5, 10, 15, 30, 60].map((minutes) => (
+            {[5, 15, 30, 60, 120, 180, 360, 720].map((minutes) => (
               <option key={minutes} value={minutes}>
-                {minutes} {minutes === 1 ? "minute" : "minutes"}
+                {minutes % 60 === 0
+                  ? `${minutes / 60} ${minutes === 60 ? "hour" : "hours"}`
+                  : `${minutes} minutes`}
               </option>
             ))}
           </select>

@@ -169,7 +169,7 @@ export class SyncEngine {
 
   private scheduleNext(delayMs?: number) {
     if (this.paused) return;
-    const minutes = store.get("syncIntervalMinutes", 5);
+    const minutes = store.get("syncIntervalMinutes", 360);
     if (this.timer) {
       clearTimeout(this.timer);
     }

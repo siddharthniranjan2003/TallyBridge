@@ -71,6 +71,17 @@ app.whenReady().then(() => {
     store.set("migratedToHybridV1", true);
   }
 
+  // One-time migration: move existing installs to a 6-hour (360 min) sync
+  // interval. Heavy 5-minute syncs hammer single-threaded TallyPrime and can
+  // freeze it; 6h is the new default. Changing the store default alone does NOT
+  // touch existing saved configs — this explicit override does. Runs once, so a
+  // user who later picks a different interval in Settings keeps their choice.
+  if (!store.get("migratedSyncInterval6hV1")) {
+    store.set("syncIntervalMinutes", 360);
+    store.set("migratedSyncInterval6hV1", true);
+    logger.info("[migration] syncIntervalMinutes -> 360 (6h default)");
+  }
+
   createWindow();
 
   const syncEngine = new SyncEngine(mainWindow!);

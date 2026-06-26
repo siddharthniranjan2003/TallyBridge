@@ -4,7 +4,7 @@ export default function StatusBar() {
   const [tallyOk, setTallyOk] = useState(false);
   const [internetOk] = useState(true);
   const [nextSync, setNextSync] = useState("5:00");
-  const [syncInterval, setSyncInterval] = useState(5);
+  const [syncInterval, setSyncInterval] = useState(360);
   const [isPaused, setIsPaused] = useState(false);
 
   useEffect(() => {
@@ -18,7 +18,7 @@ export default function StatusBar() {
 
     // Load interval from config
     window.electronAPI.getConfig().then((cfg: any) => {
-      setSyncInterval(cfg.syncIntervalMinutes || 5);
+      setSyncInterval(cfg.syncIntervalMinutes || 360);
       setIsPaused(Boolean(cfg.syncPaused));
     });
 
@@ -44,9 +44,14 @@ export default function StatusBar() {
     const tick = setInterval(() => {
       seconds -= 1;
       if (seconds < 0) seconds = syncInterval * 60;
-      const m = Math.floor(seconds / 60);
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
       const s = seconds % 60;
-      setNextSync(`${m}:${s.toString().padStart(2, "0")}`);
+      setNextSync(
+        h > 0
+          ? `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`
+          : `${m}:${s.toString().padStart(2, "0")}`,
+      );
     }, 1000);
 
     // Reset on sync
@@ -87,7 +92,9 @@ export default function StatusBar() {
         <span>{dot(internetOk)} Internet: {internetOk ? "OK" : "OFFLINE"}</span>
       </div>
       <span>
-        {isPaused ? "Auto-sync paused" : `Auto-sync every ${syncInterval}m · Next in ${nextSync}`}
+        {isPaused
+          ? "Auto-sync paused"
+          : `Auto-sync every ${syncInterval % 60 === 0 ? `${syncInterval / 60}h` : `${syncInterval}m`} · Next in ${nextSync}`}
       </span>
     </div>
   );
