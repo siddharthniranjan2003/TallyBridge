@@ -19,6 +19,9 @@ graphify-out/
 .env
 .env_clinet
 .env_client
+*.env.yaml
+backend.env.yaml
+parsing.env.yaml
 
 # local scratch / probe / report files
 _tb_*.py

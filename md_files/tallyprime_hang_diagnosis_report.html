@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TallyPrime Hang — Diagnostic Report</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#161b22; --panel2:#1c2330; --ink:#e6edf3; --muted:#9aa7b4;
+    --line:#2a323d; --accent:#4f9cf9; --danger:#ff6b6b; --warn:#ffb454; --ok:#5ad19a;
+    --code:#161b22; --codeink:#d7e0ea; --chip:#222b38;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  .wrap{max-width:1000px;margin:0 auto;padding:48px 28px 96px}
+  header.doc{border-bottom:1px solid var(--line);padding-bottom:24px;margin-bottom:8px}
+  h1{font-size:30px;margin:0 0 8px;letter-spacing:.2px}
+  h2{font-size:22px;margin:44px 0 12px;padding-top:10px;border-top:1px solid var(--line)}
+  h3{font-size:17px;margin:26px 0 8px;color:#cdd8e3}
+  p{margin:10px 0}
+  .sub{color:var(--muted);font-size:14px}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
+  .chip{background:var(--chip);border:1px solid var(--line);border-radius:999px;
+    padding:4px 12px;font-size:12.5px;color:#c4d0dc}
+  .chip b{color:var(--ink)}
+  code{background:var(--code);border:1px solid var(--line);border-radius:5px;
+    padding:1px 6px;font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-size:12.8px;color:#a8d0ff}
+  .ref{color:#8fb6e8;font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
+  pre.diagram{background:var(--code);border:1px solid var(--line);border-radius:10px;
+    padding:18px;overflow:auto;font-family:ui-monospace,Consolas,"SF Mono",monospace;
+    font-size:12.3px;line-height:1.5;color:var(--codeink);white-space:pre}
+  .callout{border-radius:10px;padding:14px 16px;margin:16px 0;border:1px solid var(--line);background:var(--panel)}
+  .callout .tag{font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.8px;display:block;margin-bottom:6px}
+  .danger{border-left:4px solid var(--danger)} .danger .tag{color:var(--danger)}
+  .warn{border-left:4px solid var(--warn)} .warn .tag{color:var(--warn)}
+  .ok{border-left:4px solid var(--ok)} .ok .tag{color:var(--ok)}
+  .info{border-left:4px solid var(--accent)} .info .tag{color:var(--accent)}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.6px}
+  th,td{border:1px solid var(--line);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#cdd8e3;font-weight:600}
+  td.y{color:var(--ok);font-weight:600} td.n{color:var(--danger);font-weight:600}
+  .toc{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 20px;margin:22px 0}
+  .toc ol{margin:6px 0 0;padding-left:22px} .toc a{color:var(--accent);text-decoration:none}
+  .toc a:hover{text-decoration:underline}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin:10px 0 4px;font-size:13px;color:var(--muted)}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+  /* component diagram */
+  .flow{display:flex;flex-direction:column;gap:14px;margin:18px 0}
+  .row{display:flex;gap:14px;flex-wrap:wrap;justify-content:center}
+  .box{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:200px;flex:1}
+  .box h4{margin:0 0 4px;font-size:14px} .box small{color:var(--muted);font-size:11.8px;display:block}
+  .box.read{border-top:3px solid var(--accent)}
+  .box.safe{border-top:3px solid var(--ok)}
+  .box.gap{border-top:3px solid var(--danger)}
+  .box.engine{border-top:3px solid var(--warn);background:var(--panel)}
+  .tally{background:#2a1d1d;border:1px solid #5a2d2d;border-radius:10px;padding:16px;text-align:center}
+  .tally h4{margin:0 0 4px;color:#ffd0d0}
+  .arrowdown{text-align:center;color:var(--muted);font-size:20px;line-height:1}
+  .badge{display:inline-block;border-radius:5px;padding:1px 7px;font-size:11px;font-weight:700}
+  .badge.no{background:#3a1d1d;color:#ff9a9a;border:1px solid #5a2d2d}
+  .badge.yes{background:#16302a;color:#7ee0b4;border:1px solid #2c5546}
+  footer{margin-top:60px;border-top:1px solid var(--line);padding-top:18px;color:var(--muted);font-size:12.5px}
+  .num{color:var(--warn);font-weight:700}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <h1>TallyPrime Hang — Diagnostic Report</h1>
+  <p class="sub">Why TallyPrime intermittently freezes during its interaction with TallyBridge — a code-grounded analysis of the read (sync) and write (push) paths over port 9000.</p>
+  <div class="meta">
+    <span class="chip"><b>Date:</b>&nbsp;2026-06-16</span>
+    <span class="chip"><b>Method:</b>&nbsp;Static code review (no live repro)</span>
+    <span class="chip"><b>Confidence:</b>&nbsp;Hypothesis-level</span>
+    <span class="chip"><b>Repo:</b>&nbsp;TallyBridge</span>
+  </div>
+  <div class="meta">
+    <span class="chip">tally_client.py</span>
+    <span class="chip">tally_pusher.py</span>
+    <span class="chip">sync_main.py</span>
+    <span class="chip">cloud_pusher.py</span>
+    <span class="chip">sync-engine.ts</span>
+    <span class="chip">push-queue-poller.ts</span>
+    <span class="chip">local-push-server.ts</span>
+  </div>
+</header>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#gov">The governing fact</a></li>
+    <li><a href="#primary">Primary culprit — unbatched heavy exports</a></li>
+    <li><a href="#timeout">Aggravating factor — the timeout can't cancel Tally</a></li>
+    <li><a href="#secondary">Secondary culprit — uncoordinated push path</a></li>
+    <li><a href="#noncode">Non-code trigger</a></li>
+    <li><a href="#diagrams">Interaction diagrams</a></li>
+    <li><a href="#batched">Batched vs. unbatched: what fires when</a></li>
+    <li><a href="#recs">Recommendations (ranked)</a></li>
+    <li><a href="#confirm">Fastest confirmation</a></li>
+    <li><a href="#appendix">Appendix — code reference map</a></li>
+  </ol>
+</div>
+
+<div class="callout info">
+  <span class="tag">Bottom line</span>
+  The most probable main cause is <b>unbatched, computed whole-company report exports</b> (P&amp;L, Balance Sheet, Trial Balance) freezing TallyPrime's single UI thread — made worse because the <b>client's 45&nbsp;s timeout cannot cancel an in-progress computation</b>, so the freeze outlives the sync. A <b>secondary, less-frequent trigger</b> is the on-demand push server on port 3002, which (unlike the queue poller) does not check whether a sync is running before hitting Tally.
+</div>
+
+<h2 id="gov">1. The governing fact</h2>
+<p>TallyPrime's XML/HTTP gateway on port <code>9000</code> is <b>single-threaded</b>: it computes each request on the same thread that renders the UI. While a request is being computed, <b>the Tally window is frozen</b>. Everything below is a consequence of this one constraint.</p>
+<p>There is also <b>no server-side cancel</b> — once Tally begins building a response, it runs to completion regardless of whether the caller is still listening.</p>
+
+<h2 id="primary">2. Primary culprit — heavy unbatched exports saturating the UI thread</h2>
+<p><b>Mechanism.</b> TallyBridge batches only the voucher fetch. <code>fetch_vouchers_with_batches</code> <span class="ref">(sync_main.py:819)</span> splits vouchers into month windows and recursively halves a window that times out. <b>No other section has this protection.</b> The following all issue a single whole-company request and wait for the entire result:</p>
+<ul>
+  <li>Reports — <code>get_profit_and_loss</code>, <code>get_balance_sheet</code>, <code>get_trial_balance</code> <span class="ref">(tally_client.py:615–678)</span></li>
+  <li>Outstanding — <code>get_outstanding_receivables</code> / <code>get_outstanding_payables</code> <span class="ref">(tally_client.py:573–610)</span></li>
+  <li>Masters — <code>get_ledgers</code>, <code>get_stock_items</code>, <code>get_groups</code></li>
+</ul>
+<p>Reports are the worst because they are <b>computed statements</b> — Tally must recalculate the entire period before returning a single byte, all on the UI thread.</p>
+
+<div class="callout warn">
+  <span class="tag">Why it presents as "hangs sometimes"</span>
+  Severity scales with how much there is to compute, which varies by company size and day. The exports are gated by the sync plan <span class="ref">(build_sync_plan, sync_main.py:369)</span>: <b>masters</b> fetch when masters changed; <b>reports + outstanding</b> fetch <em>every time vouchers change</em>; a <b>full sync</b> fires every heavy export at once. So a quiet day is fast, while month-end / a busy company / a first full sync freezes.
+</div>
+
+<h2 id="timeout">3. Aggravating factor — the client timeout can't stop Tally</h2>
+<p>The client read timeout defaults to <b>45&nbsp;s</b> <span class="ref">(get_read_timeout_seconds, tally_client.py:32)</span>; the voucher-collection path bumps to 75&nbsp;s, but <b>reports and masters use the 45&nbsp;s default</b>.</p>
+<p>When a heavy report exceeds 45&nbsp;s:</p>
+<ol>
+  <li>Python raises <code>TallyTimeoutError</code> and moves on / errors out.</li>
+  <li><b>Tally keeps computing</b> — there is no cancel.</li>
+  <li>The Tally window stays frozen until the report finishes, <b>after</b> TallyBridge already walked away.</li>
+</ol>
+<div class="callout danger">
+  <span class="tag">Net effect</span>
+  The freeze <b>outlives the sync run</b> and looks inexplicable from the operator's side: TallyBridge reports it gave up, yet Tally is still locked.
+</div>
+
+<h2 id="secondary">4. Secondary culprit — uncoordinated push path (concurrency gap)</h2>
+<p>Three independent components spawn Python that hits port 9000. Two of them coordinate with the sync engine; one does not.</p>
+<table>
+  <tr><th>Caller</th><th>Role</th><th>Coordinates with sync?</th><th>Evidence</th></tr>
+  <tr><td><code>SyncEngine</code></td><td>Read (sync)</td><td class="y">Yes — one run at a time</td><td><span class="ref">activeRunId guard, sync-engine.ts:188</span></td></tr>
+  <tr><td><code>PushQueuePoller</code></td><td>Write (queue, 5&nbsp;s)</td><td class="y">Yes — before &amp; between companies</td><td><span class="ref">isSyncInProgress(), push-queue-poller.ts:108–114</span></td></tr>
+  <tr><td><code>LocalPushServer</code> :3002</td><td>Write (on-demand)</td><td class="n">No — pushes immediately</td><td><span class="ref">spawn on request, local-push-server.ts:200</span></td></tr>
+</table>
+<p>A cloud-initiated push arriving on <code>:3002</code> during a heavy export stacks a second request on the single-threaded gateway → a harder, more total freeze. Real, but <b>less frequent</b> — it only bites when a push coincides with a sync.</p>
+<div class="callout info">
+  <span class="tag">One-directional coordination</span>
+  The poller yields to the sync, but the sync does <em>not</em> check the poller (<code>runAllCompanies</code> only guards against another sync). So a narrow window exists where a sync timer fires while a poller push subprocess is still in flight. Much smaller than the <code>:3002</code> gap, but not zero.
+</div>
+
+<h2 id="noncode">5. Non-code trigger (cannot be fixed in code)</h2>
+<p>TallyPrime's gateway <b>only answers from a normal screen</b>. If a <b>modal dialog or data-entry screen is open</b> in Tally — mid-voucher entry, a Yes/No prompt, a print or company-select dialog — Tally will not respond to <em>any</em> XML request until a human dismisses it. The caller then waits and hits the 45&nbsp;s timeout — indistinguishable from a hang, but the cause is operational, not a bug.</p>
+
+<h2 id="diagrams">6. Interaction diagrams</h2>
+
+<h3>6.1 The big picture — who talks to Tally, and the bottleneck</h3>
+<div class="legend">
+  <span><span class="dot" style="background:var(--accent)"></span> read</span>
+  <span><span class="dot" style="background:var(--ok)"></span> write, sync-aware</span>
+  <span><span class="dot" style="background:var(--danger)"></span> write, NOT sync-aware</span>
+  <span><span class="dot" style="background:var(--warn)"></span> shared engine / server</span>
+</div>
+<div class="flow">
+  <div class="row">
+    <div class="box read"><h4>1 · SyncEngine</h4><small>READ / sync</small><small>sync-engine.ts</small><small><span class="badge yes">guards sync</span></small></div>
+    <div class="box safe"><h4>2 · PushQueuePoller</h4><small>WRITE · queue · every 5&nbsp;s</small><small>push-queue-poller.ts</small><small><span class="badge yes">checks isSyncInProgress()</span></small></div>
+    <div class="box gap"><h4>3 · LocalPushServer :3002</h4><small>WRITE · on-demand HTTP</small><small>local-push-server.ts</small><small><span class="badge no">no sync check</span></small></div>
+  </div>
+  <div class="arrowdown">▼ &nbsp; all spawn the same engine</div>
+  <div class="row">
+    <div class="box engine" style="min-width:100%">
+      <h4>Python engine — sync_main.py / tallybridge-engine.exe</h4>
+      <small>TB_COMMAND = sync | poll_push_queue | push_voucher</small>
+      <small>tally_client.py (reads · Export) &nbsp;·&nbsp; tally_pusher.py (writes · Import)</small>
+      <small>HTTP POST · text/xml · shared requests.Session · connect 5&nbsp;s / read 45&nbsp;s</small>
+    </div>
+  </div>
+  <div class="arrowdown">▼</div>
+  <div class="row">
+    <div class="tally" style="min-width:100%">
+      <h4>⚠ TallyPrime — XML gateway on port 9000</h4>
+      <small style="color:#e7b3b3">SINGLE-THREADED: one request at a time, on the UI thread → the window freezes while busy. No server-side cancel.</small>
+    </div>
+  </div>
+</div>
+<p class="sub">Three callers, one single-threaded door. Callers 1 &amp; 2 queue politely; caller 3 does not.</p>
+
+<h3>6.2 READ flow (Tally → Cloud) — the "sync"</h3>
+<pre class="diagram">SyncEngine        Python (sync_main)      TallyPrime :9000        Cloud backend
+   |                    |                       |                      |
+   | checkTallyPort     |                       |                      |
+   |  TCP connect 9000  |                       |                      |
+   |  (3s pre-flight)--------------------------&gt;| (is it even up?)     |
+   |&lt;-- up/down --------|                       |                      |
+   |                    |                       |                      |
+   | spawn (per company)|                       |                      |
+   |-------------------&gt;|                       |                      |
+   |                    | detect product (GET) &gt;|                      |
+   |                    | get_company_info -----&gt;|                      |
+   |                    | get_company_alter_ids &gt;|  &lt;- change markers    |
+   |                    |                       |                      |
+   |                    |  [ change detection: build_sync_plan ]        |
+   |                    |  compare live alter-IDs vs local cache + cloud |
+   |                    |                       |                      |
+   |   IF CHANGES - fetch sections:             |                      |
+   |                    | groups   (1 request) -&gt;|  X unbatched         |
+   |                    | ledgers  (1 request) -&gt;|  X unbatched         |
+   |                    | vouchers ------------&gt;|  OK BATCHED:         |
+   |                    |   month-by-month +     |   split-on-timeout   |
+   |                    |   recursive halving    |                      |
+   |                    | stock    (1 request) -&gt;|  X unbatched         |
+   |                    | outstanding (1 req)  -&gt;|  X unbatched         |
+   |                    | P&amp;L / BS / TB (1 each)&gt;|  X unbatched, HEAVY  |
+   |                    |                       |   (computed reports) |
+   |                    | cloud_pusher.push ---------------------------&gt;| POST /api/sync
+   |                    | save alter-IDs cache  |                      | (or direct-&gt;Supabase)
+   |                    | print {status JSON}   |                      |
+   |&lt;-- last JSON line -|                       |                      |
+   | update company UI  |                       |                      |
+</pre>
+<p class="sub">Watchdogs: 10-min idle timeout, 45-min hard timeout on the subprocess <span class="ref">(sync-engine.ts:387–392)</span>. Only one sync run at a time <span class="ref">(activeRunId)</span>.</p>
+
+<h3>6.3 WRITE flow (Cloud → Tally) — the "push"</h3>
+<pre class="diagram"> PATH 1 - polled (every 5s)              PATH 2 - on-demand from cloud
+ --------------------------             ------------------------------
+ PushQueuePoller                         Cloud  --HTTP POST /push-voucher--&gt;
+   | isPaused()?  isSyncInProgress()?       LocalPushServer :3002
+   |   (OK: skips if sync running)            | (X: NO sync check)
+   | spawn TB_COMMAND=poll_push_queue         | spawn TB_COMMAND=push_voucher
+   v                                          v      (payload on stdin)
+ Python: fetch_pending_push_vouchers       Python: push_vouchers([payload])
+   |  GET /api/sync/push-queue (backend)      |
+   |  backend reads Supabase push_queue       |
+   v                                          v
+ tally_pusher.push_vouchers &lt;------------------+
+   | _build_import_envelope (TALLYREQUEST=Import)
+   | _post --------------------------------&gt; TallyPrime :9000  (creates voucher)
+   |&lt;-- &lt;CREATED&gt;/&lt;ERRORS&gt;/&lt;LINEERROR&gt; --------
+   v
+ parse_push_response --&gt; mark_push_results --&gt; POST /api/sync/push-results (path 1)
+                                          +--&gt; JSON back to cloud (path 2)
+</pre>
+<div class="callout danger">
+  <span class="tag">The gap, visualized</span>
+  Path 1 checks <code>isSyncInProgress()</code> before touching Tally. Path 2 (<code>:3002</code>) does not — so a cloud push can hit port 9000 at the same instant a sync export is mid-flight.
+</div>
+
+<h3>6.4 The one conversation primitive</h3>
+<pre class="diagram">POST http://localhost:9000   Content-Type: text/xml
+  &lt;ENVELOPE&gt;&lt;HEADER&gt;
+     &lt;TALLYREQUEST&gt; Export   &lt;- reads (sync): collections + computed reports
+                  | Import   &lt;- writes (push): voucher creation
+     ...
+  timeout = (connect 5s, read 45s)   &lt;- reports/masters use the 45s default
+</pre>
+<p class="sub">Every arrow into Tally is the same HTTP call <span class="ref">(tally_client._post, tally_client.py:89)</span>. A shared <code>requests.Session</code> per process; requests within one process are sequential.</p>
+
+<h2 id="batched">7. Batched vs. unbatched: what fires when</h2>
+<table>
+  <tr><th>Section</th><th>How it's fetched</th><th>Batched?</th><th>Fetched when</th></tr>
+  <tr><td>Vouchers</td><td>month windows + split-on-timeout</td><td class="y">Yes</td><td>vouchers changed</td></tr>
+  <tr><td>Groups</td><td>one request</td><td class="n">No</td><td>masters changed</td></tr>
+  <tr><td>Ledgers</td><td>one request</td><td class="n">No</td><td>masters changed</td></tr>
+  <tr><td>Stock</td><td>one request (+ summary fallback)</td><td class="n">No</td><td>masters or vouchers changed</td></tr>
+  <tr><td>Outstanding</td><td>one report export each</td><td class="n">No</td><td>vouchers changed</td></tr>
+  <tr><td>P&amp;L / Balance Sheet / Trial Balance</td><td>one computed report each</td><td class="n">No</td><td>vouchers changed</td></tr>
+</table>
+<div class="callout info">
+  <span class="tag">Why only vouchers were batched</span>
+  Historical — vouchers were the section that actually crashed/hung the gateway, so that path was hardened (see the CHANGE 1–4 block and <code>should_skip_voucher_family</code> in <code>sync_main.py</code>). Masters <em>could</em> be batched (by name / master-id range) but weren't. Reports <em>cannot</em> be batched in the voucher sense — a Balance Sheet is one whole-period computation; the lever there is fetch-less-often / narrower-period / longer-timeout.
+</div>
+<p>On a <b>full sync</b> (first sync, lost cache, backend has no alter-IDs, or forced) every heavy unbatched export runs at once — the worst case. On routine syncs you pay only for the sections that changed, but since reports re-run on any voucher change, that is most meaningful syncs.</p>
+
+<h2 id="recs">8. Recommendations (ranked)</h2>
+<table>
+  <tr><th>#</th><th>Fix</th><th>Addresses</th><th>Effort</th></tr>
+  <tr><td class="num">1</td><td><b>Shared port-9000 access lock</b> across SyncEngine + PushQueuePoller + LocalPushServer so reads/writes never overlap</td><td>§4 (and hard freezes)</td><td>Low — 3 main-process files</td></tr>
+  <tr><td class="num">2</td><td><b>Generous, per-section timeouts</b> for reports (raise the 45&nbsp;s for P&amp;L / BS / TB)</td><td>§3 — stops premature give-up</td><td>Low</td></tr>
+  <tr><td class="num">3</td><td><b>Batch / narrow masters &amp; reports</b> (or skip reports on heartbeat syncs)</td><td>§2 — the root cause</td><td>Medium</td></tr>
+  <tr><td class="num">4</td><td><b>Post-timeout cooldown</b> before the next request</td><td>§3 — stops re-hammering a struggling Tally</td><td>Low</td></tr>
+  <tr><td class="num">5</td><td><b>Operator guidance</b> — keep Tally on its main screen, no open dialogs</td><td>§5</td><td>None (docs)</td></tr>
+</table>
+
+<h2 id="confirm">9. Fastest confirmation (before writing code)</h2>
+<p>Look at one real hang in the logs and check the line <b>immediately preceding</b> the freeze:</p>
+<ul>
+  <li>Freeze right after <code>[Metrics] profit_loss …</code> / <code>balance_sheet …</code> / <code>trial_balance …</code>, or right when an idle/read timeout fires → <b>§2/§3 confirmed</b> (heavy exports).</li>
+  <li>Freeze coinciding with a <code>[Push API]</code> line from port 3002 → <b>§4 confirmed</b> (concurrency).</li>
+</ul>
+<p>One log line likely settles which is dominant.</p>
+
+<h2 id="appendix">10. Appendix — code reference map</h2>
+<table>
+  <tr><th>Responsibility</th><th>Function / location</th></tr>
+  <tr><td>Tally port pre-flight (TCP 9000, 3&nbsp;s)</td><td><span class="ref">checkTallyPort — sync-engine.ts:73; used at :207</span></td></tr>
+  <tr><td>One-sync-at-a-time guard</td><td><span class="ref">activeRunId — sync-engine.ts:188; isSyncInProgress :152</span></td></tr>
+  <tr><td>Subprocess idle (10m) / hard (45m) timeouts</td><td><span class="ref">sync-engine.ts:387–392</span></td></tr>
+  <tr><td>Voucher batching + recursive split</td><td><span class="ref">fetch_vouchers_with_batches — sync_main.py:819</span></td></tr>
+  <tr><td>Section gating (need_* flags)</td><td><span class="ref">build_sync_plan — sync_main.py:369</span></td></tr>
+  <tr><td>Heavy report exports</td><td><span class="ref">tally_client.py:615–678 (P&amp;L/BS/TB), :573–610 (outstanding)</span></td></tr>
+  <tr><td>The single HTTP transport (timeouts)</td><td><span class="ref">_post — tally_client.py:89; timeouts :25–36</span></td></tr>
+  <tr><td>Push poller — schedule &amp; sync guard</td><td><span class="ref">pollOnce — push-queue-poller.ts:93; guard :108–114; spawn :128/:144</span></td></tr>
+  <tr><td>On-demand push server (no sync guard)</td><td><span class="ref">local-push-server.ts: handleRequest, spawn :200</span></td></tr>
+  <tr><td>Check backend for ready jobs</td><td><span class="ref">fetch_pending_push_vouchers — cloud_pusher.py:340; GET /api/sync/push-queue :352</span></td></tr>
+  <tr><td>Per-job push loop</td><td><span class="ref">run_pending_push_cycle — sync_main.py:1106; push call :1154</span></td></tr>
+  <tr><td>The actual write to Tally</td><td><span class="ref">push_vouchers — tally_pusher.py:528; Import envelope :454/:471; parse :487</span></td></tr>
+  <tr><td>Report results back</td><td><span class="ref">mark_push_results — cloud_pusher.py:389; POST /api/sync/push-results :399</span></td></tr>
+  <tr><td>Command routing in the engine</td><td><span class="ref">main — sync_main.py:1322–1326 (sync | poll_push_queue | push_voucher)</span></td></tr>
+</table>
+
+<footer>
+  Generated for TallyBridge maintainers · static-analysis diagnosis, not yet confirmed against a captured hang.<br>
+  Verify file:line citations against current code before acting — line numbers drift with edits.
+</footer>
+
+</div>
+</body>
+</html>
