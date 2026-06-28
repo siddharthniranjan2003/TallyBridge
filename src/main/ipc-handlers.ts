@@ -555,6 +555,10 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
     store.set("syncFromDate", normalizeOptionalIsoDate(s.syncFromDate));
     store.set("syncToDate", normalizeOptionalIsoDate(s.syncToDate));
     engine.reschedule();
+    window.webContents.send("config-updated", {
+      syncIntervalMinutes: store.get("syncIntervalMinutes", 360),
+      syncPaused: Boolean(store.get("syncPaused")),
+    });
     return { success: true };
   });
 

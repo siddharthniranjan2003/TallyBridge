@@ -19,6 +19,29 @@ let localPushServer: LocalPushServer | null = null;
 let pushQueuePoller: PushQueuePoller | null = null;
 let isQuitting = false; // set true for a real quit (e.g. install-restart) so close-to-tray is bypassed
 
+//***Abha
+// Because we close-to-tray, the process keeps running after the window is hidden.
+// Without a single-instance lock, re-launching the app (shortcut / .exe) would
+// spawn a brand-new process every time, stacking up duplicate tray icons, sync
+// engines, pollers and port-3002 servers. Grab the lock here: the first instance
+// keeps it; any later launch fails to acquire it, so we surface the existing
+// window (via the second-instance event below) and quit the duplicate.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    // Another launch was attempted — bring the already-running window to the front.
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
+//***Abha sharma
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 900,
@@ -39,9 +62,7 @@ function createWindow() {
     mainWindow.loadURL("http://localhost:5173");
     mainWindow.webContents.openDevTools({ mode: "detach" });
   } else {
-    mainWindow.loadFile(
-      path.join(__dirname, "../renderer/index.html")
-    );
+    mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
   }
 
   mainWindow.once("ready-to-show", () => {
@@ -57,6 +78,11 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  //***Abha
+  // A duplicate launch that failed to grab the lock has already called app.quit();
+  // bail out before doing any startup work so it doesn't spin up a second engine.
+  if (!gotSingleInstanceLock) return;
+
   // One-time migration: move existing installs off render mode (which sends the
   // whole company in one request → OOM/413 → voucher items dropped) onto hybrid,
   // which chunks vouchers straight to the Supabase ingest Edge Function. Only
@@ -93,7 +119,8 @@ app.whenReady().then(() => {
   });
   syncEngine.setLifecycleCallbacks({
     onSyncStart: () => trayController.setStatus("syncing"),
-    onSyncComplete: (hadErrors) => trayController.setStatus(hadErrors ? "error" : "idle"),
+    onSyncComplete: (hadErrors) =>
+      trayController.setStatus(hadErrors ? "error" : "idle"),
     onCompanyError: () => trayController.setStatus("error"),
     onSyncPaused: () => trayController.setStatus("paused"),
   });

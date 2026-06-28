@@ -27,9 +27,24 @@ export default function StatusBar() {
     };
     window.electronAPI.on("sync-paused", onSyncPaused);
 
+    // Reflect settings changes (e.g. sync interval) without an app restart
+    const onConfigUpdated = (
+      _: unknown,
+      cfg: { syncIntervalMinutes?: number; syncPaused?: boolean },
+    ) => {
+      if (typeof cfg?.syncIntervalMinutes === "number") {
+        setSyncInterval(cfg.syncIntervalMinutes || 360);
+      }
+      if (typeof cfg?.syncPaused === "boolean") {
+        setIsPaused(cfg.syncPaused);
+      }
+    };
+    window.electronAPI.on("config-updated", onConfigUpdated);
+
     return () => {
       clearInterval(t);
       window.electronAPI.off("sync-paused", onSyncPaused);
+      window.electronAPI.off("config-updated", onConfigUpdated);
     };
   }, []);
 

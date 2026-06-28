@@ -5,6 +5,7 @@ const ALLOWED_CHANNELS = new Set([
   "sync-start",
   "sync-complete",
   "sync-paused",
+  "config-updated",
   "company-status-change",
   "company-synced",
   "company-error",
