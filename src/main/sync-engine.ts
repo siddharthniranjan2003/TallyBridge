@@ -25,6 +25,24 @@ type SyncLifecycleCallbacks = {
   onSyncPaused?: () => void;
 };
 
+// Force-kill a spawned engine process AND its children. On Windows the
+// PyInstaller engine.exe spawns a grandchild tree that a plain proc.kill()
+// (SIGTERM) leaves orphaned, so use taskkill /t to take down the whole tree.
+function killProcessTree(proc: ReturnType<typeof spawn> | null) {
+  if (!proc?.pid) {
+    return;
+  }
+  try {
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/pid", String(proc.pid), "/f", "/t"], { windowsHide: true });
+    } else {
+      proc.kill("SIGKILL");
+    }
+  } catch {
+    // best-effort termination
+  }
+}
+
 export class SyncEngine {
   private timer: NodeJS.Timeout | null = null;
   private mainWindow: BrowserWindow;
@@ -101,6 +119,17 @@ export class SyncEngine {
     }
   }
 
+  // Hard shutdown for app quit / auto-update install. Unlike pause(), this does
+  // not persist state or reschedule — it just clears the timer and force-kills
+  // any in-flight sync child (and its Windows grandchildren) so no engine.exe is
+  // orphaned to hold RAM and contend with Tally on :9000 after we exit.
+  kill() {
+    this.stop();
+    if (this.currentProc?.pid) {
+      killProcessTree(this.currentProc);
+    }
+  }
+
   pause() {
     if (this.paused) {
       return;
@@ -113,11 +142,7 @@ export class SyncEngine {
     }
     if (this.currentProc?.pid) {
       this.pauseKilledChildRunId = this.activeChildRunId;
-      if (process.platform === "win32") {
-        spawn("taskkill", ["/pid", String(this.currentProc.pid), "/f", "/t"]);
-      } else {
-        this.currentProc.kill("SIGKILL");
-      }
+      killProcessTree(this.currentProc);
     }
     this.lifecycleCallbacks.onSyncPaused?.();
     this.emit("sync-paused", { paused: true });
@@ -539,7 +564,7 @@ export class SyncEngine {
             company: companyName,
             line: `[ERR] ${timeoutReason}`,
           });
-          proc?.kill();
+          killProcessTree(proc);
           setTimeout(() => finalize(1, timeoutReason), 1000);
         }
       }, 5000);
@@ -551,7 +576,7 @@ export class SyncEngine {
           company: companyName,
           line: `[ERR] ${timeoutReason}`,
         });
-        proc?.kill();
+        killProcessTree(proc);
         setTimeout(() => finalize(1, timeoutReason), 1000);
       }, hardTimeoutMs);
 

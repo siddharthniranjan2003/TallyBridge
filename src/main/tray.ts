@@ -1,10 +1,10 @@
-import { Tray, Menu, BrowserWindow, nativeImage, app } from "electron";
+import { Tray, Menu, BrowserWindow, nativeImage } from "electron";
 import path from "path";
 import isDev from "electron-is-dev";
 
 let tray: Tray | null = null;
 
-export function setupTray(mainWindow: BrowserWindow, onSyncNow: () => void) {
+export function setupTray(mainWindow: BrowserWindow, onSyncNow: () => void, onQuit: () => void) {
   const iconPath = isDev
     ? path.join(__dirname, "../../assets/tray-icon.png")
     : path.join(process.resourcesPath, "assets", "tray-icon.png");
@@ -43,7 +43,10 @@ export function setupTray(mainWindow: BrowserWindow, onSyncNow: () => void) {
       { type: "separator" },
       {
         label: "Quit TallyBridge",
-        click: () => { app.exit(0); },
+        // Route through a graceful shutdown (app.quit() -> before-quit) so push
+        // workers + the sync child are reaped and logs flushed. app.exit(0)
+        // would skip all of that.
+        click: () => onQuit(),
       },
     ]);
   };

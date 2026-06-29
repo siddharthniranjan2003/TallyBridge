@@ -18,6 +18,7 @@ if (!isDev) {
 let mainWindow: BrowserWindow | null = null;
 let localPushServer: LocalPushServer | null = null;
 let pushQueuePoller: PushQueuePoller | null = null;
+let syncEngineRef: SyncEngine | null = null; // module-scope handle so quit handlers can reap the sync child
 let isQuitting = false; // set true for a real quit (e.g. install-restart) so close-to-tray is bypassed
 
 //***Abha
@@ -112,15 +113,20 @@ app.whenReady().then(() => {
   createWindow();
 
   const syncEngine = new SyncEngine(mainWindow!);
+  syncEngineRef = syncEngine;
   // Let the shared Tally gate see when a sync child currently owns port 9000 so
   // no other caller fires a competing request at the single-threaded gateway.
   tallyGate.setBusyProbe(() => syncEngine.isSyncInProgress());
   localPushServer = new LocalPushServer(mainWindow!, syncEngine);
   pushQueuePoller = new PushQueuePoller(mainWindow!, syncEngine);
   localPushServer.start();
-  const trayController = setupTray(mainWindow!, () => {
-    void syncEngine.syncNow();
-  });
+  const trayController = setupTray(
+    mainWindow!,
+    () => { void syncEngine.syncNow(); },
+    // Graceful quit: app.quit() fires before-quit (reaps push workers + sync
+    // child, flushes logs); the isQuitting flag lets the window actually close.
+    () => { isQuitting = true; app.quit(); },
+  );
   syncEngine.setLifecycleCallbacks({
     onSyncStart: () => trayController.setStatus("syncing"),
     onSyncComplete: (hadErrors) =>
@@ -143,11 +149,15 @@ app.whenReady().then(() => {
   if (!isDev) {
     setupAutoUpdater({
       mainWindow: mainWindow!,
-      isBusy: () => syncEngine.isSyncInProgress(),
+      // Defer the install-restart while ANYTHING owns Tally — a sync OR an
+      // in-flight push worker. tallyGate.isBusy() covers both (the old check
+      // only saw syncs, so an update could interrupt a voucher write).
+      isBusy: () => syncEngine.isSyncInProgress() || tallyGate.isBusy(),
       beforeInstall: () => {
         isQuitting = true;
         pushQueuePoller?.stop();
         localPushServer?.stop();
+        syncEngine.kill();
       },
     });
   }
@@ -161,4 +171,5 @@ app.on("window-all-closed", () => {
 app.on("before-quit", () => {
   pushQueuePoller?.stop();
   localPushServer?.stop();
+  syncEngineRef?.kill();
 });
