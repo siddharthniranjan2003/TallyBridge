@@ -40,6 +40,17 @@ class TallyAccessGate {
     }
   }
 
+  // True when a push worker or a main-process HTTP request currently owns the
+  // gateway. Unlike isBusy(), this EXCLUDES the sync busyProbe, so the sync
+  // engine can ask "is anyone OTHER than me about to touch Tally?" before it
+  // starts a run — without self-triggering on its own busyProbe. This is what
+  // closes the sync-vs-push c0000005 collision (the push paths already defer to
+  // an in-progress sync via isSyncInProgress; this makes the sync defer to an
+  // in-flight push symmetrically).
+  isExternallyBusy(): boolean {
+    return this.activeHttp > 0 || this.pythonWork > 0;
+  }
+
   // Serialize main-process HTTP to Tally. Calls queue behind one another so the
   // gateway only ever sees a single request from the Electron side at a time.
   async runExclusive<T>(fn: () => Promise<T>): Promise<T> {

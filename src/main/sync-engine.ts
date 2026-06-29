@@ -16,6 +16,7 @@ import {
   updateCompanyStatus,
 } from "./store";
 import { shipSyncLog, setLogContext } from "./remote-log";
+import { tallyGate } from "./tally-gate";
 
 type SyncLifecycleCallbacks = {
   onSyncStart?: () => void;
@@ -213,6 +214,22 @@ export class SyncEngine {
         this.emit("sync-log", {
           company: "System",
           line: "[TallyBridge] TallyPrime not reachable — sync skipped. Will retry next interval.",
+        });
+        shouldScheduleNext = true;
+        return;
+      }
+
+      // Never start a sync while a push worker (or a main-process Tally request)
+      // is mid-write to single-threaded TallyPrime — two callers on port 9000 at
+      // once hard-crashes Tally (Software Exception c0000005). Defer to the next
+      // interval. The reverse direction is already covered: the push poller and
+      // local-push-server check isSyncInProgress() before spawning, and this run
+      // has already claimed activeRunId above (synchronously, no await since),
+      // so no new push can start between this check and isSyncing = true.
+      if (tallyGate.isExternallyBusy()) {
+        this.emit("sync-log", {
+          company: "System",
+          line: "[TallyBridge] A push is writing to Tally — deferring this sync to avoid a Tally crash. Will retry next interval.",
         });
         shouldScheduleNext = true;
         return;
