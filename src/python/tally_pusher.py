@@ -3,7 +3,7 @@ import os
 import re
 from decimal import Decimal, InvalidOperation
 
-from tally_client import TALLY_COMPANY, _post, _xml_escape
+from tally_client import TALLY_COMPANY, _assert_data_response, _post, _xml_escape
 
 PUSH_AMOUNT_TOLERANCE = Decimal("0.05")
 DEFAULT_ALLOWED_PUSH_TYPES = [
@@ -527,5 +527,8 @@ def parse_push_response(xml_text: str) -> dict:
 
 def push_vouchers(vouchers: list[dict], company: str = TALLY_COMPANY) -> dict:
     envelope = _build_import_envelope(vouchers, company)
-    response_xml = _post(envelope)
+    # Reject HTML/license/empty bodies from a busy or no-company Tally before
+    # parsing — otherwise parse_push_response returns all-zeros and the caller
+    # could mistake it for a (no-op) success and ack/drop the voucher (push-02).
+    response_xml = _assert_data_response(_post(envelope))
     return parse_push_response(response_xml)

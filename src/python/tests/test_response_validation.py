@@ -29,6 +29,22 @@ def _raises(text: str) -> bool:
 def test_empty_body_rejected():
     assert _raises("")
     assert _raises("   \n\t ")
+    # BOM-only / BOM+whitespace from a UTF-16 degraded Tally is still "empty".
+    assert _raises("﻿")
+    assert _raises("﻿   \n")
+
+
+def test_assert_data_response_used_by_push_path():
+    # push_vouchers routes its response through the same guard; a valid import
+    # response passes through unchanged, HTML/empty raises.
+    ok = "<ENVELOPE><BODY><DATA><CREATED>1</CREATED></DATA></BODY></ENVELOPE>"
+    assert tally_client._assert_data_response(ok) == ok
+    for bad in ("", "﻿", "<!DOCTYPE html><html></html>", "<html><body>x</body></html>"):
+        try:
+            tally_client._assert_data_response(bad)
+            assert False, f"expected rejection for {bad!r}"
+        except RuntimeError:
+            pass
 
 
 def test_html_license_page_rejected():

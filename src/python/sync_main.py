@@ -1429,8 +1429,17 @@ def run_pending_push_cycle(
 
         try:
             result = push_vouchers([voucher_payload], company=COMPANY)
-            status_value = "failed" if result.get("errors") else "pushed"
+            # Treat a push as successful ONLY if Tally actually created or altered
+            # a voucher and reported no errors — mirroring run_single_push_command.
+            # A busy/locked Tally that returns created=0/altered=0/errors=0 (e.g. an
+            # empty <ENVELOPE/>) must be a FAILURE, not silently acked as 'pushed'
+            # (which would permanently drop the cloud voucher). HTML/empty bodies
+            # are already rejected upstream by _assert_data_response in push_vouchers.
+            imported = bool(result.get("created") or result.get("altered"))
+            status_value = "pushed" if (imported and not result.get("errors")) else "failed"
             error_message = "; ".join(result.get("line_errors") or []) or None
+            if status_value == "failed" and not error_message:
+                error_message = "Tally imported 0 vouchers (it may be busy or no company is loaded)."
             if status_value == "failed":
                 warning = (
                     f"Voucher push failed for job {job_id}: "
