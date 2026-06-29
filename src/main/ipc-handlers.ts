@@ -70,6 +70,12 @@ function decodeXmlEntities(value: string) {
     .replace(/&apos;/g, "'");
 }
 
+// Secrets we never hand to the renderer in cleartext. get-config replaces a set
+// value with SECRET_SENTINEL; save-settings restores the stored value when it
+// receives the sentinel back (i.e. the user didn't change the field).
+const SECRET_SENTINEL = "__TB_SECRET_UNCHANGED__";
+const SECRET_CONFIG_KEYS = ["apiKey", "controlPlaneApiKey", "syncIngestKey"] as const;
+
 function parseTallyPort(tallyUrl: string) {
   try {
     const parsed = new URL(tallyUrl);
@@ -556,28 +562,48 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
     });
   }
 
-  ipcMain.handle("get-config", () => store.store);
+  ipcMain.handle("get-config", () => {
+    // Don't ship raw secrets to the renderer. Replace any set key with a
+    // sentinel so the Settings form can show "configured" (masked) without
+    // exposing the value; save-settings preserves the stored value when it
+    // receives the sentinel back unchanged.
+    const cfg: Record<string, unknown> = { ...store.store };
+    for (const key of SECRET_CONFIG_KEYS) {
+      if (typeof cfg[key] === "string" && cfg[key]) {
+        cfg[key] = SECRET_SENTINEL;
+      }
+    }
+    return cfg;
+  });
 
   ipcMain.handle("get-app-version", () => app.getVersion());
 
   ipcMain.handle("get-companies", () => store.get("companies"));
 
   ipcMain.handle("save-settings", (_, s) => {
+    // If the renderer sent back the masked sentinel (the user left a secret
+    // field untouched), keep the currently-stored secret instead of wiping it.
+    const unmaskSecret = (incoming: any, storeKey: string): any =>
+      incoming === SECRET_SENTINEL ? store.get(storeKey as any, "") : incoming;
+    const incomingApiKey = unmaskSecret(s.apiKey, "apiKey");
+    const incomingControlKey = unmaskSecret(s.controlPlaneApiKey, "controlPlaneApiKey");
+    const incomingIngestKey = unmaskSecret(s.syncIngestKey, "syncIngestKey");
+
     const legacyBackendUrl = typeof s.backendUrl === "string" ? s.backendUrl.trim() : "";
-    const legacyApiKey = typeof s.apiKey === "string" ? s.apiKey.trim() : "";
+    const legacyApiKey = typeof incomingApiKey === "string" ? incomingApiKey.trim() : "";
     const controlPlaneUrl = resolveControlPlaneUrl({
       controlPlaneUrl: s.controlPlaneUrl,
       backendUrl: legacyBackendUrl,
     });
     const controlPlaneApiKey = resolveControlPlaneApiKey({
-      controlPlaneApiKey: s.controlPlaneApiKey,
+      controlPlaneApiKey: incomingControlKey,
       apiKey: legacyApiKey,
     });
     const syncIngestUrl = resolveSyncIngestUrl({
       syncIngestUrl: s.syncIngestUrl,
     });
     const syncIngestKey = resolveSyncIngestKey({
-      syncIngestKey: s.syncIngestKey,
+      syncIngestKey: incomingIngestKey,
     });
 
     // Validate the sync interval: a NaN / 0 / negative value would schedule

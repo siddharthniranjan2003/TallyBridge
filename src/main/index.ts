@@ -67,6 +67,19 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
   }
 
+  // Harden the renderer: it only ever loads our own bundle, so deny opening new
+  // windows and block navigation to any external URL. This limits what a
+  // compromised/maliciously-injected renderer could load or where it could send
+  // data (it holds backend config), without affecting normal in-app routing
+  // (React Router navigates in-memory, not via real URL loads).
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" as const }));
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    const allowedPrefix = isDev ? "http://localhost:5173" : "file://";
+    if (!url.startsWith(allowedPrefix)) {
+      event.preventDefault();
+    }
+  });
+
   mainWindow.once("ready-to-show", () => {
     mainWindow?.show();
   });
