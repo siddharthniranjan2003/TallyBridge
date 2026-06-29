@@ -1,5 +1,5 @@
 import { spawn, ChildProcess } from "child_process";
-import { app, BrowserWindow, dialog } from "electron";
+import { app, BrowserWindow } from "electron";
 import { createServer, IncomingMessage, Server, ServerResponse } from "http";
 import path from "path";
 import isDev from "electron-is-dev";
@@ -11,6 +11,7 @@ import { tallyGate } from "./tally-gate";
 
 const DEFAULT_LOCAL_PUSH_HOST = "127.0.0.1";
 const DEFAULT_LOCAL_PUSH_PORT = 3002;
+const MAX_LISTEN_RETRIES = 5;
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const DEFAULT_PUSH_WORKER_TIMEOUT_MS = 90000;
 
@@ -162,6 +163,7 @@ function parseLastJsonObject(stdout: string) {
 export class LocalPushServer {
   private server: Server | null = null;
   private readonly port = resolveLocalPushPort();
+  private listenRetries = 0;
   // In-flight push worker processes, killed on stop()/quit so they aren't
   // orphaned (a leaked engine.exe holds RAM and contends with Tally on :9000).
   private readonly activeChildren = new Set<ChildProcess>();
@@ -184,14 +186,33 @@ export class LocalPushServer {
       const message = error instanceof Error ? error.message : String(error);
       this.log(`[Push API] Local server error: ${message}`);
       if ((error as NodeJS.ErrnoException).code === "EADDRINUSE") {
-        dialog.showErrorBox(
-          "TallyBridge Port Conflict",
-          `Port ${this.port} is already in use.\n\nAnother TallyBridge instance may be running. Close it and restart the app.`,
-        );
+        // Don't block an unattended app with a modal dialog. The port is usually
+        // held briefly by a dying previous instance — retry with backoff, then
+        // log (no modal) if it persists. TB_LOCAL_PUSH_PORT can move it.
+        if (this.listenRetries < MAX_LISTEN_RETRIES) {
+          this.listenRetries += 1;
+          const delay = 1000 * this.listenRetries;
+          this.log(`[Push API] Port ${this.port} busy — retrying in ${delay}ms (${this.listenRetries}/${MAX_LISTEN_RETRIES}).`);
+          setTimeout(() => {
+            if (this.server) {
+              try {
+                this.server.listen(this.port, DEFAULT_LOCAL_PUSH_HOST);
+              } catch {
+                /* the 'error' event handles failures */
+              }
+            }
+          }, delay);
+        } else {
+          this.log(
+            `[Push API] Port ${this.port} still in use after ${MAX_LISTEN_RETRIES} retries; ` +
+              "push delivery is disabled this session. Set TB_LOCAL_PUSH_PORT to use another port.",
+          );
+        }
       }
     });
 
     this.server.listen(this.port, DEFAULT_LOCAL_PUSH_HOST, () => {
+      this.listenRetries = 0;
       this.log(
         `[Push API] Listening on http://${DEFAULT_LOCAL_PUSH_HOST}:${this.port}`,
       );
