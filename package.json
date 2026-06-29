@@ -4,7 +4,7 @@
   "description": "TallyPrime cloud sync desktop connector",
   "main": "dist/main/index.js",
   "scripts": {
-    "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
+    "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.main.json --watch\" \"wait-on http://localhost:5173 dist/main/index.js && cross-env NODE_ENV=development electron .\"",
     "build:renderer": "vite build",
     "build:main": "tsc -p tsconfig.main.json",
     "build:python": "cd src/python && pyinstaller --onefile --name tallybridge-engine --distpath ../../python-dist --workpath ../../python-build --add-data definitions;definitions --add-data tally_odbc_helper.ps1;. --collect-all xmltodict --collect-all requests --collect-all dotenv sync_main.py",
