@@ -4,6 +4,46 @@ from datetime import datetime, timezone
 
 import requests
 
+try:
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+except Exception:  # pragma: no cover - defensive (also lets test stubs import this)
+    HTTPAdapter = None
+    Retry = None
+
+
+def _build_http_session() -> requests.Session:
+    """A shared session with bounded retry/backoff so a single transient network
+    blip (502/503/504 or a dropped connection — common on flaky SME links, or a
+    half-open socket after sleep/wake) doesn't fail an entire sync section/run.
+    Cloud ingest is upsert-based (idempotent), so retrying POST is safe here."""
+    session = requests.Session()
+    if Retry is not None and HTTPAdapter is not None:
+        methods = frozenset({"GET", "POST", "PATCH", "PUT", "DELETE"})
+        try:
+            retry = Retry(
+                total=3, connect=3, read=3,
+                backoff_factor=0.5,  # 0.5s, 1s, 2s
+                status_forcelist=(502, 503, 504),
+                allowed_methods=methods,
+                raise_on_status=False,
+            )
+        except TypeError:  # urllib3 < 1.26 used method_whitelist
+            retry = Retry(
+                total=3, connect=3, read=3,
+                backoff_factor=0.5,
+                status_forcelist=(502, 503, 504),
+                method_whitelist=methods,
+                raise_on_status=False,
+            )
+        adapter = HTTPAdapter(max_retries=retry)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+    return session
+
+
+_HTTP = _build_http_session()
+
 LEGACY_BACKEND_URL = os.environ.get("BACKEND_URL", "").strip()
 LEGACY_API_KEY = os.environ.get("API_KEY", "").strip()
 CONTROL_PLANE_URL = (
@@ -228,14 +268,14 @@ def _resolve_direct_company_id(rest: str, headers: dict, payload: dict) -> str:
 
     if _DIRECT_COMPANY_ID is None:
         if guid:
-            rows = requests.get(f"{rest}/companies", headers=headers,
+            rows = _HTTP.get(f"{rest}/companies", headers=headers,
                                 params={"guid": f"eq.{guid}", "select": "id"}, timeout=timeout)
             rows.raise_for_status()
             data = rows.json()
             if data:
                 _DIRECT_COMPANY_ID = data[0]["id"]
         if _DIRECT_COMPANY_ID is None and name:
-            rows = requests.get(f"{rest}/companies", headers=headers,
+            rows = _HTTP.get(f"{rest}/companies", headers=headers,
                                 params={"name": f"eq.{name}", "select": "id,guid", "limit": "2"},
                                 timeout=timeout)
             rows.raise_for_status()
@@ -249,14 +289,14 @@ def _resolve_direct_company_id(rest: str, headers: dict, payload: dict) -> str:
             if guid:
                 insert["guid"] = guid
             insert.update(update)
-            created = requests.post(f"{rest}/companies", headers={**headers, "Prefer": "return=representation"},
+            created = _HTTP.post(f"{rest}/companies", headers={**headers, "Prefer": "return=representation"},
                                     params={"select": "id"}, json=[insert], timeout=timeout)
             created.raise_for_status()
             _DIRECT_COMPANY_ID = created.json()[0]["id"]
             return _DIRECT_COMPANY_ID  # insert already carried the metadata
 
     if update:
-        patched = requests.patch(f"{rest}/companies", headers=headers,
+        patched = _HTTP.patch(f"{rest}/companies", headers=headers,
                                  params={"id": f"eq.{_DIRECT_COMPANY_ID}"}, json=update, timeout=timeout)
         patched.raise_for_status()
     return _DIRECT_COMPANY_ID
@@ -317,7 +357,7 @@ def _post_direct_via_postgrest(payload: dict, step_label: str) -> dict[str, obje
                 "p_trial_balance": payload.get("trial_balance"),
             }
 
-        response = requests.post(f"{rest}/rpc/{rpc}", headers=headers, json=body,
+        response = _HTTP.post(f"{rest}/rpc/{rpc}", headers=headers, json=body,
                                  timeout=get_backend_timeout_seconds())
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
         if not response.ok:
@@ -500,7 +540,7 @@ def _resolve_company_id_readonly(rest: str, headers: dict) -> str | None:
     name = TALLY_COMPANY or None
 
     if guid:
-        rows = requests.get(
+        rows = _HTTP.get(
             f"{rest}/companies",
             headers=headers,
             params={"guid": f"eq.{guid}", "select": "id"},
@@ -512,7 +552,7 @@ def _resolve_company_id_readonly(rest: str, headers: dict) -> str | None:
             return data[0]["id"]
 
     if name:
-        rows = requests.get(
+        rows = _HTTP.get(
             f"{rest}/companies",
             headers=headers,
             params={"name": f"eq.{name}", "select": "id", "limit": "1"},
@@ -548,7 +588,7 @@ def fetch_remote_voucher_count() -> tuple[int | None, str]:
         # Prefer: count=exact + a 0-0 range returns the total in Content-Range
         # ("0-0/<total>") without transferring every row.
         count_headers = {**headers, "Prefer": "count=exact", "Range": "0-0"}
-        response = requests.get(
+        response = _HTTP.get(
             f"{rest}/vouchers",
             headers=count_headers,
             params={"company_id": f"eq.{company_id}", "select": "id"},
@@ -598,7 +638,7 @@ def fetch_remote_master_count(section_name: str) -> tuple[int | None, str]:
             return None, "company_not_found"
 
         count_headers = {**headers, "Prefer": "count=exact", "Range": "0-0"}
-        response = requests.get(
+        response = _HTTP.get(
             f"{rest}/{table}",
             headers=count_headers,
             params={"company_id": f"eq.{company_id}", "select": "id"},
@@ -628,7 +668,7 @@ def fetch_remote_alter_ids() -> tuple[dict | None, str]:
         return None, "company_identity_missing"
 
     try:
-        response = requests.get(
+        response = _HTTP.get(
             _control_plane_url("/api/sync/alter-ids"),
             params=params,
             headers=_build_control_headers(),
@@ -667,7 +707,7 @@ def fetch_pending_push_vouchers(limit: int = 10) -> tuple[list[dict], str]:
     params["limit"] = str(max(1, min(limit, 50)))
 
     try:
-        response = requests.get(
+        response = _HTTP.get(
             _control_plane_url("/api/sync/push-queue"),
             params=params,
             headers=_build_control_headers(),
@@ -719,7 +759,7 @@ def mark_push_results(job_results: list[dict], timeout_seconds: int | None = Non
     effective_timeout = timeout_seconds if timeout_seconds else min(get_backend_timeout_seconds(), 60)
 
     try:
-        response = requests.post(
+        response = _HTTP.post(
             _control_plane_url("/api/sync/push-results"),
             json={"results": job_results},
             headers={
@@ -812,7 +852,7 @@ def _post_sync_payload(
     request_started_at = time.perf_counter()
 
     try:
-        response = requests.post(
+        response = _HTTP.post(
             target_url,
             json=payload,
             headers=headers,
