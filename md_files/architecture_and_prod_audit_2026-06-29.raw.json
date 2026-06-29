@@ -1,0 +1,1499 @@
+{
+  "summary": "Map architecture of TallyBridge (Electron+Python+2 backends) and aiaccountant Flutter, then assess production-readiness across 6 dimensions",
+  "agentCount": 12,
+  "logs": [
+    "Architecture mapped for 6 subsystems. Digest 19878 chars. Starting production-readiness assessment.",
+    "parallel[4] failed: agent({schema}): StructuredOutput retry cap (5) exceeded — 5 failed calls with no valid output"
+  ],
+  "result": {
+    "architecture": [
+      {
+        "component": "Electron Main Process (src/main/)",
+        "purpose": "The Electron main process is the orchestration core of TallyBridge: it boots the app, applies one-time config migrations, spawns the bundled Python sync engine as short-lived subprocesses, runs a loopback HTTP server on port 3002 for cloud-initiated voucher pushes, polls the cloud control plane for queued pushes, and bridges a curated IPC surface to the React renderer. It also manages the system tray, electron-store config, auto-update, and a BetterStack remote-log forwarder, while guarding single-threaded TallyPrime (port 9000) from concurrent/heavy reads.",
+        "entrypoints": [
+          {
+            "file": "src/main/index.ts",
+            "role": "App bootstrap: initLogger (prod only), runs two one-time store migrations, creates the BrowserWindow, instantiates SyncEngine/LocalPushServer/PushQueuePoller, wires tray + IPC + auto-updater, schedules first sync after 8s, handles before-quit/window-all-closed lifecycle"
+          },
+          {
+            "file": "src/main/preload.ts",
+            "role": "contextBridge sandbox boundary: exposes window.electronAPI (invoke wrappers + an allow-listed event on/off) to the renderer with contextIsolation:true, nodeIntegration:false"
+          },
+          {
+            "file": "src/main/ipc-handlers.ts",
+            "role": "Registers all ipcMain.handle channels; also the in-process Tally XML client (axios POST to port 9000) used for company discovery, capability probing, and date-range reads"
+          }
+        ],
+        "keyModules": [
+          {
+            "file": "src/main/sync-engine.ts",
+            "responsibility": "Sync orchestration (Tally->Cloud). Port 9000 pre-flight via raw TCP socket; spawns Python sync_main.py / tallybridge-engine.exe per company; run-tracking with runId/cancelledRunIds; pause kills child via taskkill /f /t (win32) or SIGKILL; idle (10min) + hard (45min) timeouts; parses last JSON stdout line for record counts; interval scheduling (default 360min)",
+            "loc": 634
+          },
+          {
+            "file": "src/main/ipc-handlers.ts",
+            "responsibility": "IPC surface + Tally XML/ODBC integration: get-config, save-settings, add/remove-company, sync-now, pause/resume-sync, check-tally(-capabilities), get-tally-companies, get-tally-company-date-ranges, startup-setting, open-log-file. Includes XML envelope builders, UTF-16/entity decoding, ODBC probe via SysWOW64 powershell helper",
+            "loc": 728
+          },
+          {
+            "file": "src/main/local-push-server.ts",
+            "responsibility": "HTTP server on 127.0.0.1:3002 (Cloud->Tally). Loopback-only guard, 1MB body cap, routes GET /health and POST /push-voucher; spawns Python push worker (TB_COMMAND=push_voucher) feeding payload over stdin; EADDRINUSE shows a dialog",
+            "loc": 279
+          },
+          {
+            "file": "src/main/push-queue-poller.ts",
+            "responsibility": "Polls the control plane every 5s (TB_COMMAND=poll_push_queue) per enabled company; spawns Python per company; skips when paused or a sync is in progress; filters noisy 'no pending' log lines",
+            "loc": 210
+          },
+          {
+            "file": "src/main/store.ts",
+            "responsibility": "electron-store schema (tallybridge-config) + defaults; Company/AppConfig types; add/remove/updateCompanyStatus; resetStaleSyncStatuses; normalizers and resolveControlPlane*/resolveSyncIngest* fallback helpers (controlPlaneUrl||backendUrl legacy)",
+            "loc": 177
+          },
+          {
+            "file": "src/main/updater.ts",
+            "responsibility": "electron-updater wiring: autoDownload, hourly + initial checkForUpdates, installWhenIdle defers quitAndInstall until isBusy()==false, beforeInstall() tears down servers; download-update/install-update IPC",
+            "loc": 77
+          },
+          {
+            "file": "src/main/remote-log.ts",
+            "responsibility": "BetterStack/Logtail forwarder: taps sync-log lines, batches (flush 2s / 50 lines / 1000 cap), POSTs over https; baked-in token+host with env overrides; fully try/catch wrapped so it never throws into sync; setLogContext tags lines with active company identity",
+            "loc": 158
+          },
+          {
+            "file": "src/main/tray.ts",
+            "responsibility": "System tray icon + context menu (Open / Sync Now / Quit via app.exit(0)); setStatus(idle|syncing|error|paused) rebuilds the menu and tooltip",
+            "loc": 60
+          },
+          {
+            "file": "src/main/logger.ts",
+            "responsibility": "File logger to app logs dir (tallybridge.log) with 5MB rotation to .old.log; monkeypatches console.log/warn/error in production; never throws on write failure",
+            "loc": 80
+          }
+        ],
+        "externalInterfaces": [
+          {
+            "target": "TallyPrime XML/HTTP gateway (default http://localhost:9000)",
+            "protocol": "HTTP POST text/xml + raw TCP",
+            "notes": "sync-engine.ts:74-94 does a raw net.Socket pre-flight (3s timeout) before spawning Python. ipc-handlers.ts:458-469 posts XML envelopes via axios (5s timeout) for company/date discovery. Single-threaded engine shared with Tally UI — heavy/concurrent reads freeze it"
+          },
+          {
+            "target": "Local push server 127.0.0.1:3002",
+            "protocol": "HTTP (loopback only)",
+            "notes": "local-push-server.ts:160 listens on DEFAULT_LOCAL_PUSH_HOST; port override via TB_LOCAL_PUSH_PORT. Rejects non-loopback (403), 1MB cap, /health + /push-voucher only"
+          },
+          {
+            "target": "Cloud control plane / backend (controlPlaneUrl or legacy backendUrl)",
+            "protocol": "HTTPS via spawned Python",
+            "notes": "push-queue-poller passes BACKEND_URL/CONTROL_PLANE_URL + API_KEY to Python; sync also passes SYNC_INGEST_URL/KEY. Main process itself does not call it directly — Python does"
+          },
+          {
+            "target": "Python sync engine subprocess",
+            "protocol": "child_process.spawn (stdout/stderr/stdin pipes)",
+            "notes": "Dev: 'py -3 -u sync_main.py' (win32) / 'python3 -u'. Prod: resourcesPath/python-runtime/tallybridge-engine.exe. Config passed entirely via env vars; results via last JSON line on stdout"
+          },
+          {
+            "target": "BetterStack Live Tail (s2537912.eu-fsn-3.betterstackdata.com)",
+            "protocol": "HTTPS POST (Bearer token)",
+            "notes": "remote-log.ts ships batched sync-log lines; token is write-only ingest, baked in but env-overridable (TB_LOGTAIL_TOKEN/HOST). No-op if either empty"
+          },
+          {
+            "target": "GitHub Releases (electron-updater)",
+            "protocol": "HTTPS",
+            "notes": "updater.ts auto-downloads and quitAndInstall when idle; publish repo inferred from package.json/git origin (build.publish is undefined in package.json — relies on electron-builder inference)"
+          },
+          {
+            "target": "Windows SysWOW64 PowerShell (ODBC probe)",
+            "protocol": "child_process.spawn powershell.exe",
+            "notes": "ipc-handlers.ts:229 spawns 32-bit powershell to run tally_odbc_helper.ps1 for ODBC capability probing (win32 only)"
+          }
+        ],
+        "dataFlows": [
+          "Startup: app.whenReady -> run migratedToHybridV1 + migratedSyncInterval6hV1 migrations -> createWindow -> new SyncEngine/LocalPushServer/PushQueuePoller -> localPushServer.start() (binds 3002) -> setupTray -> setupIpcHandlers -> setTimeout(syncEngine.start, 8000) -> pushQueuePoller.start() -> (prod) setupAutoUpdater (index.ts:59-123)",
+          "Sync (Tally->Cloud): SyncEngine.start -> waitForTallyThenSync polls port 9000 every 60s until up -> runAllCompanies -> per company checkTallyPort pre-flight -> syncOneCompany spawns Python with full env (TALLY_URL, company GUID, SYNC_INGEST_MODE, control-plane creds, TB_FORCE_FULL_SYNC) -> stdout lines emitted as sync-log + shipped to BetterStack -> on close, last '{'-prefixed JSON line parsed into record counts -> updateCompanyStatus + emit company-synced/company-error -> scheduleNext(360min) (sync-engine.ts:187-578)",
+          "Push (Cloud->Tally) inbound: cloud POSTs http://127.0.0.1:3002/push-voucher -> loopback check -> readJsonBody (1MB cap) -> pickCompanyName (explicit or sole enabled company) -> runPythonPushWorker spawns Python TB_COMMAND=push_voucher, payload on stdin -> parseLastJsonObject(stdout) -> 200/422 JSON response (local-push-server.ts:175-267)",
+          "Push queue polling: every 5s pollOnce -> skip if paused / no control-plane creds / sync in progress -> for each enabled company spawn Python TB_COMMAND=poll_push_queue -> interesting stdout/stderr lines forwarded to sync-log; reschedules in finally (push-queue-poller.ts:94-198)",
+          "Pause/Resume: ipc pause-sync -> engine.pause sets syncPaused, stops timer, adds activeRunId to cancelledRunIds, taskkill/SIGKILL currentProc; resume-sync -> clears flag, resumeImmediately if a run is active else scheduleNext(0) (sync-engine.ts:103-138, ipc-handlers.ts:623-631)",
+          "Renderer IPC: preload exposes electronAPI.invoke(...) -> ipcMain.handle in ipc-handlers/updater; main->renderer events restricted to ALLOWED_CHANNELS allow-list (preload.ts:3-16); save-settings persists to store then engine.reschedule()",
+          "Auto-update: checkForUpdates (initial + hourly) -> update-downloaded -> installWhenIdle loops every 5s while isBusy() -> beforeInstall() sets isQuitting, stops poller+server -> autoUpdater.quitAndInstall (updater.ts:43-59, index.ts:116-121)"
+        ],
+        "configAndSecrets": [
+          "electron-store 'tallybridge-config' (store.ts:60-83): keys tallyUrl, syncIntervalMinutes(default 360), backendUrl/apiKey (legacy), controlPlaneUrl/controlPlaneApiKey, syncIngestMode(default hybrid)/syncIngestUrl/syncIngestKey, syncContractVersion, accountEmail, readMode(auto), odbcDsnOverride, syncFromDate/ToDate, syncPaused, companies[], migratedToHybridV1, migratedSyncInterval6hV1",
+          "One-time migrations in index.ts:66-83: migratedToHybridV1 flips syncIngestMode render->hybrid only if syncIngestUrl is set; migratedSyncInterval6hV1 forces syncIntervalMinutes->360 once. Guard flags persisted so user choices afterward are preserved",
+          "Env-var overrides read at runtime: TB_READ_MODE, TB_ODBC_DSN_OVERRIDE, TB_SYNC_FROM_DATE/TO_DATE, TB_SYNC_PROCESS_IDLE_TIMEOUT_MS, TB_SYNC_PROCESS_HARD_TIMEOUT_MS (sync-engine), TB_LOCAL_PUSH_PORT (local-push-server), TB_PUSH_QUEUE_POLL_INTERVAL_MS (poller), TB_LOGTAIL_TOKEN/HOST (remote-log)",
+          "Secrets passed to Python via spawn env (not on disk): API_KEY/CONTROL_PLANE_API_KEY, SYNC_INGEST_KEY, TALLY_URL, company GUID, TB_USER_DATA_DIR (app.getPath userData)",
+          "Baked-in shippable secret: BetterStack ingest token DEFAULT_TOKEN in remote-log.ts:22 (described as write-only/Sentry-DSN model, env-overridable)",
+          "Auto-update publish target is NOT in package.json build.publish (undefined per inspection) — electron-builder infers it from git origin; this is a known config gotcha"
+        ],
+        "risks": [
+          "Single-threaded Tally (port 9000) contention: although runAllCompanies/poller guard against overlap via isSyncInProgress, the in-process axios Tally calls in ipc-handlers (check-tally, get-tally-companies, add-company, date-ranges) are NOT coordinated with the sync engine — a user clicking Refresh/Add Company during a sync can fire a concurrent read into the single-engine gateway and contribute to the documented freeze",
+          "Idle/hard timeout kill uses proc.kill() (SIGTERM equivalent) at sync-engine.ts:525/537, but pause uses taskkill /f /t. On Windows the bundled exe may spawn child processes; the timeout path does not use the /t tree-kill, so an orphaned engine subprocess could survive a timeout while currentProc is cleared on close",
+          "Port 3002 race / EADDRINUSE: only surfaced via a blocking dialog (local-push-server.ts:152-157); the server never retries or falls back, so a stale instance leaves push delivery dead until manual restart. localPushServer.stop() calls server.close() but does not await in-flight connections",
+          "Swallowed errors: remote-log flush/ship, logger write, and Python push-worker JSON parse failures are intentionally swallowed; JSON parse failure in sync finalize (sync-engine.ts:455) only console.errors and silently falls back to previous record counts, so a malformed Python result is reported as success with stale counts",
+          "Push queue poller spawns one Python process per enabled company every 5s; with many companies or a slow Python cold-start, polls can stack up wall-clock time even though scheduleNext only fires in finally — combined with per-company Tally reads this adds steady load on the Tally engine",
+          "Auto-updater installWhenIdle polls isBusy() every 5s indefinitely; if a sync run hangs (despite timeouts) the install can be deferred a long time. beforeInstall sets isQuitting and stops servers but does not kill an in-flight Python sync child before quitAndInstall",
+          "local-push-server pickCompanyName auto-selects the sole enabled company when company_name is absent; if cloud sends a push without company context and multiple companies exist it throws (400) — correct, but a single-company misconfiguration could route a push to the wrong company silently"
+        ],
+        "techDebt": [
+          "Python command resolution (dev 'py -3 -u' vs prod resourcesPath exe) is duplicated in three files: sync-engine.ts:300-307, local-push-server.ts:99-117, push-queue-poller.ts:21-39 — should be a shared helper",
+          "Legacy dual config keys (backendUrl/apiKey vs controlPlaneUrl/controlPlaneApiKey) persist; save-settings writes both and resolve* helpers fall back, adding ongoing branching that should be consolidated post-migration",
+          "spawn(...) return values for the pause taskkill (sync-engine.ts:116) and the timeout-driven kills are not error-handled; a spawn failure there is silent",
+          "Idle/hard timeout values are read from process.env at call time inside syncOneCompany rather than centralized config; magic numbers (8000ms first-sync defer, 60s Tally retry, 5s poll, 360min) are scattered as inline literals",
+          "remote-log baked-in production token+host in source is a maintenance/security smell even if write-only; rotating it requires a code change and release",
+          "tray.ts Quit uses app.exit(0) which bypasses before-quit cleanup (poller.stop/server.stop) that the install path runs — abrupt exit may leave the 3002 socket or a Python child lingering briefly",
+          "build.publish missing from package.json means update publishing relies on implicit electron-builder git-origin inference (noted in project memory as a gotcha) — should be made explicit"
+        ]
+      },
+      {
+        "component": "React Renderer (Electron renderer process UI)",
+        "purpose": "The TallyBridge desktop UI: a Vite + React 19 SPA that runs in the Electron renderer process and is the control surface for the sync connector. It lets users add/remove TallyPrime companies, edit sync/connection/ingest settings, watch a live sync log, and manage in-app auto-updates. All real work (Tally reads, sync, config persistence) happens in the main process; the renderer only renders state and calls main over a context-isolated IPC bridge.",
+        "entrypoints": [
+          {
+            "file": "src/renderer/index.html",
+            "role": "Vite HTML root (Vite root dir = src/renderer); mounts #root and loads main.tsx as a module; also holds the only real global CSS (a small <style> block: box reset, body font, input/button base, custom scrollbar)"
+          },
+          {
+            "file": "src/renderer/main.tsx",
+            "role": "React bootstrap: ReactDOM.createRoot(#root).render(<React.StrictMode><App/></React.StrictMode>)"
+          },
+          {
+            "file": "src/renderer/App.tsx",
+            "role": "Root component: HashRouter + route table; lays out UpdateBanner (top) / Sidebar + <main> / StatusBar (bottom) as a flex column"
+          },
+          {
+            "file": "src/main/preload.ts",
+            "role": "contextBridge that defines the window.electronAPI surface the whole renderer depends on (not under src/renderer but is the renderer's only door to main)"
+          },
+          {
+            "file": "src/renderer/electron.d.ts",
+            "role": "Ambient TS declaration of window.electronAPI; the renderer's compile-time contract for IPC (drifted from preload — see risks)"
+          }
+        ],
+        "keyModules": [
+          {
+            "file": "src/renderer/App.tsx",
+            "responsibility": "Routing + shell layout. HashRouter (chosen for file://-loaded Electron). Routes: / -> HomeGuided, /add-company -> AddCompanyGuided, /settings -> Settings, /log -> SyncLog, /about -> About, * -> redirect to /. Persistent chrome: UpdateBanner, Sidebar, StatusBar.",
+            "loc": 33
+          },
+          {
+            "file": "src/renderer/pages/HomeGuided.tsx",
+            "responsibility": "Main dashboard. Loads companies + syncPaused via getConfig(); renders CompanyCardStable list or EmptyState; Sync All / Pause-Resume / Add buttons. Subscribes to companies-updated, sync-start, sync-complete, sync-paused events to drive isSyncing/isPaused/company state.",
+            "loc": 167
+          },
+          {
+            "file": "src/renderer/pages/Settings.tsx",
+            "responsibility": "The entire config surface. Local form state mirrors AppConfig; loads via getConfig()+getStartupSetting(); writes via saveSettings(form). Also fetches Tally company date ranges, tests connectivity/capabilities, toggles Windows startup, opens log file. Largest, most complex page.",
+            "loc": 563
+          },
+          {
+            "file": "src/renderer/pages/AddCompanyGuided.tsx",
+            "responsibility": "Add-company wizard, a 6-state machine (loading/select/noTally/checking/success/error). Lists companies open in Tally via getTallyCompanies(), commits via addCompany(selection). Has explicit loading/empty/error UX (best in the app).",
+            "loc": 236
+          },
+          {
+            "file": "src/renderer/pages/SyncLog.tsx",
+            "responsibility": "Live terminal-style log. Subscribes to sync-log IPC events, keeps a rolling buffer (slice(-500)) of {time,company,line,isError}, auto-scrolls to bottom, Clear button. Heuristic error coloring via substring match on 'error'/'[err'.",
+            "loc": 69
+          },
+          {
+            "file": "src/renderer/pages/About.tsx",
+            "responsibility": "Static about panel; reads version via getAppVersion(). Contains placeholder support email 'support@yourcompany.com'.",
+            "loc": 35
+          },
+          {
+            "file": "src/renderer/components/Sidebar.tsx",
+            "responsibility": "Left nav with NavLink active styling; shows app version (getAppVersion). Nav list is hardcoded (Home/Sync Log/Settings/About) — note it omits Add Company (reached only via Home buttons).",
+            "loc": 77
+          },
+          {
+            "file": "src/renderer/components/StatusBar.tsx",
+            "responsibility": "Bottom bar: Tally connectivity (polls checkTally every 10s), pause state, and a next-sync countdown timer derived from syncIntervalMinutes. Internet status is hardcoded true (const [internetOk]=useState(true)).",
+            "loc": 101
+          },
+          {
+            "file": "src/renderer/components/UpdateBanner.tsx",
+            "responsibility": "Auto-update banner state machine (available/downloading/downloaded/installing/error) driven by update-* IPC events; user-controlled downloadUpdate()/installUpdate(); dismissible. Suppresses background-check errors unless user is mid download/install.",
+            "loc": 143
+          },
+          {
+            "file": "src/renderer/components/CompanyCardStable.tsx",
+            "responsibility": "The ACTIVE company card (used by HomeGuided). Renders name, identity hint (formalName/GUID), status dot, last-sync record counts, error text, and a confirm()-gated Remove button.",
+            "loc": 129
+          },
+          {
+            "file": "src/renderer/electron.d.ts",
+            "responsibility": "Ambient window.electronAPI type. Declares config/company/sync/update methods + on/off. Source of compile-time IPC typing.",
+            "loc": 43
+          }
+        ],
+        "externalInterfaces": [
+          {
+            "target": "Electron main process via preload contextBridge (window.electronAPI)",
+            "protocol": "Electron IPC (ipcRenderer.invoke for request/response; ipcRenderer.on for push events)",
+            "notes": "The ONLY external interface. invoke channels: get-config, save-settings, get-app-version, add-company, remove-company, get-companies, sync-now, pause-sync, resume-sync, check-tally, check-tally-capabilities, get-tally-companies, get-tally-company-date-ranges, get-startup-setting, set-startup-setting, open-log-file, download-update, install-update. Push event channels (allowlisted in preload ALLOWED_CHANNELS): sync-log, sync-start, sync-complete, sync-paused, companies-updated, update-available, update-progress, update-downloaded, update-error, plus company-status-change/company-synced/company-error (allowlisted but no renderer subscriber found)."
+          },
+          {
+            "target": "TallyPrime / backend / Supabase",
+            "protocol": "none direct",
+            "notes": "Renderer never talks to Tally (port 9000), the Express backend (3001), the local push server (3002), or Supabase directly. All such access is mediated by the main process; the renderer is purely a presentation/IPC client. Good security posture (contextIsolation, channel allowlist)."
+          }
+        ],
+        "dataFlows": [
+          "Add company: User opens /add-company -> AddCompanyGuided.fetchCompanies() invokes getTallyCompanies() (main reads Tally) -> user picks a company -> handleAdd() invokes addCompany(selection) -> on success shows success state; main later emits companies-updated which HomeGuided consumes to refresh the list.",
+          "Edit settings: Settings mounts -> Promise.all(getConfig(), getStartupSetting()) hydrates a local SettingsForm + startup toggle -> loadCompanyDateRanges() calls getTallyCompanyDateRanges() to populate from/to date pickers -> Save invokes saveSettings(form) which persists the whole form object to electron-store; a 2s 'Settings Saved!' confirmation then resets.",
+          "Manual sync: HomeGuided handleSyncNow() optimistically sets isSyncing then invokes syncNow(); main emits sync-start/sync-complete and per-company companies-updated; StatusBar resets its countdown on sync-complete; CompanyCardStable shows per-company status/record counts.",
+          "Pause/resume: HomeGuided handlePauseResume() invokes pauseSync()/resumeSync(); main broadcasts sync-paused which both HomeGuided and StatusBar consume to update pause UI and freeze the countdown to '--:--'.",
+          "Live log: main streams sync-log events -> SyncLog appends to a rolling 500-line buffer and auto-scrolls; Clear empties local state (does not clear main-side logs/file).",
+          "Auto-update: main emits update-available/progress/downloaded/error -> UpdateBanner advances its phase; user clicks drive downloadUpdate()/installUpdate(); installUpdate() returns {deferred} so banner can say 'will install once current sync finishes'.",
+          "Connectivity telemetry: StatusBar polls checkTally() every 10s for the Tally dot; Settings 'Test'/'Check Capabilities' buttons call checkTally()/checkTallyCapabilities() on demand."
+        ],
+        "configAndSecrets": [
+          "No env vars or secrets are read in the renderer itself (no import.meta.env usage in src/renderer). VITE_BACKEND_URL exists at the project level but is consumed by main, not these files.",
+          "Settings.tsx is the config-WRITE surface; saveSettings(form) persists these AppConfig keys to electron-store (main/store.ts): tallyUrl, syncIntervalMinutes, controlPlaneUrl(+legacy backendUrl read fallback), controlPlaneApiKey(+legacy apiKey fallback), syncIngestMode (render|hybrid|direct), syncIngestUrl, syncIngestKey, syncContractVersion, accountEmail, readMode (auto|xml-only|hybrid), odbcDsnOverride, syncFromDate, syncToDate.",
+          "Secret-ish inputs rendered as type=password: controlPlaneApiKey (Settings.tsx:427) and syncIngestKey (Settings.tsx:466). These are typed/saved in plaintext through IPC into electron-store; the renderer offers no masking-on-display beyond the password input and no validation.",
+          "syncPaused and companies[] are read (getConfig) but written via dedicated IPC (pause/resume, add/remove), not via saveSettings.",
+          "Windows 'Start on login' is config-adjacent but routed through get/set-startup-setting IPC (likely app.setLoginItemSettings in main), not the form."
+        ],
+        "risks": [
+          "IPC type-contract drift: Settings.tsx calls window.electronAPI.getStartupSetting (160), setStartupSetting (494), and openLogFile (504), but NONE are declared in electron.d.ts (lines 19-41). They exist in preload.ts, so runtime works, but TypeScript typing is a lie — any signature change to these channels won't be caught at compile time. The .d.ts is hand-maintained and already out of sync.",
+          "readMode option mismatch: store.ts AppConfig.readMode allows auto|xml-only|hybrid but CLAUDE.md/MEMORY reference a 'shadow' mode; Settings only exposes 3 of them. If a config carries readMode:'shadow' it cannot be re-selected via the dropdown (silently shows blank/first).",
+          "StatusBar countdown is cosmetic and lies: it is a pure client-side setInterval seeded from syncIntervalMinutes (StatusBar.tsx:43), not from main's real next-sync schedule. It only resets on sync-complete and on mount, so after the app sits idle or sync timing shifts, 'Next in X' will not reflect the actual scheduler.",
+          "Internet status is hardcoded: const [internetOk]=useState(true) with no setter (StatusBar.tsx:5) — the 'Internet: OK' dot is always green and never reflects real connectivity, which is misleading during cloud-push failures.",
+          "Undefined CSS animation: all three CompanyCard variants set animation:'pulse 1s infinite' for the syncing state, but no @keyframes pulse is defined anywhere in src/renderer or index.html — the syncing pulse silently no-ops (verified via grep).",
+          "SyncLog error detection is a fragile substring heuristic (line.includes('error')||'[err'); benign lines containing 'error' are mis-colored red and structured severity from Python is lost. Log buffer is renderer-only and lost on navigation away/remount (state not lifted), and Clear doesn't touch the persisted log file.",
+          "Settings.handleSave has no error handling: if saveSettings rejects, the UI still flashes 'Settings Saved!' (no try/catch around the await at line 201), giving false success feedback. Same optimistic pattern in HomeGuided (sets isSyncing before/without checking syncNow result).",
+          "About.tsx ships a placeholder support contact 'support@yourcompany.com' (line 21) — a production polish gap visible to end users."
+        ],
+        "techDebt": [
+          "Guided vs non-guided duplication is largely DEAD CODE, not real duplication: Home.tsx and AddCompany.tsx are one-line re-exports of their *Guided siblings with the old implementation left commented out below (Home.tsx:1-2 + commented block, AddCompany.tsx:1 + commented block). The commented-out originals still contain bugs (e.g. AddCompany uses an undefined setSelected/selected) and should be deleted rather than kept as 'documentation'.",
+          "Three near-identical CompanyCard components exist: CompanyCardStable (ACTIVE, used by HomeGuided), CompanyCardGuided and CompanyCard (both ORPHANED — no importer). They differ only in trivial separators ('|' vs '·') and the identity-hint block. Two of three are dead; should be collapsed to one.",
+          "No CSS/Tailwind despite the stack billing: package.json devDeps include tailwindcss ^4.2.2 + postcss ^8.5.8, but there is no tailwind.config, no @tailwind directives, no .css file under src/renderer, and zero className usage. 100% of styling is inline React.CSSProperties objects (plus a small <style> in index.html). Tailwind is installed but entirely unused — either wire it up or drop the dependency.",
+          "Styling is copy-pasted constants: primaryBtn/outlineBtn/testBtn/backBtn objects are redeclared per file with slight drift; no shared theme/tokens module. Colors like #1a1a2e and #6c757d are hardcoded everywhere.",
+          "State management is intentionally minimal (per-component useState + direct IPC), which is fine for this size, but there is no shared store/context — companies and config are independently re-fetched in HomeGuided, Settings, and StatusBar, and pause/interval state is duplicated across HomeGuided and StatusBar with separate event subscriptions.",
+          "Accessibility gaps: icons are decorative glyph strings (⊞/≡/⚙) and emoji-substitute placeholders ('[]','OK','X','...') in the *Guided pages with no aria-labels; company-select rows are clickable <div>s (AddCompanyGuided.tsx:121) with no role/keyboard handling; uses native confirm()/window.alert-style confirm for Remove. The Settings 'Field' helper associates label-for only for the startup checkbox (htmlFor='startOnLogin'), most other inputs lack id/for association.",
+          "electron.d.ts is hand-written and incomplete (missing 3 methods) instead of being generated from the preload surface — a recurring drift hazard."
+        ]
+      },
+      {
+        "component": "Python Sync Engine (src/python/)",
+        "purpose": "The Python sync engine is a single-shot subprocess spawned by the Electron main process (sync-engine.ts) that bridges a local TallyPrime/Tally.ERP 9 instance with the cloud. It reads masters/vouchers/reports from Tally's XML-RPC server on port 9000 (with an optional Tally ODBC fast-path), batches and uploads them to the cloud either via the Express control-plane (/api/sync) or directly to Supabase PostgREST RPCs, and on a separate invocation pushes Sales/Purchase vouchers back into Tally via XML Import. All behavior is driven by environment variables passed at spawn time; output is line-buffered stdout plus a final JSON result line.",
+        "entrypoints": [
+          {
+            "file": "src/python/sync_main.py:1348",
+            "role": "main() — process entry; dispatches on TB_COMMAND to sync (default), push_voucher (single direct push from stdin), or poll_push_queue; returns 0/1 exit code"
+          },
+          {
+            "file": "src/python/main.py:1",
+            "role": "Thin alias entrypoint: `from sync_main import main; sys.exit(main())` — the PyInstaller bundle target (tallybridge-engine.exe)"
+          },
+          {
+            "file": "src/main/sync-engine.ts:300",
+            "role": "Electron-side spawner: selects tallybridge-engine.exe (prod) or sync_main.py (dev), builds the env block (lines 371-394), enforces idle/hard timeouts (lines 403-409)"
+          },
+          {
+            "file": "src/python/sync_main.py:1234",
+            "role": "run_single_push_command() — reads one voucher JSON from stdin, calls tally_pusher.push_vouchers, prints JSON result (TB_COMMAND=push_voucher)"
+          },
+          {
+            "file": "src/python/sync_main.py:1224",
+            "role": "run_poll_push_queue_command() — polls backend push queue and imports pending vouchers quietly (TB_COMMAND=poll_push_queue)"
+          }
+        ],
+        "keyModules": [
+          {
+            "file": "src/python/sync_main.py",
+            "responsibility": "Orchestration brain: read-mode/ingest-mode decisioning, FY-date resolution & clamping, change detection vs cached alter IDs, per-section fetch with ODBC->XML fallback, month/window voucher batching with recursive split-on-timeout, payload assembly, heartbeat thread, push-cycle dispatch",
+            "loc": 1905
+          },
+          {
+            "file": "src/python/cloud_pusher.py",
+            "responsibility": "Upload layer: push() routes by SYNC_INGEST_MODE (render -> POST /api/sync; hybrid/direct -> Supabase PostgREST RPCs tb_ingest_phase3_hybrid + chunked tb_ingest_vouchers); company resolve/upsert; backend alter-id lookup, push-queue fetch, push-results post; ReadTimeout post-verify polling",
+            "loc": 933
+          },
+          {
+            "file": "src/python/tally_client.py",
+            "responsibility": "Tally XML-RPC transport on port 9000: requests.Session, UTF-8/UTF-16 request encode + response decode, connect/read timeouts, STATUS/LINEERROR checks, detect_tally_product(), and all hand-written TDL export envelopes (company info, alter IDs, groups, ledgers, vouchers, stock, outstanding, P&L/BS/TB)",
+            "loc": 678
+          },
+          {
+            "file": "src/python/tally_pusher.py",
+            "responsibility": "Push (Cloud->Tally): validates/normalizes a Sales/Purchase voucher, derives signed amounts and party/inventory ledger matching, renders a Tally Import VOUCHER envelope, POSTs it, and parses CREATED/ALTERED/ERRORS/LINEERROR from the response",
+            "loc": 531
+          },
+          {
+            "file": "src/python/definition_extractor.py",
+            "responsibility": "Definition-driven (JSON-config) collection requests and response parsing via xmltodict; builds COLLECTION/Data envelopes from definitions/structured_sections.json and finalizes per-section row shapes (vouchers/P&L/BS/TB) incl. stock part_code mailing-name unwrap",
+            "loc": 456
+          },
+          {
+            "file": "src/python/odbc_bridge.py",
+            "responsibility": "Optional Tally ODBC fast-path: drives a long-lived PowerShell helper (tally_odbc_helper.ps1) over stdin/stdout JSON to probe/query DSNs for groups/ledgers/stock; normalizes rows via definitions/odbc_sections.json; provides XML-vs-ODBC shadow comparison",
+            "loc": 298
+          },
+          {
+            "file": "src/python/xml_parser.py",
+            "responsibility": "Legacy fallback parsers (xmltodict) for all sections plus shared helpers: clean_xml (strips control chars), safe_float/int/str (dict-aware), parse_tally_date, parse_alter_ids, parse_vouchers, parse_voucher_headers",
+            "loc": 651
+          },
+          {
+            "file": "src/python/proxy.py",
+            "responsibility": "Standalone dev MITM proxy (port 9001 -> 9000) to capture/print BizAnalyst<->Tally XML; not part of the sync runtime",
+            "loc": 38
+          },
+          {
+            "file": "src/python/diagnose.py",
+            "responsibility": "Standalone dev tool: fires 10 hardcoded Export reports at port 9000 and saves raw XML to tally-responses/ for inspection; hardcodes COMPANY='Demo Trading Co'",
+            "loc": 184
+          }
+        ],
+        "externalInterfaces": [
+          {
+            "target": "TallyPrime / Tally.ERP 9 XML-RPC server",
+            "protocol": "HTTP POST text/xml on port 9000 (TALLY_URL, default http://localhost:9000)",
+            "notes": "Single-threaded engine shared with the interactive UI — heavy/full-range reads freeze Tally. tally_client._post uses connect=5s/read=45s default timeouts (TB_TALLY_CONNECT/READ_TIMEOUT_SECONDS). Both read (Export Collection/Data) and write (Import Vouchers) go here."
+          },
+          {
+            "target": "Express control plane (cloud backend)",
+            "protocol": "HTTPS POST /api/sync, GET /api/sync/alter-ids, GET /api/sync/push-queue, POST /api/sync/push-results",
+            "notes": "CONTROL_PLANE_URL (fallback BACKEND_URL); auth via x-api-key (CONTROL_PLANE_API_KEY/API_KEY) and x-sync-contract-version. Used in render ingest mode and for all push-queue coordination."
+          },
+          {
+            "target": "Supabase PostgREST (rest/v1/rpc)",
+            "protocol": "HTTPS POST rpc/tb_ingest_phase3_hybrid and rpc/tb_ingest_vouchers; GET/POST/PATCH companies",
+            "notes": "Direct/hybrid ingest. REST base derived from SYNC_INGEST_URL by splitting on /functions/ (cloud_pusher.py:184). Auth via apikey + Bearer = SYNC_INGEST_KEY (must be service_role per memory). Chosen because the edge function /functions/v1/ingest-sync intermittently 503s (~37%)."
+          },
+          {
+            "target": "Windows PowerShell + Tally ODBC DSN",
+            "protocol": "subprocess stdin/stdout JSON to tally_odbc_helper.ps1 (powershell.exe -NoProfile -ExecutionPolicy Bypass)",
+            "notes": "ODBC fast-path for groups/ledgers/stock; nt-only; probe timeout 8s, query 15s. Falls back to XML on any failure/empty."
+          },
+          {
+            "target": "Alter-ID cache file",
+            "protocol": "Local JSON file .alter_ids_cache.json in TB_USER_DATA_DIR / %APPDATA%/TallyBridge",
+            "notes": "Per-company (keyed by GUID or name) change-detection markers; atomic temp+os.replace write with PermissionError retry loop (sync_main.py:192)."
+          }
+        ],
+        "dataFlows": [
+          "SYNC read decisioning (sync_main.main 1348-1507): detect_tally_product -> READ_MODE maps to transport_mode (shadow->hybrid+compare; xml-only disables ODBC) -> probe ODBC (groups/ledgers/stock) -> fetch_company_info_with_fallback resolves FY -> resolve_effective_date_range (TB_SYNC_FROM/TO_DATE overrides) -> clamp_range_to_company_books -> parse_alter_ids(get_company_alter_ids) -> build_sync_plan vs cached IDs; force_full_sync if TB_FORCE_FULL_SYNC, missing markers, cache_load_failed, or backend reports company_not_found/no markers. If no changes and trigger=heartbeat/manual: print skipped JSON and exit 0.",
+          "Per-section fetch (1540-1795): groups/ledgers/stock try ODBC (transport_mode auto|hybrid) then XML; in shadow mode XML is authoritative and compared (compare_section_rows). Each section: fetch_structured_section (definition-driven) -> on exception falls back to legacy parser (parse_groups/parse_ledgers/parse_stock) or report-style export. Stock falls back to Stock Summary report if structured export is sparse.",
+          "Voucher fetch (fetch_vouchers_with_batches 844): build_month_windows splits range into TB_VOUCHER_WINDOW_DAYS (default 7) windows -> per window fetch_voucher_window tries definition-driven collection -> inline TDL collection -> (if allow_day_book_fallback) Day Book XML; ERP 9 uses prefer_day_book two-pass (headers then master-id detail batches of 25). On retryable error (timeout/connection) split_window halves recursively; non-splittable window raises. Then validate_voucher_batch (rejects missing GUID/date, >1% or >3 dup GUIDs, single-date collapse over >=30d) and dedupe_vouchers by GUID.",
+          "Upload render mode (cloud_pusher.push 838): _build_render_payload -> POST /api/sync with verify_after_timeout=True; on ReadTimeout, verify_remote_sync_completion polls /api/sync/alter-ids up to BACKEND_POST_VERIFY_SECONDS (180) comparing alter_id/alt_vch_id/alt_mst_id + newer last_synced_at to treat the upload as succeeded.",
+          "Upload direct/hybrid mode (cloud_pusher.push 851-933): _resolve_direct_company_id finds/inserts company in Supabase (GUID then unique name) and PATCHes metadata once per run -> _build_direct_payload posts masters/snapshots via rpc/tb_ingest_phase3_hybrid -> vouchers chunked at 2000 (_build_direct_voucher_payloads) each posted via rpc/tb_ingest_vouchers with is_final_chunk/record_counts; any chunk failure aborts and sets last_push_error/stats.",
+          "Post-upload (1857-1890): on success, if voucher family not skipped, save_cached_ids(current_ids) for next change detection; if TB_ENABLE_PUSH set, run_pending_push_cycle; print final success JSON with records/warnings/sync_meta/observability (section metrics, payload bytes, upload stats). On any exception print '[Error] Sync failed' to stderr and return 1; finally stops heartbeat thread and closes ODBC bridge.",
+          "PUSH Cloud->Tally (run_pending_push_cycle 1132 / run_single_push_command 1234): fetch_pending_push_vouchers from /api/sync/push-queue -> for each job tally_pusher.push_vouchers builds an Import VOUCHER envelope (party/inventory ledger resolution, signed amounts, batch allocations) -> _post to port 9000 -> parse_push_response (CREATED/ALTERED/ERRORS/LINEERROR) -> mark_push_results back to /api/sync/push-results. Only Sales/Purchase/GST SALE/GST PURCHASE types allowed (TB_PUSH_ALLOWED_TYPES)."
+        ],
+        "configAndSecrets": [
+          "Spawn env (sync-engine.ts:371-394): TALLY_URL, TALLY_COMPANY, TALLY_COMPANY_GUID, TB_FORCE_FULL_SYNC, TB_READ_MODE, TB_ODBC_DSN_OVERRIDE, TB_SYNC_FROM/TO_DATE, TB_SYNC_TRIGGER, TB_MANUAL_BACKFILL_PENDING, TB_ENABLE_INCREMENTAL_VOUCHER_SYNC, TB_USER_DATA_DIR, PYTHONUNBUFFERED",
+          "Cloud config: CONTROL_PLANE_URL (fallback BACKEND_URL), CONTROL_PLANE_API_KEY (fallback API_KEY) — passed as x-api-key; SYNC_INGEST_MODE (render|hybrid|direct), SYNC_INGEST_URL, SYNC_INGEST_KEY (Supabase apikey+Bearer; must be service_role), SYNC_CONTRACT_VERSION",
+          "Read-side tuning: TB_COMMAND (sync|push_voucher|poll_push_queue), TB_SYNC_HEARTBEAT_SECONDS (20), TB_VOUCHER_WINDOW_DAYS (7), TB_TALLY_PACING_MS (0/off), TB_ALLOW_DAYBOOK_FALLBACK, TB_ALLOW_TALLYPRIME_VOUCHER_XML, TB_ENABLE_PUSH, TB_PUSH_ALLOWED_TYPES",
+          "Transport timeouts: TB_TALLY_CONNECT_TIMEOUT_SECONDS (5), TB_TALLY_READ_TIMEOUT_SECONDS (45), TB_TALLY_REQUEST_ENCODING (utf-8); BACKEND_TIMEOUT_SECONDS (900), BACKEND_POST_VERIFY_SECONDS (180), BACKEND_POST_VERIFY_POLL_SECONDS (10)",
+          "Secrets in env only (no files): CONTROL_PLANE_API_KEY / API_KEY and SYNC_INGEST_KEY are read from process env; SYNC_INGEST_KEY is sent as both apikey and Authorization Bearer to Supabase (cloud_pusher.py:190-195)",
+          "Local state: alter-ID cache at TB_USER_DATA_DIR or %APPDATA%/TallyBridge/.alter_ids_cache.json; JSON section definitions at src/python/definitions/structured_sections.json (22KB) and odbc_sections.json (6KB)"
+        ],
+        "risks": [
+          "Single-threaded Tally-9000 hang (documented in memory): port 9000 shares one engine with the interactive UI, so heavy/full-FY voucher pulls and stock valuation freeze TallyPrime. Mitigations are window batching (7-day default) + recursive split-on-timeout + pacing knob, but a single non-splittable window that times out still raises and a full-FY catch-up on a stale cache can lock the client (the 1.2.11 freeze RCA).",
+          "TallyPrime voucher-XML safety was REVERTED (sync_main.py CHANGE 1/2/4): should_skip_voucher_family now always returns False and Day Book fallback is enabled for TallyPrime, so voucher exports run on TallyPrime again — exactly the path previously disabled to avoid the port-9000 crash. This is on the experimental branch and reintroduces freeze/crash exposure.",
+          "Day Book fallback can corrupt voucher identity/dates: fetch_day_book_voucher_window admits a best-effort result when no request shape honors the requested window, and validate_voucher_batch only WARNS (does not reject) when a Day Book export collapses to a single date — risking wrong-dated vouchers being ingested.",
+          "ReadTimeout 'post-verify' in render mode (verify_remote_sync_completion) treats an upload as successful purely from matching remote alter IDs + a newer last_synced_at, which can mark a partial/failed ingest as done if the backend updated markers before fully persisting.",
+          "Direct-ingest company resolution races: _DIRECT_COMPANY_ID is process-cached and resolution falls back to match by name when GUID is absent; a name with no GUID can bind to the wrong company, and the insert path assumes companies.name uniqueness. Each sync run resets the cache (push() sets _DIRECT_COMPANY_ID=None).",
+          "Backend error swallowing: _check_response/_extract_backend_error and several try/except blocks downgrade failures to warnings and continue; voucher-family errors silently zero out vouchers/outstanding/reports for the run while still reporting success (alter-ID cache is correctly NOT updated then), so masters can advance while vouchers silently lag.",
+          "ODBC helper fragility: spawns powershell.exe per DSN candidate over a single stdin/stdout line protocol; a hung helper or partial readline raises and only falls back to XML — no independent timeout on the readline beyond the helper-reported timeout.",
+          "Regex-based XML parsing in tally_client._check_response and tally_pusher.parse_push_response (CREATED/ALTERED/LINEERROR via re.findall) is brittle against XML structure/encoding variation and could miscount import errors."
+        ],
+        "techDebt": [
+          "sync_main.py is 1905 LOC with a deeply nested main(); the voucher path carries explicit 'CHANGE 1-4' revert markers (header comment lines 1-20) indicating an in-flight experimental branch state rather than a settled design.",
+          "Three parallel parsing systems coexist: definition-driven (definition_extractor + structured_sections.json), legacy hand-written parsers (xml_parser), and ODBC normalization (odbc_sections.json) — every section has a try-structured/except-legacy ladder duplicated inline.",
+          "Hand-built XML string templates throughout tally_client.py and tally_pusher.py (f-strings) rather than a builder; push voucher XML embeds many hardcoded GST-invoice-shape constants (REQUESTORRULE, SERIALMASTER, batch INDENTNO/ORDERNO placeholders).",
+          "cloud_pusher and tally_pusher both import tally_client private internals (_post, _xml_escape, _fetch) — private API used across modules.",
+          "Dead/dev-only modules shipped in the package dir: proxy.py (port 9001 MITM), diagnose.py (hardcoded company 'Demo Trading Co'), wireshark_extract.py — not wired into the runtime.",
+          "Duplicated config parsing: SYNC_INGEST_MODE/URL/CONTRACT_VERSION are independently re-read and re-validated in both sync_main.py and cloud_pusher.py.",
+          "Two legacy env aliases (BACKEND_URL/API_KEY vs CONTROL_PLANE_URL/CONTROL_PLANE_API_KEY) are both honored, and sync-engine.ts sets all four to the same values — redundant.",
+          "Incremental voucher sync exists (ENABLE_INCREMENTAL_VOUCHER_SYNC, 7-day overlap) but main() hardcodes a full sync_plan before change detection and only narrows via build_sync_plan; its value is undercut by full-FY windows on first/forced syncs."
+        ]
+      },
+      {
+        "component": "Express Cloud Backend (TallyBridge API, port 3001, GCP Cloud Run)",
+        "purpose": "A thin, stateless Express 5 (ESM/TypeScript) cloud API that ingests TallyPrime/ERP data from the desktop connector and serves it to the Flutter app and web dashboard, backed by Supabase (Postgres) and GCS. It is the central node of the multi-tenant model (one Supabase project per client), authenticating callers via Firebase JWT or a shared API key and exposing one giant /api/sync ingest endpoint plus read endpoints, a cloud->Tally push queue, and an inventory-intelligence (\"reorder-levels\") report computed in-process.",
+        "entrypoints": [
+          {
+            "file": "backend/src/index.ts",
+            "role": "App bootstrap: dotenv, cors(), express.json({limit}), mounts /api/sync, /api/push-voucher, /api/push-invoice, /health; app.listen(PORT||3001); process-level unhandledRejection/uncaughtException handlers that only log (process stays up)"
+          },
+          {
+            "file": "backend/src/routes/sync.ts",
+            "role": "2992-line core router: POST /api/sync ingest + push-queue lifecycle + all dashboard GET reads + reorder-levels inventory report"
+          },
+          {
+            "file": "backend/src/routes/push-voucher.ts",
+            "role": "POST /api/push-voucher and GET /api/push-voucher/health: reverse-proxies a voucher JSON to the desktop local-push-server (default http://127.0.0.1:3002)"
+          },
+          {
+            "file": "backend/src/routes/push-invoice.ts",
+            "role": "POST /api/push-invoice: builds a hardcoded GST-SALE voucher (9% CGST + 9% SGST) from {party_name, items} and forwards to the local push server"
+          },
+          {
+            "file": "backend/src/middleware/auth.ts",
+            "role": "requireApiKey: Firebase Bearer JWT verify, else timingSafeEqual on x-api-key vs API_KEY"
+          }
+        ],
+        "keyModules": [
+          {
+            "file": "backend/src/routes/sync.ts",
+            "responsibility": "Everything: auth wiring, payload normalization/validation, company upsert + GUID/name resolution, voucher graph ingest with snapshot/rollback, snapshot-section replacement (outstanding/PnL/BS/TB), push_queue enqueue/activate/poll/results, GCS invoice-image proxy, dashboard GET reads, and the in-memory inventory scenario classifier + reorder-levels report (JSON/CSV)",
+            "loc": 2992
+          },
+          {
+            "file": "backend/src/middleware/auth.ts",
+            "responsibility": "Dual auth: Firebase ID-token verification (Flutter users) with API-key fallback compared via constant-time timingSafeEqual; 401 on length mismatch or failure",
+            "loc": 45
+          },
+          {
+            "file": "backend/src/db/supabase.ts",
+            "responsibility": "Single shared Supabase service-role client from SUPABASE_URL + SUPABASE_SERVICE_KEY (non-null-asserted; bypasses RLS)",
+            "loc": 8
+          },
+          {
+            "file": "backend/src/db/firebase.ts",
+            "responsibility": "firebase-admin init from base64 service-account JSON (FIREBASE_SERVICE_ACCOUNT_B64); throws at import time if unset",
+            "loc": 14
+          },
+          {
+            "file": "backend/src/db/gcs.ts",
+            "responsibility": "GCS client (ADC on Cloud Run) for scanned invoice page JPEGs under {rowId}/page-{n}.jpg; best-effort uploads, exists check, read stream; disabled (no-op) when INVOICE_BUCKET unset",
+            "loc": 57
+          },
+          {
+            "file": "backend/src/routes/push-voucher.ts",
+            "responsibility": "Raw node http/https reverse-proxy of voucher payloads to the desktop push server; 502 on connect failure; non-JSON responses wrapped",
+            "loc": 128
+          },
+          {
+            "file": "backend/src/routes/push-invoice.ts",
+            "responsibility": "Convenience invoice->voucher builder with HARDCODED GST_RATE=0.09 CGST+SGST and fixed GST SALE ledger names; forwards to local push server",
+            "loc": 138
+          },
+          {
+            "file": "backend/full_schema.sql",
+            "responsibility": "Consolidated current schema: companies, groups, ledgers, vouchers, voucher_items, voucher_ledger_entries, purchases, stock_items, outstanding, profit_loss, balance_sheet, trial_balance, sync_log, push_queue + all indexes + partial-unique guid index",
+            "loc": 240
+          }
+        ],
+        "externalInterfaces": [
+          {
+            "target": "Supabase Postgres (shared service-role client, db/supabase.ts)",
+            "protocol": "HTTPS PostgREST via @supabase/supabase-js",
+            "notes": "All ingest/read/queue ops. Uses SUPABASE_SERVICE_KEY so RLS is bypassed; tenant isolation relies ENTIRELY on one-Supabase-project-per-client deployment + WHERE company_id filters, not on RLS"
+          },
+          {
+            "target": "Client/reorder Supabase project (reorderSupabase, sync.ts:19-25)",
+            "protocol": "HTTPS PostgREST",
+            "notes": "Separate client from SUPABASE_URL_Client + SUPABASE_SERVICE_KEY_CLIENT; used ONLY by /reorder-levels endpoints; falls back to the shared client if those env vars are unset"
+          },
+          {
+            "target": "Firebase Auth (Google Identity)",
+            "protocol": "firebase-admin verifyIdToken",
+            "notes": "Validates Flutter-app Bearer JWTs; admin SDK loaded from base64 service account"
+          },
+          {
+            "target": "Google Cloud Storage (INVOICE_BUCKET)",
+            "protocol": "@google-cloud/storage via ADC",
+            "notes": "Scanned invoice page JPEGs mapped to push_queue row id; never persisted in DB; disabled when bucket unset"
+          },
+          {
+            "target": "Desktop local-push-server (TALLYBRIDGE_LOCAL_PUSH_URL, default http://127.0.0.1:3002)",
+            "protocol": "HTTP/HTTPS POST (node http)",
+            "notes": "push-voucher/push-invoice forward here. Default points at loopback:3002 — on Cloud Run this is unreachable unless the env var is overridden to the client's tunnel/public endpoint"
+          },
+          {
+            "target": "Inbound HTTP clients (desktop connector, Flutter app, web dashboard, parsing service)",
+            "protocol": "HTTP/JSON on PORT (default 3001)",
+            "notes": "cors() is wide-open (all origins); body limit TB_JSON_BODY_LIMIT default 100mb"
+          }
+        ],
+        "dataFlows": [
+          "Sync ingest (Tally->Cloud): Python cloud_pusher POSTs /api/sync with {company_name, company_guid, company_info, alter_ids, groups, ledgers, vouchers, stock_items, outstanding, profit_loss, balance_sheet, trial_balance, sync_meta} -> requireApiKey -> validate each section is array <=100k rows -> upsertCompanyRecord (resolve by guid, then by unique name, then insert) -> upsert groups/ledgers/stock_items on (company_id,name) -> voucher graph: snapshot existing rows, upsert vouchers on (company_id,tally_guid), insert voucher_items + voucher_ledger_entries returning ids, delete old child rows, derive purchases for purchase-type vouchers, reconcile (delete stale guids per voucher_sync_mode full/incremental) -> insert-then-cleanup snapshot sections (outstanding/PnL/BS/TB) gated by per-section last_*_synced_at timestamp -> update companies sync-state -> best-effort sync_log insert (falls back without sync_meta column) -> 200 {success, company_id, records}",
+          "Ingest failure path: on any throw before company sync-state is persisted, restore the voucher-graph snapshot and roll back inserted snapshot-section rows; errors with schema-cache/relation/column text get 'apply backend/full_schema.sql' guidance appended; 500 returned",
+          "Push enqueue (parsing->cloud): parsing service POSTs /api/sync/push-queue with nested {push_queue_payload|tally_payload|...} + optional scanned_images_b64 -> resolveCompanyLookup (no successful-sync required) -> normalizePushVoucherPayload (strict type/date/party/ledger/item validation, relaxed for alien OCR vouchers) -> insert push_queue row (status 'pending') -> best-effort upload page JPEGs to GCS under row id, store {scan:{pages}} on source_payload",
+          "Push activation/poll/results: app POSTs /push-queue/activate (pending->push_now, optional company ownership check) -> desktop push-queue-poller GETs /push-queue?company_*&limit (returns push_now jobs, type-filtered) -> poller pushes to Tally -> POSTs /push-results [{id,status:pushed|failed,error_message,tally_response}] which targeted-updates push_queue rows (no company scoping on the update)",
+          "Reorder-levels report: client GETs /api/sync/reorder-levels[/:reportKey]?company_*&threshold&limit&format -> requireClientApiKey (x-api-key vs API_KEY_CLIENT) -> resolveCompanyLookup on reorderSupabase -> fetchAllPages over GST SALE (6m) + purchase (1m) vouchers + voucher_items + stock_items -> classifyInventoryScenarioV2 in paise -> 15-scenario classification -> JSON or CSV download",
+          "Dashboard reads: app/web GET /vouchers,/outstanding,/stock,/purchases,/pnl,/balance-sheet,/trial-balance,/parties,/party-ledger,/alter-ids -> requireApiKey -> resolveCompanyLookup (most require last_synced_at) -> fetchAllPages (1000-row pagination) filtered by company_id and, for snapshot tables, the latest synced_at",
+          "Cloud->Tally direct push: app POSTs /api/push-voucher or /api/push-invoice -> requireApiKey -> reverse-proxy to TALLYBRIDGE_LOCAL_PUSH_URL (desktop:3002) -> TallyPrime; response (or 502) relayed back"
+        ],
+        "configAndSecrets": [
+          "SUPABASE_URL, SUPABASE_SERVICE_KEY — shared service-role client (db/supabase.ts), non-null-asserted at import; service key BYPASSES RLS",
+          "SUPABASE_URL_Client (note mixed-case 'Url_Client' / SUPABASE_URL_Client), SUPABASE_SERVICE_KEY_CLIENT — separate reorder-levels Supabase project (sync.ts:19-25); env name is case-sensitive per comment",
+          "API_KEY — service-to-service secret for requireApiKey, compared with timingSafeEqual (auth.ts:28-38)",
+          "API_KEY_CLIENT — separate secret for /reorder-levels (requireClientApiKey, sync.ts:31)",
+          "FIREBASE_SERVICE_ACCOUNT_B64 — base64 service-account JSON; db/firebase.ts THROWS at import if unset (hard startup failure)",
+          "INVOICE_BUCKET — GCS bucket for scanned pages; unset => image storage disabled (db/gcs.ts:8,11)",
+          "PORT (default 3001); TB_JSON_BODY_LIMIT (default 100mb, index.ts:10-13)",
+          "TALLYBRIDGE_LOCAL_PUSH_URL (default http://127.0.0.1:3002/push-voucher), TALLYBRIDGE_LOCAL_HEALTH_URL (default :3002/health) — push proxies",
+          "TB_PUSH_ALLOWED_TYPES — CSV override of allowed push voucher types (default Sales,Purchase,GST SALE,GST PURCHASE; sync.ts:114-121)",
+          "GCS uses Application Default Credentials (Cloud Run compute SA) — no key file",
+          "No tb_ingest_masters RPC and no .rpc() call exist in this backend; the direct-write RPC path (per project memory) lives in the Python engine, not here"
+        ],
+        "risks": [
+          "Multi-tenancy depends entirely on per-client Supabase project + manual company_id WHERE filters; the service-role key bypasses RLS, so any cross-company query bug or a shared project leaks all tenants' data. RLS policies in SQL are permissive 'USING(true)' — they provide no isolation by design.",
+          "/push-results (sync.ts:2513) updates push_queue rows by id with NO company scoping and NO ownership check — any holder of API_KEY can mark any company's queued voucher pushed/failed and inject arbitrary tally_response JSON.",
+          "/push-queue/activate accepts company identity only optionally; when omitted (hasCompanyIdentity false) it activates a job by id with no tenant check (sync.ts:2400-2417).",
+          "The /api/sync ingest is NOT a real DB transaction — it is a hand-rolled snapshot+rollback across many separate PostgREST calls. A crash/timeout (Cloud Run request limit, OOM on 100mb body) between steps can leave vouchers/items/entries/purchases partially written and snapshot sections half-replaced; restore is best-effort and itself only console.error's on failure (restoreVoucherGraphSnapshot, restoreRows).",
+          "Inventory report and several reads pull ALL vouchers + voucher_items into memory via fetchAllPages (unbounded by 1000-row pages) and classify in JS; for large companies this is high-memory/CPU and can OOM the Cloud Run instance (echoes the prior render-mode 413/OOM history).",
+          "cors() is fully open (no origin allowlist) and there is no rate limiting; combined with a single shared API_KEY this is a broad attack surface.",
+          "express.json limit 100mb + base64 scanned images in the same JSON body means a single push can be very large; Cloud Run 32MB request cap (HTTP/1) can silently reject before the 100mb limit ever applies.",
+          "resolveCompanyLookup name-path returns 409 on duplicate names but the ingest upsertCompanyRecord can still create a second same-name company if guid differs, then later name lookups 409 — name-based callers can be wedged.",
+          "push-invoice hardcodes 9%+9% GST and fixed ledger names (GST SALE/CGST/SGST) — wrong for any non-9% rate or differently-named ledgers; silently produces incorrect vouchers.",
+          "Process-level uncaughtException handler only logs and keeps serving (index.ts:30) — the instance can continue in a corrupted state after a fatal error."
+        ],
+        "techDebt": [
+          "sync.ts is a 2992-line god-file mixing auth, validation, ingest, queue, GCS proxy, dashboard reads, and a full inventory-analytics engine — should be split into modules/services.",
+          "Two parallel auth implementations: requireApiKey (auth.ts) and requireClientApiKey (sync.ts:28) duplicate the timingSafeEqual logic; only differ by env var/Supabase client.",
+          "SQL is managed as hand-applied, manually-fanned-out migration files (supabase_schema_v2..v6, supabase_new_tables.sql, scan_jobs.sql, push_queue_edit_state.sql) plus a consolidated full_schema.sql — no migration tool, no ordering guarantees; documented drift risk (push_queue.edit_state/push_now missing on a client project per project memory).",
+          "Heavy use of `any` and ad-hoc Record<string,unknown> normalization instead of a schema validator (zod/valibot); validation is bespoke per field.",
+          "Inventory scenario thresholds, report metadata, and CSV formatting are large literal blocks embedded in the route file rather than a dedicated analytics module/config.",
+          "scan_jobs table is defined in SQL and referenced by mobile/parsing over Supabase realtime but the backend never touches it — backend SQL files carry tables the backend doesn't use.",
+          "compiled .d.ts and .js-less .ts coexist in src (sync.d.ts etc. checked in alongside .ts), suggesting build artifacts committed into source.",
+          "Env var naming is inconsistent/case-sensitive (SUPABASE_URL_Client vs *_CLIENT) and only documented in a code comment — easy to misconfigure on deploy.",
+          "Best-effort error swallowing (console.warn/error) in restore, cleanup, sync_log, and GCS paths hides partial-failure states from callers and monitoring."
+        ]
+      },
+      {
+        "component": "Parsing / OCR Backend (Flask-style HTTP server on GCP Cloud Run + RunPod serverless GPU workers)",
+        "purpose": "Turns scanned/PDF invoices into draft Tally vouchers. A phone/web scan POSTs a PDF to this stateless HTTP service (Cloud Run); it rasterizes the PDF, OCRs it on a RunPod serverless GPU (Nanonets-OCR2-3B for purchase, MiniCPM-V-4.5 for sale), runs a per-vendor regex rule engine + fuzzy match against live Supabase stock/party masters, builds a Tally voucher, and POSTs it to the backend push_queue so the desktop app can push it into TallyPrime. Note: it is built on Python's stdlib http.server (ThreadingHTTPServer), not Flask, despite the prompt naming.",
+        "entrypoints": [
+          {
+            "file": "parsing/n8n_minicpm_server.py",
+            "role": "Process entry point (CMD in Dockerfile: `python n8n_minicpm_server.py --serve`); just delegates to server.handler.main"
+          },
+          {
+            "file": "parsing/server/handler.py",
+            "role": "The real server: env loading, ThreadingHTTPServer, MiniCPMHandler with do_GET (/health) and do_POST routing for /, /raw-vlm, /docstrange (2296 lines)"
+          },
+          {
+            "file": "parsing/Dockerfile",
+            "role": "CPU-only python:3.11-slim image (poppler-utils for pdf2image); binds 0.0.0.0, MINICPM_RUNPOD_PDF_DPI=200, PORT injected by Cloud Run"
+          },
+          {
+            "file": "parsing/purchase_docstrange_pipeline.py",
+            "role": "PRODUCTION purchase pipeline invoked by /docstrange?purchase=all (run_docstrange_purchase_all_pipeline)"
+          },
+          {
+            "file": "parsing/test_minicpm.py",
+            "role": "PRODUCTION sale OCR/match pipeline, dynamically imported by handler.load_pipeline() for /?type=sale"
+          }
+        ],
+        "keyModules": [
+          {
+            "file": "parsing/server/handler.py",
+            "responsibility": "HTTP routing + all glue: multipart/json/raw upload parsing, PDF->JPEG render (pdf2image/Poppler), RunPod OCR client (_runpod_serverless_completion native /run+/status, _runpod_markdown_for_image), Supabase party-name fuzzy match (sale), sale voucher builder (build_sale_voucher_payload, GST CGST/SGST vs IGST), post_to_push_queue, delete_scan_job, scanned_pages_b64",
+            "loc": 2296
+          },
+          {
+            "file": "parsing/purchase/voucher_builder.py",
+            "responsibility": "Core purchase rule engine: per-vendor stock matching (match_item_to_live_stock + Purchase_Matching exact map), discount/net-amount math, freight->CARTAGE INWARD, GST recompute, build_voucher_payload, build_alien_voucher_payload (passthrough for unknown vendors), build_purchase_queue_payload",
+            "loc": 1822
+          },
+          {
+            "file": "parsing/purchase/vlm_vendor_parser.py",
+            "responsibility": "Parses Nanonets/DocStrange markdown into header+line items via per-vendor regexes (ADDISON/ET/GNL/RR/TOTEM/CP/PIDILITE/STANLEY/WIKUS); parse_vlm_invoice dispatcher, GST summary table extraction, invoice number/date/total extraction",
+            "loc": 1853
+          },
+          {
+            "file": "parsing/purchase/company_context.py",
+            "responsibility": "Loads live Supabase masters per company: companies/ledgers/stock_items (paged PostgREST) + Purchase_Matching exact map; 300s in-memory TTL cache; gates on last_synced_at",
+            "loc": 255
+          },
+          {
+            "file": "parsing/purchase_docstrange_pipeline.py",
+            "responsibility": "Production purchase orchestrator: markdown->parse_vlm_invoice->combine_ocr_items->build_voucher_payload (or alien passthrough)->push_queue request payload; returns markdown/html/parsed/fuzzy_items/invoice_exists",
+            "loc": 296
+          },
+          {
+            "file": "parsing/purchase/vendor.py",
+            "responsibility": "detect_vendor(): maps OCR'd vendor name to a vendor code; empty string is the alien sentinel triggering generic passthrough",
+            "loc": 31
+          },
+          {
+            "file": "parsing/runpod-serverless-worker/handler.py",
+            "responsibility": "PRODUCTION RunPod GPU worker (endpoint vllm-5fjqw6zdgqxt8g): boots in-container vLLM 0.9.2 serving Nanonets-OCR2-3B on 127.0.0.1:8000, proxies RunPod jobs to OpenAI chat-completions",
+            "loc": 78
+          },
+          {
+            "file": "parsing/minicpm-serverless-worker/handler.py",
+            "responsibility": "RunPod GPU worker variant for MiniCPM-V-4.5 (needs vLLM >=0.10.2); same proxy shape. Used by the sale OCR path via test_minicpm.py SALE_OCR_BACKEND=runpod",
+            "loc": 83
+          },
+          {
+            "file": "parsing/lib/env.py",
+            "responsibility": "make_env_loader: layered config (os.getenv overrides parsing/.env file values, with aliases). Shared by all purchase modules",
+            "loc": 38
+          },
+          {
+            "file": "parsing/lib/numeric.py / lib/text.py",
+            "responsibility": "Decimal/round2/pretty_number/date parsing and whitespace normalization helpers used across the rule engine",
+            "loc": 62
+          }
+        ],
+        "externalInterfaces": [
+          {
+            "target": "RunPod serverless endpoint api.runpod.ai/v2/vllm-5fjqw6zdgqxt8g (Nanonets-OCR2-3B)",
+            "protocol": "HTTPS native /run + /status job API (Bearer RUNPOD_POD_API_KEY); auto-detected via 'api.runpod.ai/v2/' in URL (handler.py:1310 _runpod_is_serverless)",
+            "notes": "Production purchase OCR. Per-page JPEG (300 DPI default, 400 retry) submitted as OpenAI image_url; markdown returned. Pod-mode (/v1/chat/completions over proxy.runpod.net) is the commented-out fallback in .env"
+          },
+          {
+            "target": "Supabase PostgREST (yynuu testing project hardcoded in committed parsing/.env)",
+            "protocol": "HTTPS REST /rest/v1/* + /rest/v1/rpc/* with service_role key (apikey + Bearer)",
+            "notes": "Reads companies/ledgers/stock_items (purchase masters), vouchers (party candidates + duplicacy check_duplicacy), Purchase_Matching exact map, RPC get_latest_rates_for_party + voucher_items (sale rates), ledgers.state (GST intra/inter). DELETEs scan_jobs row to drain app 'Processing' badge. session.trust_env=False to bypass proxies"
+          },
+          {
+            "target": "TallyBridge Express backend POST /api/sync/push-queue (Cloud Run, per-env URL)",
+            "protocol": "HTTPS POST JSON with x-api-key header (PUSH_QUEUE_API_KEY)",
+            "notes": "Final write: enqueues {tally_payload/voucher_payload, source_payload, scanned_images_b64}. Backend inserts push_queue row (status=pending) and uploads page JPEGs to GCS (sync.ts:2255). This is the bridge to the Cloud->Tally push path"
+          },
+          {
+            "target": "Local DocStrange/Nanonets server http://127.0.0.1:8010/extract (source=local)",
+            "protocol": "HTTP multipart",
+            "notes": "Dev-only alternative OCR source for /docstrange (call_docstrange_invoice_server). Production uses source=runpod, so this is effectively a local-dev path"
+          },
+          {
+            "target": "PaddleOCR-VL local server :5006 and Ollama (sale legacy)",
+            "protocol": "HTTP",
+            "notes": "Experimental ocr=vlm purchase route (purchase_ocrvl_pipeline.py) and legacy sale Ollama backend; not used by the Cloud Run production endpoints"
+          }
+        ],
+        "dataFlows": [
+          "PRODUCTION PURCHASE: Flutter app scans PDF -> POST application/pdf to PURCHASE_PARSE_URL `/docstrange?purchase=all&source=runpod&company=<name>&job_id=<uuid>` (scan_uploader.dart, no auth header) -> handler.do_POST /docstrange branch -> render each PDF page to JPEG (300 DPI) -> call_runpod_markdown_ocr -> RunPod vllm-5fjqw6zdgqxt8g (Nanonets-OCR2-3B) returns markdown per page -> run_docstrange_purchase_all_pipeline -> parse_vlm_invoice (detect_vendor + per-vendor regex header/items) -> combine_ocr_items -> resolve_supabase_company_context (live stock/ledgers) -> build_voucher_payload (fuzzy stock match, discount/GST/freight math) -> check_duplicacy(invoice_number) -> post_to_push_queue(tally_payload + scanned_images_b64) -> backend inserts push_queue row + GCS images -> delete_scan_job(job_id)",
+          "ALIEN PURCHASE: detect_vendor returns '' -> build_alien_voucher_payload: items kept as raw OCR descriptions (no stock match), voucher flagged alien:true, party/ledger best-effort placeholders -> enqueued for manual edit in the app before activation",
+          "PRODUCTION SALE: app POSTs image to SALE_PARSE_URL `/?type=sale&push=queue` -> handler run_pipeline_for_image -> test_minicpm.py: MiniCPM-V-4.5 OCR (via RunPod when SALE_OCR_BACKEND=runpod) of challan -> parse_ocr_items + fuzzy match to Supabase stock (build_family_views) -> extract_party_name (header crop OCR + Supabase fuzzy match against vouchers.party_name) -> build_sale_voucher_payload (rate from RPC get_latest_rates_for_party / fallback voucher_items, GST SALE CGST+SGST vs IGST by ledgers.state) -> post_to_push_queue -> delete_scan_job",
+          "PUSH-QUEUE -> TALLY (downstream, outside this component): backend push_queue row (pending) is polled by Electron push-queue-poller.ts, forwarded to local-push-server.ts:3002, tally_pusher.py writes voucher into TallyPrime:9000 — but only after the user activates the row in the app (push-queue/activate)",
+          "DEV/EXPERIMENTAL OCR: /raw-vlm?invoice=purchase|all_vendors|purchase_<vendor> routes -> purchase_ocrvl_pipeline.py (PaddleOCR-VL server :5006); /docstrange&source=local -> docstrange_invoice_server.py (WSL); /?type=purchase&ocr=paddle -> purchase_paddle_runner.py subprocess. None are wired to the live app PARSE_URLs"
+        ],
+        "configAndSecrets": [
+          "parsing/.env IS COMMITTED TO THE REPO and contains LIVE secrets: SUPABASE_SERVICE_KEY (service_role JWT for yynuu), RUNPOD_POD_API_KEY (rpa_...), FIREBASE_SERVICE_ACCOUNT_B64 (full aiaccountant-b60ed service account private key), and API_KEY=sb_publishable_... — major secret-leak risk; .gcloudignore/.dockerignore exclude .env from the Cloud Run image (secrets are meant to be injected as Cloud Run env vars) but the file is still in git",
+          "Config precedence: lib/env.make_env_loader + handler.env_value — os.getenv() (Cloud Run env vars) overrides parsing/.env file values; handler also reads backend/.env for PUSH_QUEUE_URL/API_KEY fallback (server/handler.py:62-99)",
+          "SUPABASE_URL/SUPABASE_KEY: handler aliases SUPABASE_KEY to SUPABASE_SERVICE_KEY then API_KEY (handler.py:118); company_context aliases only SUPABASE_SERVICE_KEY (company_context.py:14). Committed .env points at yynuu (testing) Supabase, but live env JSONs show prod app flavor still uses yynuu too (prod.json marked _PROD_PENDING_CONFIRM)",
+          "RunPod coupling: RUNPOD_POD_URL hardcodes the serverless endpoint id vllm-5fjqw6zdgqxt8g; switching to a pod requires editing .env (commented pod URL/key block). handler.py also has stale defaults (RUNPOD_POD_URL=https://e1a2h1u5vujgun-8000..., key sk-e1a2h1u5vujgun) used only if env/.env unset",
+          "Tunables via MINICPM_* / RUNPOD_* / SALE_* / PARTY_* env: DPI (200/300/400), PDF_MAX_PAGES=4, match thresholds (purchase MIN_MATCH_SCORE=56, party 78), GST rates (0.09/0.18), SALE_HOME_STATE=Haryana, cache TTL 300s, default company 'K V ENTERPRISES'",
+          "Per-env Cloud Run deployments (aiaccountant env/*.json): testing=828647628834, deployment(client/ztugw)=822222628942, prod=366926737745 — each has its own tallybridge-parsing-<num> Cloud Run URL; the parsing service is stateless and reads company from the ?company= query"
+        ],
+        "risks": [
+          "parsing/.env with service_role + RunPod + Firebase private key is committed to git history — anyone with repo access has full write access to the yynuu Supabase project and the aiaccountant Firebase project. Highest-priority finding",
+          "Parse endpoints take NO auth (scan_uploader sends only Content-Type: application/pdf; handoff notes confirm x-api-key was reverted). Anyone who learns a tallybridge-parsing-*.run.app URL can submit invoices, trigger RunPod GPU spend, and enqueue vouchers into push_queue",
+          "OCR -> regex rule engine is brittle: each vendor has bespoke multi-group regexes (ROW_RE/ADDISON/CP/GNL/RR...) keyed off exact column order and Nanonets markdown formatting; a layout/OCR drift silently yields wrong qty/rate/amount or zero items (parsed warnings only). Financial correctness depends on fuzzy stock matching at threshold 56",
+          "Duplicacy check (check_duplicacy) only queries Supabase vouchers by exact voucher_number eq; OCR-misread or missing invoice numbers (Pidilite 'not detected') bypass dedup and still enqueue — risk of duplicate purchase vouchers",
+          "Discount/net-amount/GST recomputation in build_voucher_payload guesses whether a parsed amount is gross or net via a 1% tolerance heuristic; on freight/round-off edge cases the assessable value can reconcile incorrectly",
+          "RunPod serverless cold start + polling: _runpod_serverless_completion polls /status every 3s up to RUNPOD_TIMEOUT_SECONDS (300s). Cloud Run request can hang; the app's 300s client timeout and the scan_jobs 300s TTL race, so the 'Processing' badge can clear before/without the voucher landing",
+          "Per-process in-memory caches (PARTY_NAME_CACHE never invalidated; company_context 300s TTL) on a multi-replica/auto-scaling Cloud Run mean stale stock/party data and per-instance inconsistency",
+          "Committed .env defaults to yynuu (testing) Supabase while prod.json is explicitly _PROD_PENDING_CONFIRM — strong chance production purchase/sale matching is reading/writing test data"
+        ],
+        "techDebt": [
+          "DEAD/REFERENCE: purchase_image_pipeline.py is explicitly 'not used by the server; kept for reference' (file header). Re-exports symbols only",
+          "EXPERIMENTAL (not on the production PARSE_URLs): /raw-vlm routes -> purchase_ocrvl_pipeline.py (PaddleOCR-VL via :5006 paddleocr_vl_server.py); purchase_paddle_runner.py (ocr=paddle subprocess, last touched 2026-05-20); nanonets_invoice_server.py + docstrange_invoice_server.py (local/WSL OCR servers for source=local). The live app uses only source=runpod and type=sale",
+          "Misnomers/cruft: service is named 'n8n_minicpm_server' and uses MINICPM_* env names, but the production purchase OCR is Nanonets-OCR2-3B on RunPod, not MiniCPM and not n8n. requirements.txt has no Flask/web framework (raw http.server)",
+          "Two near-identical RunPod workers (runpod-serverless-worker = Nanonets/vLLM0.9.2 active; minicpm-serverless-worker = MiniCPM-V4.5/vLLM>=0.10.2) duplicate the same proxy handler; managed out-of-band on RunPod, not deployed from this repo",
+          "Disabled-but-present invoice-number VLM re-ask fallback (handler.py:2022-2038) commented out for latency; recover_invoice_number/apply_recovered_invoice_number/runpod_targeted_field kept as dead-ish code",
+          "Large monolith files: handler.py 2296 LOC, voucher_builder.py 1822 LOC, vlm_vendor_parser.py 1853 LOC — heavy per-vendor branching with limited tests (only purchase/test_ocrvl_parser.py, sale logic untested)",
+          "Repo dir is polluted with runtime scratch (uploads/, outputs/, _final8/, _live8/, *.log, large sample jpg/csv) — excluded from image via .gcloudignore but committed/present locally",
+          "PDF render duplicated 3x (render_pdf_upload / render_pdf_bytes_to_jpeg / render_pdf_bytes_to_jpeg_pages) in handler.py"
+        ]
+      },
+      {
+        "component": "aiaccountant Flutter frontend (mobile/web client for TallyBridge)",
+        "purpose": "A Flutter mobile (Android) + web client that lets users photograph/scan sale and purchase invoices, sends them to a Cloud Run parsing service, then reviews/edits the parsed voucher in a live queue and one-tap \"pushes\" it into TallyPrime via the desktop TallyBridge app. It authenticates users with Firebase Phone Auth and reads/writes the SAME per-tenant Supabase project (e.g. ztugw client-prod) directly over PostgREST + Realtime, while a few report/activate calls go through the Cloud Run backend.",
+        "entrypoints": [
+          {
+            "file": "lib/main.dart",
+            "role": "App bootstrap: initializes Firebase (per-flavor options) and Supabase, runs AccountantApp, and drives the master-data caches (stock/customers/vendors) off the Firebase authStateChanges stream"
+          },
+          {
+            "file": "lib/main.dart:83-93",
+            "role": "Root auth gate: StreamBuilder on FirebaseAuth.authStateChanges renders SplashScreen (waiting) / AccountantShell (signed in) / LoginScreen (signed out)"
+          },
+          {
+            "file": "lib/features/shell/app_shell.dart",
+            "role": "AccountantShell — the real home; IndexedStack of 5 tabs (Queue/History/Camera/Report/Profile), owns the scan→parse flow, PushQueueService + ScanJobsService subscriptions, and app-lifecycle resync"
+          },
+          {
+            "file": "lib/features/auth/login_screen.dart",
+            "role": "Phone-number entry → FirebaseAuth.verifyPhoneNumber (+91 hardcoded) → OTP screen"
+          }
+        ],
+        "keyModules": [
+          {
+            "file": "lib/core/config.dart",
+            "responsibility": "Single source of truth for all endpoints + keys, injected at build time via --dart-define-from-file=env/<flavor>.json; defaults are hardcoded to the testing env (Supabase yynuu, Cloud Run 828647628834)",
+            "loc": 61
+          },
+          {
+            "file": "lib/firebase_options.dart",
+            "responsibility": "Per-flavor (testing/deployment/prod) Android+Web FirebaseOptions selected by the compile-time FLAVOR const; must match the native google-services.json under android/app/src/<flavor>/",
+            "loc": 80
+          },
+          {
+            "file": "lib/features/queue/voucher_detail_sheet.dart",
+            "responsibility": "The core 3500-line screen: shape-agnostic payload parsing, in-place item/charge/party editing with tax-ratio recompute, persist-to-Supabase, Push-to-Tally activate POST, and realtime push-result handling",
+            "loc": 3511
+          },
+          {
+            "file": "lib/data/push_queue_service.dart",
+            "responsibility": "Subscribes to Supabase push_queue Realtime (insert/update/delete) + refresh(); maps DB rows to QueueEntry; classifies sale vs purchase by voucher_type",
+            "loc": 172
+          },
+          {
+            "file": "lib/data/scan_jobs_service.dart",
+            "responsibility": "Process-level singleton mirroring the shared scan_jobs table over Realtime so the 'Processing…' badge/timer climbs (+1 on startScan insert) and drains (-1 on parser's delete) across every client; 300s staleness sweep",
+            "loc": 167
+          },
+          {
+            "file": "lib/data/stock_items_cache.dart",
+            "responsibility": "Pages the entire stock_items catalog (13k+ rows, 1000/page) from Supabase for the edit-mode item picker; also customers_cache (Sundry Debtors) and vendors_cache (Sundry Creditors)",
+            "loc": 105
+          },
+          {
+            "file": "lib/services/api_client.dart",
+            "responsibility": "Thin http client to the Cloud Run backend; attaches Firebase ID token (Bearer) + x-api-key (Config.mrpApiKey); used by ReportScreen for reorder-level CSV reports",
+            "loc": 63
+          },
+          {
+            "file": "lib/data/scan_uploader.dart",
+            "responsibility": "Fire-and-forget POST of the scanned PDF bytes to the parsing Cloud Run URL (300s timeout); only logs failures since the badge is driven by scan_jobs, not this reply",
+            "loc": 33
+          },
+          {
+            "file": "lib/features/queue/queue_screen.dart",
+            "responsibility": "Queue UI: sale/purchase tabs, day grouping, purchase duplicate detection by voucher reference, local edit-marker overlay, opens detail/scan-result sheets",
+            "loc": 334
+          },
+          {
+            "file": "lib/features/history/history_screen.dart",
+            "responsibility": "Read-only view of push_queue rows with status='pushed', fetched + subscribed over Realtime; opens VoucherDetailSheet in readOnly mode",
+            "loc": 246
+          },
+          {
+            "file": "lib/data/seed_data.dart",
+            "responsibility": "Hardcoded demo seed rows (Krishna Steels, ABC Traders, report categories) still mixed into the live queue/report screens",
+            "loc": 40
+          }
+        ],
+        "externalInterfaces": [
+          {
+            "target": "Supabase (per-tenant project; testing=yynuu, deployment/client-prod=ztugw)",
+            "protocol": "PostgREST + Realtime (supabase_flutter) over HTTPS/WSS with publishable/anon key + RLS",
+            "notes": "Direct client access to tables push_queue (queue/history/edit/delete/activate-job), scan_jobs (badge), stock_items, ledgers (group_name=Sundry Debtors/Creditors). NO Firebase↔Supabase JWT bridge — Supabase auth is effectively anonymous-key + RLS; per-user isolation depends entirely on RLS policies which are not visible/enforced in this client"
+          },
+          {
+            "target": "Firebase Auth (testing=tallybridge-testing-env-636d4, deployment=tallybridge-deployment-env, prod=aiaccountant-b60ed)",
+            "protocol": "Firebase Phone Auth (SMS OTP)",
+            "notes": "+91 country code hardcoded (login_screen.dart:44); ID token used only for the Cloud Run backend, not Supabase"
+          },
+          {
+            "target": "Cloud Run backend (tallybridge-backend-<projectnum>.asia-south1.run.app)",
+            "protocol": "HTTPS REST",
+            "notes": "GET /api/sync/reorder-levels/<reportId>?company_name=K V ENTERPRISES (company name HARDCODED, report_screen.dart:59/68) for CSV reports; POST /api/sync/push-queue/activate {job_id} to trigger desktop push (voucher_detail_sheet.dart:818)"
+          },
+          {
+            "target": "Parsing Cloud Run (tallybridge-parsing-<projectnum>.asia-south1.run.app)",
+            "protocol": "HTTPS, raw application/pdf body",
+            "notes": "Sale: /?type=sale&push=queue ; Purchase: /docstrange?purchase=all&source=runpod ; job_id query param appended so the parser deletes the matching scan_jobs row when the invoice lands"
+          },
+          {
+            "target": "Google ML Kit Document Scanner (on-device, Android only)",
+            "protocol": "Platform plugin (google_mlkit_document_scanner)",
+            "notes": "Produces the scanned PDF; gated to Android — non-Android shows 'Document scanning is only available on Android' (app_shell.dart:143)"
+          },
+          {
+            "target": "Local filesystem (path_provider)",
+            "protocol": "File I/O",
+            "notes": "InvoiceImageStore caches scanned images by row id; report_screen caches report CSVs; both skipped on web (no path_provider web impl)"
+          }
+        ],
+        "dataFlows": [
+          "Login: phone → FirebaseAuth.verifyPhoneNumber('+91'+phone) → OTP screen → signInWithCredential → authStateChanges emits user → main.dart gate swaps to AccountantShell AND triggers StockItemsCache/CustomersCache/VendorsCache.fetch() from Supabase",
+          "Scan→parse (Android): Camera tab → CaptureTypeDialog (sale/purchase) → ML Kit DocumentScanner returns PDF → shell adds CapturedShot + scanService.startScan(type) INSERTs a scan_jobs row (badge +1 on all clients via Realtime) → sendScanToParser POSTs PDF bytes to the parsing Cloud Run URL with &job_id=<row> → parsing service parses, INSERTs a push_queue row and DELETEs the scan_jobs row (badge -1 everywhere)",
+          "Queue display: PushQueueService.subscribe() does initial refresh() (select push_queue where status in pending/push_now/failed) + Realtime insert/update/delete → rowToEntry maps voucher_payload to QueueEntry → QueueScreen groups by day, flags purchase duplicates by voucher reference, renders rows",
+          "Edit voucher: open VoucherDetailSheet → Edit captures originals, derives discount_pct, seeds editable items/ledgers/tax-ratios → typing recomputes amounts/charges → Save writes voucher_payload back to push_queue (only where status='pending') and tags edit_state (under_edit/edited) bumping created_at to float to top",
+          "Push to Tally: confirm dialog → _activate() overwrites narration='Replara AI', UPDATEs push_queue.voucher_payload, then POSTs activate {job_id:rowId} to Cloud Run → desktop TallyBridge picks it up; client subscribes to that row's Realtime updates, waits for tally_response.created/errors or status pushed/failed, then shows success/failure modal (sale only) and re-fetches the queue",
+          "History: select push_queue where status='pushed' + Realtime → grouped by month, opens VoucherDetailSheet read-only",
+          "Reports: ReportScreen → ApiClient.getRaw('/api/sync/reorder-levels/<id>', company_name='K V ENTERPRISES', format=csv) with Firebase Bearer + x-api-key → CSV parsed into a spreadsheet sheet; cached on disk (mobile only)"
+        ],
+        "configAndSecrets": [
+          "lib/core/config.dart — all endpoints/keys as String.fromEnvironment with HARDCODED testing-env defaults (Supabase URL yynuu, anon key sb_publishable_c2Cov…, backend/parsing Cloud Run 828647628834, mrpApiKey sb_publishable_IRsM8wDF…); comment forbids hardcoding other URLs but the defaults still ship",
+          "lib/firebase_options.dart — FLAVOR compile-time const (default 'testing') selects per-project FirebaseOptions; full Firebase apiKeys/appIds embedded for all 3 flavors (normal for Firebase web/android, but committed)",
+          "env/testing.json, env/deployment.json, env/prod.json — per-flavor --dart-define-from-file bundles (FLAVOR, SUPABASE_URL/ANON_KEY, BACKEND_BASE_URL/API_KEY, MRP_API_KEY, ACTIVATE_URL/KEY, SALE/PURCHASE_PARSE_URL); committed to the repo",
+          "env/prod.json is explicitly UNFINISHED: _PROD_PENDING_CONFIRM key says backend/Supabase are placeholders (366926737745 + testing yynuu Supabase) to be replaced with real prod targets; only Firebase=aiaccountant-b60ed is correct",
+          "deployment.json points at client-prod Supabase ztugw + Cloud Run 822222628942; this is the 'real client' env despite being named deployment",
+          ".firebaserc aliases default/prod=aiaccountant-b60ed, testing=tallybridge-testing-env-636d4, deployment=tallybridge-deployment-env",
+          "android/app/build.gradle.kts flavors are named staging/deployment/prod (NOT testing) — 'staging' deliberately maps to the testing Firebase project via src/staging/google-services.json (documented at build.gradle.kts:50); a real naming trap for whoever wires --flavor",
+          "x-api-key sent to backend is the Supabase publishable key reused as an API key (Config.mrpApiKey / backendApiKey), not a dedicated secret"
+        ],
+        "risks": [
+          "No real test coverage: only test/widget_test.dart, which is stale — it asserts seed rows ('ABC Traders', 'Today') and the camera dialog, but the live shell now seeds only sale rows from seed_data and pumps Supabase/Firebase with no mocks, so the test almost certainly fails or never runs in CI",
+          "Direct client writes to push_queue with the anon/publishable key mean all multi-tenant isolation rests on Supabase RLS that is invisible here; any client knows the table shape and can update/delete rows by id — a misconfigured RLS policy would expose every tenant's vouchers",
+          "Hardcoded company_name='K V ENTERPRISES' in ReportScreen (report_screen.dart:59,68) — reports are wired to a single client; any other tenant sees wrong/empty data",
+          "prod env is admittedly not real (placeholder backend/Supabase still pointing at testing yynuu Supabase) — shipping a prod build today would talk to the testing database",
+          "Realtime is the sole writer of the queue/history lists; while the app/tab is backgrounded the socket suspends and events are dropped — mitigated only by didChangeAppLifecycleState resync and a 5s sweep, so transient stale-badge / missing-row states are expected by design",
+          "Push result depends on a fragile two-source signal (tally_response.created/errors OR status pushed/failed) arriving over Realtime; if the desktop never updates the row or the echo is missed, the sheet can hang in _awaitingPushResult with a spinner",
+          "edit_state column-cache lag in Supabase Realtime is worked around in three places (push_queue_service, queue_screen, voucher_detail_sheet) — brittle coupling to Supabase internals and recently-ALTERed columns (cf. memory: push_queue migration drift broke the client queue)",
+          "scan_jobs.startScan failure is swallowed (returns null) so the badge silently won't reflect that scan; parsing failures in sendScanToParser are only debugPrint'd — a user gets a 'processing' toast and then nothing if parsing fails"
+        ],
+        "techDebt": [
+          "State management is ad-hoc: setState + StatefulWidgets + global singletons (ScanJobsService, StockItemsCache, etc.) and a static GlobalKey<ScaffoldMessengerState> on the app — no Provider/Riverpod/Bloc; cross-cutting state (auth→caches) is glued in main() with a manual uid-diff listener",
+          "voucher_detail_sheet.dart is a 3500-line god-file mixing payload parsing, tax math, Supabase writes, HTTP push, realtime subscription, and a dozen private dialog widgets — the single biggest maintenance hazard",
+          "Seed/demo data (seed_data.dart) is still interleaved with live data: the queue always seeds sale rows and the Report 'Insights' tab is entirely seed categories — production UI shows fake rows",
+          "Empty/boilerplate README.md ('A new Flutter project.'); no architecture or env/flavor docs despite a non-trivial 3-project multi-flavor setup",
+          "No CI/lint enforcement evident; analysis_options uses flutter_lints but the only test is broken",
+          "Repo hygiene: a dead backend/ copy of the TallyBridge Express backend was committed and is being deleted in the working tree (git status shows D backend/*); an apk/ folder with a duplicate test exists",
+          "Flavor naming inconsistency (android 'staging' vs dart/firebase 'testing') is documented but still an easy footgun; ProfileScreen settings rows (Business details, GST settings, etc.) are non-functional placeholders with no onTap",
+          "Charges/tax recompute logic infers discount_pct from amount and scales CGST/SGST by captured ratios — heuristic and easy to drift from the backend's own computation, risking mismatched pushed vouchers"
+        ]
+      }
+    ],
+    "production": [
+      {
+        "dimension": "Automated Testing Strategy",
+        "currentState": "Effectively zero automated test coverage across all three repos, and no test runner or CI wired anywhere. Concrete evidence: (1) backend/package.json:7 test script is literally `echo \"Error: no test specified\" && exit 1` — there is no vitest/jest dependency in backend devDependencies (only nodemon/ts-node/tsx/typescript). (2) Root D:/Desktop/TallyBridge/package.json has NO test script at all and no test framework in devDependencies. (3) Flutter aiaccountant has a single stale test/widget_test.dart that asserts seed rows ('ABC Traders', 'Today') and a 'Camera' dialog that no longer match the live shell (it pumps AccountantApp with no Firebase/Supabase mocks, so it cannot run in CI without network/auth). (4) No .github/ directory exists — confirmed no CI/CD. (5) The `test_minicpm.py` / `test_minicpm_rewritten.py` / `purchase/test_ocrvl_parser.py` files under parsing/ are misleadingly named — they are 1000+ line OCR pipeline MODULES (defining normalize_party_name, numbered_ocr_lines, numeric_distance_penalty, etc.), not pytest test suites; there is no conftest.py, no pytest.ini, no requirements pin for pytest. (6) No vitest.config / jest.config / pytest.ini exists in any repo. This is a system handling money (GST invoices, voucher amounts, stock valuation) for a paying client, shipping with no safety net whatsoever, and there are already two documented data-correctness incidents in project memory (the 1.2.11 full-FY freeze and the push_queue.edit_state migration drift that silently emptied the client's queue) that automated tests would have caught.",
+        "findings": [
+          {
+            "title": "Two divergent money-rounding regimes on the SAME invoice data, neither tested",
+            "severity": "critical",
+            "evidence": "backend/src/routes/sync.ts:1004-1014 toMoney uses JS float `Number(numeric.toFixed(2))` and toPaise does `Math.round(toMoney(value)*100)`; the parsing voucher path uses Python Decimal with ROUND_HALF_UP — parsing/lib/numeric.py:21-22 round2() and parsing/purchase/voucher_builder.py:1331/1349/1357 (round2 of quantity*rate, subtotal scaling, delta correction). The Flutter/sale path uses Python float round() — parsing/server/handler.py:1232 `amount = round(gross*(1-discount_pct/100.0),2)` and :1271 `cgst = round(subtotal*SALE_GST_RATE,2)`.",
+            "impact": "A voucher built in parsing (Decimal half-up) and re-ingested through backend (JS toFixed banker-ish float) can disagree by a paise on subtotal/CGST/SGST, producing voucher totals that don't reconcile in Tally and breaking the snapshot/restore equality checks. Float .toFixed(2) also mis-rounds known values (e.g. 1.005 -> '1.00'). No test pins any of these.",
+            "recommendation": "Write golden-value unit tests FIRST for toMoney/toPaise (Vitest) and round2/build_sale_voucher_payload tax math (pytest), with a shared fixture table of (qty, rate, discount_pct, gst_rate) -> expected subtotal/cgst/sgst/total. Make the assertion that the backend and parsing paths agree to the paise on the same inputs an explicit cross-path test."
+          },
+          {
+            "title": "Ingest is a hand-rolled snapshot+restore, not a transaction, and is completely untested",
+            "severity": "critical",
+            "evidence": "backend/src/routes/sync.ts:662 captureVoucherGraphSnapshot, :703 restoreVoucherGraphSnapshot, :595 restoreRows, :443 upsertInBatches with onConflict keys 'company_id,tally_guid' (vouchers/purchases) and 'company_id,name' (groups/ledgers/stock). The restore path only console.error's on failure (per architecture digest). The whole /api/sync handler (sync.ts:~1860-2210) replays many independent PostgREST calls with no DB transaction.",
+            "impact": "A Cloud Run timeout/OOM (100mb body) mid-ingest leaves vouchers/items/entries half-written; restore is best-effort. Idempotency (re-running the same sync) is the single most important correctness property and nothing verifies that a second identical ingest is a no-op or that a partial failure fully restores.",
+            "recommendation": "Integration test the ingest against an ephemeral Postgres/Supabase (Testcontainers postgres or a throwaway Supabase branch via the Supabase MCP create_branch): seed a company, POST a recorded /api/sync body twice, assert row counts/values are identical (idempotency), then POST a body that throws mid-way and assert the snapshot fully restores. This is the highest-ROI integration test in the system."
+          },
+          {
+            "title": "Tally voucher XML parsing is pure and trivially fixture-testable, but has zero fixtures",
+            "severity": "high",
+            "evidence": "src/python/xml_parser.py:265 parse_vouchers(xml_text)->list, :178 parse_groups, :209 parse_ledgers, :444 parse_stock, :518 parse_outstanding — all take a raw XML string and return dicts; e.g. quantity parsing at :301-306 splits ACTUALQTY on whitespace ('10 Nos' -> 10.0/'Nos'), discount_pct from DISCOUNT at :308. There are already captured responses in src/python/tally-responses/ and wireshark_requests/ that could seed fixtures, but no test references them.",
+            "impact": "Any TallyPrime XML layout drift (different ACTUALQTY format, missing field, ISCANCELLED handling at :277, ALLINVENTORYENTRIES vs INVENTORYENTRIES fallback at :293) silently yields wrong qty/rate/amount or dropped items. Because port 9000 is single-threaded and heavy reads FREEZE TallyPrime (documented memory: tally_9000_single_threaded_hang), you must NOT test against live Tally — record/replay is mandatory.",
+            "recommendation": "Snapshot real Tally XML into src/python/tests/fixtures/*.xml (reuse tally-responses/), then pytest each parse_* against expected dicts. This gives a CI-safe Tally substitute forever, so the desktop sync loop can be tested without TallyPrime."
+          },
+          {
+            "title": "Voucher dedup keys off exact invoice number only — a known duplicate-voucher vector with no test",
+            "severity": "high",
+            "evidence": "parsing/server/handler.py:1723 check_duplicacy(invoice_number) queries Supabase vouchers with params {'voucher_number': f'eq.{invoice_number}'} — exact match only. Sale path generates synthetic numbers SALE-<timestamp> (handler.py:1282) so two scans seconds apart are non-duplicate; OCR-missed numbers (Pidilite 'not detected') bypass dedup entirely (:2042/:2132). Backend upsert onConflict 'company_id,tally_guid' (sync.ts:443/2053) is the only DB-level guard and is untested.",
+            "impact": "Duplicate purchase/sale vouchers get enqueued into push_queue and pushed into TallyPrime, corrupting the client's books — the exact failure a paying accounting client cannot tolerate.",
+            "recommendation": "Unit-test check_duplicacy with mocked Supabase responses (empty vs match) and add a table-driven test for normalize_voucher_number (handler.py:1494). Add an integration assertion that enqueuing the same OCR payload twice produces one push_queue row."
+          },
+          {
+            "title": "electron-store one-time migrations are deterministic and untested despite a prior drift incident",
+            "severity": "medium",
+            "evidence": "src/main/index.ts:66-71 migratedToHybridV1 flips render->hybrid; :79-82 migratedSyncInterval6hV1 forces 360-min interval. These are pure functions of current store state guarded by a boolean flag. store.ts (176 lines) holds AppConfig defaults. Project memory documents the push_queue.edit_state migration DRIFT that silently broke the client queue — schema/config migrations are a proven failure surface here.",
+            "impact": "A migration that double-applies, or fails to apply for a config carrying readMode:'shadow' (which Settings can't even re-select — store allows auto|xml-only|hybrid only), changes sync behavior for a live client with no signal.",
+            "recommendation": "Vitest unit tests over the migration functions with an in-memory electron-store mock: assert idempotency (running twice = once), assert the flag gates re-runs, and assert a value already at target is left untouched. Fast, zero-infra, high confidence."
+          },
+          {
+            "title": "Flutter app has a single stale test that cannot pass in CI; the money/tax god-file is untested",
+            "severity": "high",
+            "evidence": "aiaccountant/test/widget_test.dart asserts find.text('ABC Traders')/'Today'/'Camera' against a shell that now seeds only sale rows from seed_data and pumps Supabase/Firebase with no mocks. The real risk surface — voucher_detail_sheet.dart (~3500 lines mixing payload parse, tax math, Supabase writes, HTTP push) — has no tests; pubspec dev_dependencies has only flutter_test + flutter_lints (no mockito/mocktail).",
+            "impact": "The on-device tax recomputation and push payload assembly can drift from the backend/parsing math with nothing to catch it; the only existing test is a false signal (red or skipped).",
+            "recommendation": "Delete/replace widget_test.dart. Extract pure tax/payload functions out of voucher_detail_sheet.dart into a testable lib file and cover them with flutter_test; add mocktail for Supabase/Firebase so widget tests can run headless in CI."
+          }
+        ],
+        "recommendations": [
+          "PHASE 0 (week 1, infra): Add Vitest to backend/ and root, pytest+pytest-cov to src/python and parsing, keep flutter_test. Replace backend/package.json:7 `exit 1` with `vitest run`. Add a single .github/workflows/ci.yml that runs all four suites on push/PR. Gate merges on green. Without CI, tests rot exactly like widget_test.dart did.",
+          "PHASE 1 (weeks 1-2, MONEY CORRECTNESS — do this first): Golden-value unit tests for the accounting math. Backend: toMoney/toPaise (sync.ts:1004-1014), normalizeFiniteNumber (sync.ts:141). Parsing: round2/pretty_number/normalize_decimal_token (lib/numeric.py), build_sale_voucher_payload tax+discount (handler.py:1205-1280), voucher_builder subtotal scaling (voucher_builder.py:1331-1382). Python: xml_parser.parse_vouchers/parse_stock/parse_outstanding against recorded XML fixtures. One cross-path test that the backend and parsing produce identical paise on the same (qty,rate,discount,gst) inputs.",
+          "PHASE 2 (weeks 3-4, IDEMPOTENCY + INTEGRATION): Stand up an ephemeral DB (Testcontainers Postgres with the consolidated full_schema.sql applied, OR a throwaway Supabase branch via Supabase MCP create_branch/reset_branch). Test /api/sync: (a) POST same recorded body twice -> identical rows (idempotency); (b) inject a mid-ingest failure -> snapshot fully restores (captureVoucherGraphSnapshot/restoreVoucherGraphSnapshot, sync.ts:662/703); (c) dedup: same OCR payload twice -> one push_queue row.",
+          "PHASE 3 (week 5, CONTRACT): Lock the IPC and HTTP boundaries. Generate types from the Supabase schema (Supabase MCP generate_typescript_types) and assert backend insert shapes match. Add a contract test that the renderer's electron.d.ts matches preload.ts channels (the digest flags getStartupSetting/setStartupSetting/openLogFile missing from electron.d.ts:19-41) — a simple test that every window.electronAPI key has a matching ipcMain handler. Snapshot-test the parsing->backend /api/sync/push-queue JSON body shape and the desktop local-push-server (:3002) request shape.",
+          "PHASE 4 (week 6+, E2E with MOCKED Tally — never live): Use Playwright for Electron (_electron.launch) to drive add-company/sync/settings flows. Replace TallyPrime with a recorded-XML replay server: a tiny http.server bound to 127.0.0.1:9000 in CI that serves canned responses keyed by request shape (reuse src/python/tally-responses/ + wireshark_requests/). Because port 9000 is single-threaded and heavy reads FREEZE Tally (memory: tally_9000_single_threaded_hang; feedback_live_tally_test_caution), CI must NEVER touch a real Tally — the replay server is the only safe path. Flutter: golden + widget tests with mocktail-mocked Supabase/Firebase.",
+          "Set explicit coverage targets: 90%+ line coverage on the money/parse pure functions (lib/numeric.py, xml_parser.py parse_*, sync.ts toMoney/toPaise, voucher_builder tax math) since accounting correctness is the product; 60% on backend route handlers; smoke-level (happy-path) E2E only. Do NOT chase coverage on the OCR regex rule engine or god-files — pin behavior with characterization fixtures instead.",
+          "Treat the two documented incidents as the first regression tests: a fixture reproducing the 1.2.11 full-FY voucher catch-up window logic, and a schema-presence assertion that push_queue has edit_state/push_now before the app queries it (the drift that silently emptied the client queue)."
+        ],
+        "toolingChoices": [
+          "Vitest (TS) for backend/ and root Electron-main — fast ESM-native (backend is `type: module`), built-in coverage (c8), and a vi.mock for the @supabase/supabase-js client; preferred over Jest because the backend is ESM/TS where Jest's ESM story is painful.",
+          "pytest + pytest-cov for src/python (xml_parser, sync_main helpers) and parsing (lib/numeric, lib/text, voucher_builder, handler dedup); use responses/respx or a thin fake to mock Supabase PostgREST and RunPod HTTP so tests run offline.",
+          "Playwright for Electron (@playwright/test with _electron.launch) for desktop E2E — the standard for Electron app testing, drives the real main+renderer; pair it with a custom in-process recorded-XML replay server (Python http.server on 127.0.0.1:9000) so CI never needs TallyPrime.",
+          "Testcontainers (postgres) OR Supabase MCP branches (create_branch/reset_branch/apply_migration) for the ingest integration tests — gives a real Postgres with full_schema.sql applied so snapshot/restore and idempotency are exercised against actual SQL semantics, not mocks.",
+          "flutter_test + mocktail for aiaccountant — mocktail (not mockito codegen) to stub Supabase/Firebase so widget and tax-math tests run headless; extract pure logic out of voucher_detail_sheet.dart first.",
+          "GitHub Actions as the CI orchestrator (one workflow, matrix over node/python/flutter jobs) — there is currently no .github/, so this is greenfield; gate PR merge on all suites green to prevent the stale-test rot that killed widget_test.dart.",
+          "fast-check (TS) / Hypothesis (Python) property-based testing for the money helpers only — generate random (qty,rate,discount) and assert invariants (non-negative totals, subtotal == sum of line amounts to the paise, backend==parsing agreement); high leverage for catching float-rounding edge cases like toFixed(2) on x.xx5."
+        ],
+        "effort": "Phase 0 infra+CI: S (1-2 days). Phase 1 money/parse unit tests: M (the highest-ROI block, ~1.5 weeks; pure functions, fixtures from existing tally-responses/). Phase 2 ingest idempotency+snapshot integration: M-L (DB harness setup is the cost, ~2 weeks). Phase 3 contract tests: S (a few days). Phase 4 Electron E2E with mocked-Tally replay + Flutter widget tests: L (replay-server build + Playwright-Electron harness, ~2-3 weeks). Realistic path to a meaningful safety net before client ship: Phases 0-2 (~4 weeks, 1 engineer) cover the money-correctness and idempotency risks that matter most; Phases 3-4 are the follow-on hardening pass."
+      },
+      {
+        "dimension": "Security & Secrets Management",
+        "currentState": "The system is NOT production-ready from a security standpoint and currently carries at least one critical, internet-exposed secret leak. Auth on the Express backend is structurally sound at the transport level (constant-time API-key compare via timingSafeEqual + length guard, Firebase JWT verification, every route mounts requireApiKey/requireClientApiKey), but the model collapses to a SINGLE shared static API key with NO per-company authorization, so any key holder can read or mutate any tenant's data. Multi-tenant isolation rests entirely on per-client Supabase projects plus manual company_id WHERE filters in a 2992-line god-file; the actual RLS policies shipped are all permissive `USING(true) WITH CHECK(true)` with no role/predicate, so the publishable/anon key used by the Flutter app grants full read/update/delete on push_queue, vouchers, scan_jobs, etc. The OCR/parsing Cloud Run service has NO authentication at all. CORS on the backend is wide open (`cors()` with no allowlist). The local push server on 3002 correctly rejects non-loopback peers but is itself unauthenticated. The Electron installer (NSIS) is NOT code-signed and auto-updates from a PUBLIC GitHub repo. Concrete confirmed leak: backend/.env (SUPABASE_SERVICE_KEY=service_role, API_KEY, FIREBASE_SERVICE_ACCOUNT_B64) and parsing/.env (service_role + RunPod key + Firebase service account) were committed and remain in the history of the PUBLIC github.com/siddharthniranjan2003/TallyBridge repo (commits 0b536fe and ae5872a, reachable from origin/* branches; 5 secret-material hits in committed diffs). On-disk values differ from the oldest committed values (suggesting partial rotation), but the secrets are permanently in public history and must be treated as compromised. aiaccountant kept its secrets out of git (good): .env, config.dart, google-services.json, firebase_options.dart are all gitignored and untracked, though the AiAccountant GitHub repo is also PUBLIC and ships hardcoded publishable keys (lower risk by design, but they point at a real project).",
+        "findings": [
+          {
+            "title": "service_role + Firebase + API_KEY secrets committed to a PUBLIC GitHub repo's git history",
+            "severity": "critical",
+            "evidence": "git log --all -- backend/.env parsing/.env shows adds at 0b536fe (backend/.env) and ae5872a (parsing/.env). `git branch -r --contains 0b536fe/ae5872a` lists origin/TallyBridge-Backend-Refactor and 5 other origin/* branches. `gh repo view siddharthniranjan2003/TallyBridge` => PUBLIC. JWT payload decode of the committed SUPABASE_SERVICE_KEY => \"role\":\"service_role\"; `git log --all -p -- *.env | grep -c 'service_role|private_key|eyJ'` => 5. Files contain SUPABASE_SERVICE_KEY, API_KEY (service secret), FIREBASE_SERVICE_ACCOUNT_B64, RUNPOD_POD_API_KEY.",
+            "impact": "Anyone on the internet can clone the public repo, run `git log -p`, and extract a service_role Supabase key (full DB read/write/delete that BYPASSES RLS), the backend API_KEY (full backend access), the RunPod API key (GPU spend), and the Firebase service account (mint tokens / impersonate any user). This is total compromise of the testing tenant (yynuu) and, if the same secret class was ever committed for client prod, of ztugw. Even though on-disk values now differ (partial rotation), the keys are permanently in public history.",
+            "recommendation": "Treat ALL committed secrets as compromised: immediately rotate the Supabase service_role key (yynuu and any client project), backend API_KEY/API_KEY_CLIENT, RunPod API key, and regenerate the Firebase service account key. Purge history with git filter-repo (or BFG) on every branch and force-push, then invalidate any forks/clones; or make the repo private and rotate regardless. Decouple auto-update publishing from the source repo so the source can be made private. Add a pre-commit secret scanner (gitleaks/trufflehog) and a CI gate."
+          },
+          {
+            "title": "All shipped RLS policies are permissive USING(true) WITH CHECK(true) with no role/tenant predicate",
+            "severity": "critical",
+            "evidence": "backend/supabase_new_tables.sql:57-87, supabase_scan_jobs.sql:47-48, supabase_schema_v2.sql:93-96 — every CREATE POLICY is `FOR ALL USING (true) WITH CHECK (true)` with no `TO <role>` clause (so applies to PUBLIC incl. anon/authenticated) and no auth.uid()/company_id predicate. full_schema.sql defines company_id columns but contains ZERO `ENABLE ROW LEVEL SECURITY`/`CREATE POLICY`. Flutter (lib/main.dart:27-29) initializes Supabase with the publishable/anon key and writes directly: voucher_detail_sheet.dart:650-651 .update, :787 .delete().eq('id', rowId), queue_screen.dart:174 .from('push_queue').",
+            "impact": "Within a tenant's Supabase project, the publishable/anon key grants full SELECT/UPDATE/DELETE on push_queue, vouchers, scan_jobs and report tables to ANY caller who knows the table shape and a row id. There is no isolation between users of the same client, and a single shared/leaked anon key plus a known row id lets an attacker edit voucher payloads (financial tampering) or delete queued pushes. The 'one Supabase project per client' boundary is the ONLY real isolation; a single config mistake pointing two tenants at one project leaks everything.",
+            "recommendation": "Replace blanket USING(true) policies with predicate-scoped policies (e.g. company_id IN (SELECT company_id FROM user_companies WHERE user_id = auth.uid())) and scope the permissive service_role policy to `TO service_role` only. For anon/authenticated roles, restrict writes to push_queue.voucher_payload to rows the user owns; never allow client DELETE on financial rows. Add a CI check that fails on any USING(true) policy. Verify with Supabase get_advisors (security lints)."
+          },
+          {
+            "title": "Parsing / OCR Cloud Run service exposes invoice ingest with NO authentication",
+            "severity": "high",
+            "evidence": "grep across parsing/*.py for x-api-key/authorization/bearer/Access-Control/401/403 on the HTTP handlers returns nothing on the parse path (only test_minicpm.py uses a Supabase bearer). Architecture digest + handoff notes confirm x-api-key was reverted; scan_uploader sends only Content-Type: application/pdf. Service runs on stdlib ThreadingHTTPServer.",
+            "impact": "Anyone who learns a tallybridge-parsing-*.run.app URL can submit arbitrary PDFs: drives unbounded RunPod GPU spend (DoS-by-cost), and—because the parser enqueues into push_queue—can inject attacker-controlled draft vouchers that a user may one-tap push into TallyPrime. Combined with the weak duplicacy check (exact voucher_number eq only), forged/duplicate purchase vouchers can be planted.",
+            "recommendation": "Require a shared secret (x-api-key with timingSafeEqual) or Firebase-verified bearer on all parse endpoints; reject unauthenticated requests with 401. Put the service behind Cloud Run IAM / an API gateway and restrict ingress. Add a request-size and rate limit, and a per-tenant quota on RunPod jobs."
+          },
+          {
+            "title": "Single shared API_KEY grants cross-tenant write; push-results / push-queue activate have no company scoping",
+            "severity": "high",
+            "evidence": "auth.ts uses one process.env.API_KEY for all of /api/sync/*. sync.ts:2513 /push-results updates push_queue `.eq('id', id)` with NO company_id filter and NO ownership check, accepting arbitrary `tally_response` JSON. sync.ts:2393 /push-queue/activate and 2362 image endpoint are keyed by id; activate treats company identity as optional.",
+            "impact": "Any holder of the (shared, and historically leaked) API_KEY can mark ANY company's queued voucher pushed/failed, inject arbitrary tally_response payloads, activate/deactivate any job, and fetch any invoice image by id — across every company in that backend's reach. There is no service-to-service identity separation between the desktop connector, parsing service, and Flutter app.",
+            "recommendation": "Move to per-tenant (or per-component) keys, or derive identity from the Firebase token and enforce company ownership on every push_queue mutation (add a company_id check in the WHERE clause and validate it against the caller's allowed companies). Reject /push-results entries whose row company_id is not owned by the caller. Consider signed, short-lived service tokens instead of a static shared key."
+          },
+          {
+            "title": "Electron NSIS installer is unsigned and auto-updates from a public repo",
+            "severity": "high",
+            "evidence": "package.json build.win has only target+icon; no certificateFile/certificateSha1/signingHashAlgorithms and no CSC_LINK/CSC_KEY_PASSWORD usage anywhere in the repo. electron-builder.yml publish => provider github, repo TallyBridge (PUBLIC). Auto-update via electron-updater (MEMORY: live GitHub auto-update on public repo).",
+            "impact": "Windows SmartScreen will warn on every install (poor trust for a paid client), and—more seriously—an unsigned binary distributed via a public release channel has weaker tamper guarantees. Anyone with push access to the public releases (or who can MITM/typo-squat) could distribute a malicious build; users have no signature to validate. The app runs a local server and pushes data into Tally, so a trojaned build is high-impact.",
+            "recommendation": "Obtain an OV/EV code-signing certificate, set win.certificateFile + CSC_KEY_PASSWORD (or Azure Trusted Signing), and enable forceCodeSigning so unsigned builds fail the pipeline. Sign the auto-update artifacts and verify signatures on update. Restrict who can publish releases; move releases to a dedicated repo separate from source."
+          },
+          {
+            "title": "Local push server on 127.0.0.1:3002 is unauthenticated (loopback-only, but any local process can push vouchers into Tally)",
+            "severity": "medium",
+            "evidence": "local-push-server.ts:176-179 rejects non-loopback remoteAddress (so a remote LAN attacker cannot connect — good), but there is no token/secret check on POST /push-voucher (lines 193-214). Company defaults to the single enabled company if not specified (pickCompanyName 87-97).",
+            "impact": "Any process or page that can reach localhost on the user's machine (malware, a malicious Electron/Node app, or a browser via DNS-rebinding tricks where the Host check is absent) can POST a voucher and have it pushed into TallyPrime. The loopback guard blocks LAN attackers but not local ones, and there is no shared-secret handshake with the backend poller.",
+            "recommendation": "Require a per-session shared secret (generated at startup, stored in electron-store, sent by the trusted poller as a header and compared with timingSafeEqual). Validate the Host header to mitigate DNS-rebinding. Keep the loopback bind. Optionally bind to a random high port and pass it to the trusted caller out-of-band."
+          },
+          {
+            "title": "Wide-open CORS and no schema validation on the 100MB /api/sync ingest",
+            "severity": "medium",
+            "evidence": "backend/src/index.ts:16 `app.use(cors())` with no origin/allowlist/credentials config. Body limit 100mb (index.ts:10-13). sync.ts is 2992 lines using heavy `any`/ad-hoc Record<string,unknown> normalization, bespoke per-field validation, and the ingest is a hand-rolled snapshot+rollback across many PostgREST calls (not a real transaction).",
+            "impact": "Open CORS lets any website issue authenticated cross-origin requests (relevant if a Firebase session/token can be replayed from a browser). The 100MB unvalidated body plus per-field hand-rolled parsing is a large attack/footgun surface: malformed input can partially write the voucher graph (vouchers/items/entries half-replaced) with only best-effort console.error rollback, risking data corruption rather than a clean rejection.",
+            "recommendation": "Set an explicit CORS allowlist (Flutter web origin + dashboard) and disable wildcard with credentials. Adopt a schema validator (zod/valibot) at the route boundary for /api/sync and push endpoints; reject on parse failure before any DB write. Lower the body limit to the real maximum and stream-validate. Wrap ingest in a real DB transaction (Postgres function/RPC) so partial writes cannot persist."
+          },
+          {
+            "title": "aiaccountant ships hardcoded publishable Supabase keys and points default env at a live project",
+            "severity": "low",
+            "evidence": "lib/core/config.dart:18-47 hardcodes sb_publishable_* keys as defaultValue and supabaseUrl defaultValue=https://yynuuysvjeipawzfbeme.supabase.co. config.dart, .env, google-services.json, firebase_options.dart are all untracked/gitignored (verified). AiAccountant GitHub repo is PUBLIC.",
+            "impact": "Publishable/anon keys are public-by-design and safe ONLY if RLS is correct — which it is NOT (see permissive-RLS finding), so these keys become a real lever for tenant data access. Defaulting to the yynuu testing project means a misbuilt prod binary talks to the testing DB (digest notes prod env is a placeholder still on yynuu).",
+            "recommendation": "Keep publishable keys but make RLS enforcement the dependency it claims to be (per the comment in config.dart). Remove live-project defaults so a build without --dart-define fails fast instead of silently hitting testing. Gate the prod flavor behind a real prod Supabase + Firebase project before shipping."
+          }
+        ],
+        "recommendations": [
+          "EMERGENCY (do first, hours not days): rotate every secret that was ever committed — Supabase service_role keys (yynuu + all client projects), backend API_KEY/API_KEY_CLIENT, RUNPOD_POD_API_KEY, and regenerate the Firebase service account. Assume the public-history values are compromised.",
+          "Purge backend/.env and parsing/.env from git history (git filter-repo/BFG) across ALL branches and force-push; or make the source repo private. Decouple electron auto-update releases from the source repo so source can go private.",
+          "Fix RLS: replace every `USING(true) WITH CHECK(true)` policy with company/auth.uid()-scoped predicates, scope service_role-only policies `TO service_role`, and forbid anon DELETE/UPDATE on financial rows. Run Supabase get_advisors and gate CI on any USING(true) policy.",
+          "Add authentication to the parsing Cloud Run service (x-api-key timingSafeEqual or Firebase bearer) plus rate/size limits and per-tenant RunPod quotas; put it behind Cloud Run IAM ingress controls.",
+          "Replace the single shared API_KEY with per-component/per-tenant credentials and enforce company_id ownership on every push_queue mutation (especially /push-results, /push-queue/activate, image fetch).",
+          "Add a startup-generated shared secret to the local push server (3002) and validate the Host header to defend against local-process abuse and DNS-rebinding.",
+          "Code-sign the NSIS installer (OV/EV cert or Azure Trusted Signing) with forceCodeSigning, and sign+verify auto-update artifacts; restrict who can publish releases.",
+          "Lock down CORS to an explicit origin allowlist and introduce schema validation (zod) on /api/sync + push routes; wrap ingest in a real DB transaction/RPC instead of best-effort snapshot rollback.",
+          "Add automated secret scanning (gitleaks/trufflehog) as a pre-commit hook and CI gate so this class of leak cannot recur — there is currently no CI at all."
+        ],
+        "toolingChoices": [
+          "gitleaks or trufflehog — pre-commit hook + CI secret scanning to prevent re-committing .env/keys (the repo has none today)",
+          "git-filter-repo (preferred over BFG) — purge .env blobs from full git history across all branches",
+          "Supabase RLS + get_advisors security lints — replace USING(true) policies with auth.uid()/company_id predicates and lint them in CI",
+          "zod (or valibot) — schema validation at the Express route boundary, replacing the bespoke `any`-based per-field normalization in sync.ts",
+          "Azure Trusted Signing or an OV/EV code-signing certificate wired via electron-builder win.certificateFile + CSC_KEY_PASSWORD with forceCodeSigning",
+          "Google Secret Manager (or GCP Cloud Run secret env bindings) — source backend/parsing secrets at deploy time instead of committed .env/backend.env.yaml",
+          "helmet + an explicit cors allowlist on the Express app to replace bare cors() and add standard security headers",
+          "express-rate-limit (backend) and a Cloud Run concurrency/quota limit on the parsing service to bound abuse and RunPod GPU cost"
+        ],
+        "effort": "Secret rotation + history purge: M (1-2 days incl. coordinating Supabase/Firebase/RunPod key rollover across yynuu + client projects and redeploys). RLS hardening across per-client projects: L (fan-out per tenant, plus testing every Flutter write path). Per-tenant auth / push_queue ownership scoping in the 2992-line sync.ts: L. Parsing service auth + rate limiting: S-M. Local push 3002 shared secret + Host check: S. CORS allowlist + helmet: S. zod validation on ingest: M. Code signing setup: S-M (cert procurement is the long pole). CI + secret scanning bootstrap (none exists): M."
+      },
+      {
+        "dimension": "CI/CD, Build, Release & Packaging",
+        "currentState": "There is zero CI/CD. No .github/workflows exists in either repo; the backend test script is literally `echo \"Error: no test specified\" && exit 1`. Every build, sign, release, and deploy across all five components is a manual, copy-pasted shell sequence captured only in untracked scratch files (TallyBridge/command.txt, aiaccountant/command.txt) — not in any committed, reviewable, reproducible pipeline.\n\nRelease/deploy surface by component:\n- Electron desktop: `npm run build:python` (PyInstaller --onefile) -> set GH_TOKEN from `gh auth token` -> `npm run build` -> `npx electron-builder --publish always` -> then MANUALLY `gh release edit vX --draft=false`. Auto-update is electron-updater pointed at public GitHub repo siddharthniranjan2003/TallyBridge. Installer is UNSIGNED.\n- Backend (Cloud Run): `gcloud config configurations activate <env>` then `gcloud run deploy tallybridge-backend --source backend --region asia-south1 --project <projnum>`, per environment. Manual project switching; documented gotchas (new revision serves 0% traffic, push-queue key 401) are tribal knowledge.\n- Parsing (Cloud Run): same `gcloud run deploy --source parsing` pattern; Dockerfile still carries Render-era env names (MINICPM_HTTP_HOST, \"so Render can route\") despite Cloud Run.\n- Flutter (aiaccountant): MOST mature piece — product flavors (staging/deployment/prod), `--dart-define-from-file=env/<flavor>.json`, per-flavor google-services.json, gitignored release keystore with debug fallback, .firebaserc aliases. Still hand-driven.\n- Supabase: BETTER than digest implied — a real supabase/migrations/ dir with timestamped migrations plus scripts/deploy-supabase-direct-ingest.ps1. But NO supabase/config.toml, the .temp/ link-state (pointing at yynuu testing) is committed to git, legacy backend/*.sql still coexists, and fan-out across client projects is one manual `supabase link` per project.\n\nNet: nothing is gated, nothing is reproducible from a clean checkout, versions are hand-bumped in 3+ disconnected places, and promotion testing->client-prod is \"activate the right gcloud config and don't fat-finger the project flag.\" Least-automated, most error-prone dimension for a paying-client ship.",
+        "findings": [
+          {
+            "title": "Electron installer is unsigned; auto-update ships unsigned binaries to a paying client",
+            "severity": "critical",
+            "evidence": "electron-builder.yml has no win.certificateFile/azureSignToolOptions; package.json build.win has no signing config; repo-wide grep for signtool/cscLink/CSC_LINK/certificate* hits only node_modules. final_deployment/tallybridge-client-handoff-checklist.md:81 lists 'Code-sign the installer to reduce SmartScreen friction' as an OPEN item. Release is `npx electron-builder --publish always` (command.txt:4) with no signing step.",
+            "impact": "Windows SmartScreen/Defender flags every install AND every auto-update of an unsigned NSIS exe, eroding client trust and risking blocked/quarantined updates. Unsigned electron-updater downloads weaken update integrity. Recurring per-update friction, not one-time.",
+            "recommendation": "Acquire an OV (ideally EV for instant SmartScreen reputation) Authenticode cert. Wire signing into electron-builder via win.signtoolOptions/Azure Trusted Signing, cert fed from a CI secret (CSC_LINK/CSC_KEY_PASSWORD). Sign both installer and bundled tallybridge-engine.exe inside a GitHub Actions windows-latest job so the cert never lives on a dev laptop."
+          },
+          {
+            "title": "electron-builder config duplicated and divergent across package.json and electron-builder.yml; bare invocation silently ignores the .yml",
+            "severity": "high",
+            "evidence": "Two configs: package.json build{} (appId, win.nsis, extraResources) and electron-builder.yml (same fields PLUS publish:{provider:github, owner:siddharthniranjan2003, repo:TallyBridge} and installerIcon). command.txt:4 runs `npx electron-builder` with NO -c flag. Project memory electron_builder_config_gotcha: bare electron-builder uses package.json build block, ignores the .yml; publish repo inferred from git origin unless -c passed. package.json build{} has NO publish key.",
+            "impact": "Actual publish target depends on git origin at release time, not the explicit owner/repo in the .yml — a footgun if origin points at a fork/wrong remote. installerIcon and copyright in the .yml are silently dropped. Two sources of truth drift; whichever a future maintainer edits may not be the one that runs.",
+            "recommendation": "Pick ONE config file. Recommend deleting package.json build{} and always invoking `electron-builder -c electron-builder.yml`, OR delete the .yml and fold publish/installerIcon into package.json. Fix the invocation in the CI job so it is explicit and reviewed."
+          },
+          {
+            "title": "No automated build/test gate anywhere; backend test is exit 1; releases ship straight from a dev machine",
+            "severity": "high",
+            "evidence": "No .github/workflows in either repo (Glob .github/** -> none). backend/package.json:7 test=`echo \"Error: no test specified\" && exit 1`. Releases use local `gh auth token` + `npx electron-builder --publish always`. Deploys use local `gcloud run deploy --source` after manual `gcloud config configurations activate`. Current branch has 6 modified + dozens of untracked uncommitted files.",
+            "impact": "A broken tsc build, a missing PyInstaller hidden import, or an uncommitted mitigation (memory client_1211_freeze_rca: HEAD 5b37f7a regresses, mitigations uncommitted) can reach a client because nothing compiles/lints/tests on a clean checkout before publish.",
+            "recommendation": "Stand up 4 GitHub Actions workflows: (1) electron-release on tag (windows-latest: npm ci, build:python, build, sign, electron-builder --publish always); (2) backend-deploy (tsc typecheck, deploy via Workload Identity Federation, then update-traffic --to-latest); (3) parsing-deploy (mirror); (4) flutter-build (flavor matrix + flutter analyze). Gate each on at least tsc --noEmit / flutter analyze before real tests land."
+          },
+          {
+            "title": "Cloud Run 0% traffic and push-queue key 401 gotchas are unmitigated manual steps",
+            "severity": "high",
+            "evidence": "Project memory parsing_gcp_redeploy_gotchas: after redeploying tallybridge-parsing the new revision serves 0% (must run update-traffic --to-latest) and the push-queue API key can break (401); smoke-test one enqueue. command.txt:14-20 shows raw `gcloud run deploy` with no follow-up traffic-shift or smoke test. backend/parsing Dockerfiles use unpinned npm install / pip install.",
+            "impact": "A deploy can silently serve the OLD revision (0% to new) so a fix appears deployed but isn't, or break parsing->push-queue auth so scanned invoices stop enqueuing — both invisible without a manual smoke test easy to skip under pressure. For a paying client this is a live data-flow outage waiting to happen.",
+            "recommendation": "In deploy workflows always append `gcloud run services update-traffic <svc> --to-latest` plus a post-deploy smoke step (curl health; for parsing enqueue one canary and assert a push_queue row). Pin deps: backend uses npm ci with committed lockfile in the image; parsing pins requirements.txt."
+          },
+          {
+            "title": "Per-client Supabase migration fan-out is fully manual; no config.toml, committed link-state, legacy SQL coexists with real migrations",
+            "severity": "high",
+            "evidence": "supabase/migrations/ has 6 timestamped migrations (e.g. 20260619_stock_items_part_code.sql) — good — but NO supabase/config.toml (ls -> missing). supabase/.temp/linked-project.json is committed and pins ref yynuuysvjeipawzfbeme (testing). scripts/deploy-supabase-direct-ingest.ps1 does `supabase link --project-ref` + db push per project. Legacy backend/*.sql (supabase_schema_v2..v6, push_queue_edit_state.sql, full_schema.sql) still exist. Memory push_queue_migration_drift: client prod ztugw was MISSING push_queue.edit_state/push_now -> app showed empty queue (400 swallowed).",
+            "impact": "Each new client requires a human to re-link and db-push with no record of which migration version each client project is on — the documented ztugw drift already caused a silent production failure. As clients grow this is the highest-likelihood production incident source. The committed .temp link-state defaults the script to the wrong (testing) project.",
+            "recommendation": "Standardize on Supabase CLI migrations (already half-adopted): add a committed supabase/config.toml, gitignore supabase/.temp/, retire legacy backend/*.sql once parity is confirmed. Build a fan-out workflow iterating a committed registry of client project-refs running `supabase db push` against each, with schema_migrations as the version ledger. Run via GitHub Actions with project-refs+db passwords as secrets. Add a post-migration get_advisors drift check."
+          },
+          {
+            "title": "deploy-supabase-direct-ingest.ps1 has a fatal syntax bug: param() after Set-StrictMode",
+            "severity": "medium",
+            "evidence": "scripts/deploy-supabase-direct-ingest.ps1:1-13 is `$ErrorActionPreference=...; Set-StrictMode -Version Latest; param(...)`. In PowerShell, param() must be the FIRST statement in a script/function; placing it after executable statements is a parse error, so the script cannot run as written.",
+            "impact": "The one piece of migration automation that exists is non-functional, which is likely WHY fan-out is still done by hand. Anyone reaching for it hits a parse error and falls back to manual supabase link/db push.",
+            "recommendation": "Move the param() block to line 1 (before $ErrorActionPreference/Set-StrictMode), then promote this into the CI fan-out job. Verify with `pwsh -NoProfile -File` before trusting it."
+          },
+          {
+            "title": "Android applicationId is the placeholder com.example.aiaccountant with the scaffold TODO still present",
+            "severity": "medium",
+            "evidence": "aiaccountant/android/app/build.gradle.kts:21 namespace='com.example.aiaccountant'; :36 applicationId='com.example.aiaccountant' with :35 '// TODO: Specify your own unique Application ID'. All three flavors share this id (comment at :54-58 confirms same applicationId).",
+            "impact": "Shipping a paying client an app under com.example.* is unprofessional, can collide on Play/devices, and cannot be changed later without a fresh install + re-auth for all users. It couples to release identity (signing/upload keys are bound to the id).",
+            "recommendation": "Set a real reverse-DNS applicationId (e.g. com.<vendor>.tallybridge) BEFORE first client distribution; ideally distinct ids per flavor so testing/deployment/prod coexist on one device. Update namespace, google-services.json package_name, and Firebase app registration to match."
+          },
+          {
+            "title": "Version numbers hand-bumped in disconnected places with no single source of truth or tag-driven release",
+            "severity": "medium",
+            "evidence": "TallyBridge package.json:3 version 1.2.13; aiaccountant/pubspec.yaml:19 version 1.0.0+30; backend/package.json:2 version 1.0.0 (stale, never bumped). Release un-drafting is a separate manual `gh release edit vX --draft=false` (command.txt:8). No CHANGELOG, no tag-driven release.",
+            "impact": "electron-updater compares versions to decide updates; a missed package.json bump means clients never see a release, or re-publishing the same version confuses the updater. Backend/parsing surface no version at all, so 'which revision is live' is unknowable from the artifact.",
+            "recommendation": "Drive releases from git tags (vX.Y.Z) with CI reading the tag as the single version source (inject into package.json/pubspec at build). Add a /version or build-SHA header to backend & parsing. Adopt a minimal CHANGELOG and fold un-drafting into the release workflow."
+          },
+          {
+            "title": "PyInstaller engine build is fragile, undocumented, and unverified in any pipeline",
+            "severity": "medium",
+            "evidence": "package.json:10 build:python is a single long `pyinstaller --onefile` line with manual --collect-all xmltodict/requests/dotenv and --add-data definitions;definitions. Invoked by hand (command.txt:1) before electron-builder, which expects python-dist/tallybridge-engine.exe (electron-builder.yml:17). No requirements pinning for the build env.",
+            "impact": "If a new Python dep is added but not added to --collect-all/--hidden-import, the onefile exe silently misses a module and the sync engine crashes ONLY on the client (works in dev where the interpreter is present). Because nothing builds it in CI, a forgotten build:python ships a stale engine inside a fresh installer.",
+            "recommendation": "Move build:python into the Electron CI job (rebuilt from a pinned src/python/requirements.txt). Add a post-build smoke test running the exe with a no-op/--version flag asserting clean exit + the final JSON line, catching missing-import regressions before publish."
+          },
+          {
+            "title": "Secrets-in-build hygiene: personal GH_TOKEN, committed parsing/.env, committed supabase/.temp leak creds/state into the manual flow",
+            "severity": "medium",
+            "evidence": "command.txt:2 `$env:GH_TOKEN = (gh auth token)` — release uses a developer's personal GitHub token. parsing/.env (service_role + RunPod + Firebase key) is committed to git history (.gcloudignore/.dockerignore exclude .env from the IMAGE but not from git). supabase/.temp/linked-project.json (org/project ref) is committed.",
+            "impact": "Releases tie to one person's credentials (bus factor + over-broad scope), and any local build can accidentally bundle committed secret files. The committed link-state defaults migration tooling to the testing project, inviting wrong-target pushes.",
+            "recommendation": "Run release/deploy in CI with scoped secrets (a release-only GitHub PAT, GCP Workload Identity Federation instead of long-lived keys, Supabase creds as Actions secrets). Gitignore supabase/.temp/. Rotate the committed parsing/.env credentials and purge from history (coordinated with the parsing-dimension remediation)."
+          }
+        ],
+        "recommendations": [
+          "P0 — Acquire an OV/EV Authenticode cert and wire Windows code-signing into electron-builder (sign installer + bundled engine.exe) driven from a CI secret, before any paying-client install. Unsigned auto-update is the most client-visible defect.",
+          "P0 — Collapse the two electron-builder configs to one and always invoke with -c so the GitHub publish target (owner/repo) is explicit, not git-origin-inferred.",
+          "P0 — Fix the Android applicationId off com.example.* (real reverse-DNS, per-flavor) before first distribution; it cannot be changed post-ship without reinstall.",
+          "P1 — Stand up 4 GitHub Actions pipelines (Electron release on tag, backend Cloud Run deploy, parsing Cloud Run deploy, Flutter multi-flavor build); gate each on tsc/flutter analyze; use Workload Identity Federation for GCP and scoped tokens for GitHub. Bake in update-traffic --to-latest + a post-deploy smoke test to kill the 0%-traffic/401 gotchas.",
+          "P1 — Standardize Supabase on CLI migrations: add supabase/config.toml, gitignore .temp/, fix the param() bug in deploy-supabase-direct-ingest.ps1, and build a registry-driven fan-out workflow that applies + records migration versions across every client project (closes the documented ztugw drift class).",
+          "P1 — Move build:python into CI from a pinned requirements.txt with a post-build exe smoke test; never ship a hand-built engine.",
+          "P2 — Make git tags the single version source (inject into package.json/pubspec at build), surface backend/parsing build SHA at runtime, and fold release un-drafting into the workflow. Add a minimal CHANGELOG.",
+          "P2 — Remove secret/state files from the build path: rotate + purge committed parsing/.env and supabase/.temp, replace the personal GH_TOKEN release with a CI release identity."
+        ],
+        "toolingChoices": [
+          "GitHub Actions as the CI/CD backbone (repos already on GitHub; electron-updater already reads GitHub Releases). windows-latest runners for the Electron+PyInstaller job, ubuntu for backend/parsing/Flutter.",
+          "Windows code-signing via Azure Trusted Signing (cloud HSM, no cert on disk, electron-builder azureSignToolOptions support) or an EV cert on a CI-accessible token; EV gives instant SmartScreen reputation that OV does not.",
+          "Supabase CLI migrations (already partially adopted — migrations/ dir + deploy script) as the migration tool over introducing dbmate, since the team is already on it. Add config.toml and a fan-out runner; schema_migrations is the per-client version ledger. Supabase MCP get_advisors/list_migrations can serve as a post-fan-out drift check.",
+          "Google Cloud Workload Identity Federation (google-github-actions/auth) for keyless Cloud Run deploys, replacing long-lived SA keys and the manual `gcloud config configurations activate` dance; deploy with `gcloud run deploy --source` (Dockerfiles present) + mandatory update-traffic --to-latest.",
+          "Flutter CI via subosito/flutter-action with a flavor matrix (staging/deployment/prod) consuming existing env/<flavor>.json dart-define files; Firebase App Distribution (already used per command.txt) for tester APK delivery, gated behind flutter analyze.",
+          "npm ci + committed lockfiles in backend/parsing Docker images (replace npm install / unpinned pip) for reproducible images; pin src/python/requirements.txt for the PyInstaller build.",
+          "release-please or a tag-driven version-injection step for single-source-of-truth versioning + CHANGELOG generation across the Electron app."
+        ],
+        "effort": "Electron CI + code-signing + config consolidation: M (cert procurement lead-time is the long pole; wiring is S-M). Backend + parsing Cloud Run deploy pipelines with WIF + traffic/smoke gates: M (two near-identical workflows). Supabase migration standardization + fan-out runner + config.toml + script fix: M (schema-parity validation against existing clients is the risk). Flutter multi-flavor CI: S (flavors/dart-define already exist). Android applicationId fix: S but must precede first ship (re-register Firebase apps). Versioning/tagging/CHANGELOG: S. Secret rotation/history purge (shared with parsing dimension): M. Overall: ~2-3 focused weeks to a gated, reproducible, signed pipeline; code-signing cert lead time and per-client Supabase parity validation are the schedule risks."
+      },
+      {
+        "dimension": "Observability, Error Handling & Resilience",
+        "currentState": "The system has thin, ad-hoc observability and is NOT production-ready on this dimension for a paying client. There is NO crash reporting (zero Sentry/crashReporter across Electron, backend, parsing, or Flutter), NO alerting, and NO automated detection of failures. Logging is unstructured/string-based in most places: the Electron file logger (logger.ts) writes plain `[ts][LEVEL] msg` lines with 5MB rotation keeping only one .old file, and monkey-patches console.* globally. The one bright spot is remote-log.ts, which forwards the in-app Sync Log to BetterStack Live Tail with structured JSON records (level, company, tally_guid, app_version, device) — but it ships the same human-readable strings as `message`, derives level by regex (`/[err|error/i`), and is the ONLY remote telemetry; it is intentionally best-effort (all errors swallowed) and conveys nothing when the app crashes or never reaches a sync. Resilience is weak: cloud_pusher.py has NO retry/backoff/idempotency on any network call (the lone sleep is a post-ReadTimeout verify poll); a single failed window/chunk aborts the run. The /api/sync ingest is a hand-rolled snapshot+rollback across many separate PostgREST calls (not a DB transaction), and restore is itself best-effort, only console.error-ing on failure (sync.ts:591,602,755). Health checks exist but are useless for monitoring: backend `/health` (index.ts:23), parsing `/health` (handler.py:1792), and local-push `/health` all return a STATIC `{status:ok}` with zero dependency checks (no Supabase/RunPod/Tally probe), so an uptime check stays green while Supabase is down. Graceful degradation is partial: Tally port pre-flight skips sync when Tally is down, and cloud_pusher maps connection errors to typed statuses — but failures mostly surface only as a red company row + a sync-log line on the CLIENT's screen, invisible to the operator unless they happen to be watching BetterStack. The known 1.2.11 freeze (full-FY catch-up on single-threaded Tally) had no telemetry that would have flagged it; mitigation was a blunt 6h interval default. There is no CI and no tests (backend test = `exit 1`).",
+        "findings": [
+          {
+            "title": "No crash reporting anywhere (no Sentry) — production failures are invisible to the operator",
+            "severity": "critical",
+            "evidence": "grep for sentry/crashReporter across repo: only matches in docs/HTML, none in src/main, backend/src, parsing, or aiaccountant. Electron has no crashReporter.start(); backend index.ts:27-32 only console.error's unhandledRejection/uncaughtException; parsing handler.py:2209 returns traceback in the HTTP body to the caller, not to any sink.",
+            "impact": "When the desktop connector crashes on a client machine, a Cloud Run instance throws, or the Flutter app errors, no one is notified and there is no stack-trace aggregation. Mean-time-to-detection for a paying-client incident is effectively 'until the client complains.' The 1.2.11 freeze is the canonical example — it shipped and froze clients with no automated signal.",
+            "recommendation": "Add Sentry to all three+1 surfaces: @sentry/electron (main+renderer) with crashReporter, @sentry/node in backend/src/index.ts wrapping the Express app, sentry_flutter in aiaccountant, and a sentry-sdk init in the parsing http.server. Tag events with company/tally_guid/app_version (already available in remote-log context) and ingest_mode so client incidents are attributable."
+          },
+          {
+            "title": "Health endpoints are static 200s with no dependency probe — uptime monitoring would be falsely green",
+            "severity": "high",
+            "evidence": "backend/src/index.ts:23 `res.json({status:'ok'})`; parsing handler.py:1792-1807 returns static 'healthy'; local-push-server.ts:183 returns static ok. None query Supabase, RunPod, or GCS.",
+            "impact": "A GCP uptime check or load-balancer health probe passes while Supabase is unreachable, the RunPod GPU endpoint is cold/dead, or the service role key is wrong (the documented yynuu RLS-returns-200-[] and push_queue column-drift failure modes). Outages stay undetected until ingest/parse traffic fails for real users.",
+            "recommendation": "Make /health a real readiness check: backend pings Supabase (cheap select on a known table) and returns 503 on failure; parsing checks RunPod endpoint reachability and the configured Supabase project; add a separate /livez (process up) vs /readyz (deps ok). Wire GCP Cloud Run uptime checks + an alerting policy on both services."
+          },
+          {
+            "title": "No retry/backoff/idempotency on cloud push network calls — transient failures abort the whole sync",
+            "severity": "high",
+            "evidence": "cloud_pusher.py: _post_sync_payload and the direct PostgREST path issue a single requests.post; ConnectionError/ReadTimeout/HTTPError each return ok:False immediately with no retry. push() aborts on the first failed chunk (lines 875-907). Only sleep in file is the verify poll (line 636).",
+            "impact": "A momentary Cloud Run cold start, 503, or network blip during a multi-chunk voucher upload fails the entire run; the client sees a red row and must wait for the next 6h cycle. Worse, the ingest is non-transactional, so a mid-chunk failure can leave the company half-written (vouchers persisted, masters not, or vice versa).",
+            "recommendation": "Add bounded exponential backoff with jitter (e.g. 3 attempts on 5xx/timeout/connection error) around each POST in cloud_pusher, and make ingest idempotent via the existing alter_ids/synced_at markers so a retried chunk is a safe no-op. Treat 4xx (auth/validation) as non-retryable."
+          },
+          {
+            "title": "Swallowed-error patterns hide real failures (column-missing 400, malformed Python JSON reported as success)",
+            "severity": "high",
+            "evidence": "sync-engine.ts:455-457 — JSON.parse failure of the Python result only console.errors and falls back to PREVIOUS record counts while still reporting status 'success' (line 465). Backend restore failures only console.error (sync.ts:591,602,755). remote-log/logger writes are fully try/caught to no-op. Per project memory, a missing push_queue.edit_state/push_now column caused a swallowed 400 → app queue silently showed empty.",
+            "impact": "A failed or partial sync can be reported to the client as a successful sync with stale counts, eroding trust in the numbers. The push_queue column-drift case already shipped to client-prod (ztugw) and silently broke the queue with no error visible anywhere.",
+            "recommendation": "On Python-result JSON parse failure, mark the run as error (not success) and ship the raw tail to BetterStack/Sentry. In the backend, escalate restore/rollback failures to error-level structured events (data-integrity alarm), and surface column/schema 400s instead of swallowing — withSupabaseSchemaGuidance (sync.ts:1315) already detects them; route those to an alert."
+          },
+          {
+            "title": "Non-transactional ingest with best-effort rollback risks silent partial writes",
+            "severity": "high",
+            "evidence": "sync.ts uses snapshot+restore across many separate PostgREST calls (restoreVoucherGraphSnapshot:703, restoreRows:595, rollbackInsertedRows); restore on the catch path (2231-2249) and its helpers only console.error on failure. Cloud Run has request time/body (100mb) limits that can kill mid-ingest.",
+            "impact": "A Cloud Run timeout/OOM or a failed restore between steps leaves the tenant's voucher graph or snapshot sections half-replaced, and nothing alerts on it. For a financial sync this is a correctness hazard, not just availability.",
+            "recommendation": "Move the multi-table ingest into a single Postgres RPC/transaction (the direct path already calls tb_ingest_* RPCs — converge render mode onto a transactional RPC too). Emit a structured 'ingest_partial' error event whenever a restore helper fails, and add a post-ingest consistency check (record_counts vs persisted rows)."
+          },
+          {
+            "title": "Client-side failures only surface on the client's own screen — no operator-facing aggregation or alerting",
+            "severity": "high",
+            "evidence": "sync-engine.ts:481-493 sets lastSyncStatus:'error' and emits 'company-error' to the renderer (red row + sync-log line). The only off-device path is remote-log.ts to BetterStack Live Tail, which is a passive tail with no alerting and ships only when the app is running and reaches a sync.",
+            "impact": "For a paying client there is no proactive 'this client hasn't synced in 24h' or 'this client is erroring repeatedly' signal. Operators learn of problems reactively. StatusBar additionally lies (cosmetic countdown, hardcoded internetOk=true) so even the client's own UI under-reports connectivity issues.",
+            "recommendation": "Add a lightweight heartbeat: have the connector POST a sync outcome (ok/error/skipped + counts + last_synced_at) to the backend each run; build a BetterStack/Grafana alert (or a scheduled Cloud Run job) on 'no heartbeat in N hours' and 'error rate > X' per company. Define one structured event schema shared by Electron, backend, and Flutter."
+          },
+          {
+            "title": "Parse/ingest endpoints unauthenticated + committed secrets compound the resilience risk",
+            "severity": "medium",
+            "evidence": "Per digest and handler.py, parse endpoints take no auth; parsing/.env (service_role + RunPod + Firebase key) is in git history. push-results (sync.ts) updates push_queue by id with no tenant scoping.",
+            "impact": "Beyond security, this is a resilience/observability gap: anyone hitting the URL can drive unbounded RunPod GPU spend and enqueue garbage vouchers, and there is no rate limit, no abuse alerting, and no per-tenant error attribution to detect it.",
+            "recommendation": "Gate parse + push-results behind the existing API key, scope push_queue mutations by company, add rate limiting, and emit structured auth-failure / spend events that feed the alerting layer. (Rotate the committed credentials — covered under the Security dimension.)"
+          },
+          {
+            "title": "Unstructured string logging + global console monkey-patch makes machine analysis hard",
+            "severity": "medium",
+            "evidence": "logger.ts:39-48 writes plain `[ts][LEVEL] msg` and initLogger() reassigns console.log/warn/error globally (lines 64-77). remote-log derives level via regex on the message string (remote-log.ts:101). Backend/parsing use bare console.error/print.",
+            "impact": "No correlation IDs, no per-run/per-company structured fields in the file log, and level is guessed from text — so querying 'all errors for company X in run Y' is impossible. Log rotation keeps only one .old file (5MB), so a chatty incident's history is lost.",
+            "recommendation": "Adopt one structured JSON logging standard (e.g. pino for Node main+backend, structlog or stdlib logging with JSON formatter for Python) with shared fields: run_id, company/tally_guid, ingest_mode, app_version, level. Stop guessing level from message text; keep N rotated files."
+          }
+        ],
+        "recommendations": [
+          "Add Sentry across all four surfaces before client ship: @sentry/electron (main+renderer, with crashReporter) in src/main, @sentry/node wrapping Express in backend/src/index.ts, sentry-sdk in parsing/server, sentry_flutter in aiaccountant. Tag every event with company/tally_guid/app_version/ingest_mode (already on the remote-log context object).",
+          "Make all three /health endpoints real readiness checks (backend→Supabase ping, parsing→RunPod+Supabase, returning 503 on failure) and split /livez vs /readyz; then create GCP Cloud Run uptime checks + alerting policies on the backend and parsing services.",
+          "Add bounded exponential-backoff-with-jitter retries (3 attempts, retry only 5xx/timeout/connection) around every POST in cloud_pusher.py, and make ingest idempotent via alter_ids/synced_at so retried chunks are safe no-ops.",
+          "Fix the silent-success bugs: on Python-result JSON parse failure (sync-engine.ts:455) mark the run as error and ship the raw tail; escalate backend restore/rollback failures (sync.ts:591/602/755) and schema/column 400s to error-level structured events instead of console.error/swallow.",
+          "Convert the render-mode ingest to a single transactional Postgres RPC (converge with the existing tb_ingest_* direct RPCs) so a Cloud Run timeout cannot leave a tenant half-written; add a post-ingest record-count consistency check.",
+          "Implement a per-run sync-outcome heartbeat POST from the connector to the backend, and build 'no heartbeat in N hours' + 'error rate > X per company' alerts (BetterStack alerting or a scheduled Cloud Run job) so client-side failures become operator-visible proactively.",
+          "Standardize on structured JSON logging (pino for Node, structlog/JSON-formatter for Python) with shared correlation fields (run_id, company, ingest_mode, app_version); stop deriving log level by regex and keep more than one rotated log file.",
+          "Fix the misleading client UI signals (StatusBar hardcoded internetOk=true and the cosmetic next-sync countdown) so the client's own first line of observability reflects reality during cloud-push failures."
+        ],
+        "toolingChoices": [
+          "Sentry — @sentry/electron, @sentry/node, sentry_flutter (Dart), sentry-sdk (Python): unified crash + error aggregation with release/version tagging; DSN is write-only like the existing BetterStack token model the team already trusts.",
+          "BetterStack (Logtail/Better Uptime) — already integrated for Live Tail; extend it with Uptime monitors on the Cloud Run /readyz endpoints and alert policies on log patterns, avoiding a new vendor.",
+          "pino (Node, main + backend) and structlog or stdlib logging+python-json-logger (Python engine + parsing) — structured JSON logs with shared fields; pino-pretty for local dev.",
+          "GCP Cloud Monitoring uptime checks + alerting policies (Cloud Run is already on GCP) — health/latency/5xx alerts with no extra infra; route to email/Slack/PagerDuty.",
+          "tenacity (Python) for declarative retry/backoff-with-jitter in cloud_pusher.py, or a small hand-rolled loop if avoiding a dependency; for the backend, p-retry around PostgREST calls.",
+          "A single shared event schema (TypeScript type + Python TypedDict) for sync outcomes/heartbeats so Electron, backend, and Flutter emit comparable structured telemetry."
+        ],
+        "effort": "Sentry rollout (all 4 surfaces): M. Real health checks + GCP uptime/alerting: S-M. Retry/backoff + idempotency in cloud_pusher: M. Transactional ingest RPC conversion: L (touches the 2992-line sync.ts and SQL RPCs, needs careful testing). Fix swallowed-success + escalate restore/schema errors: S. Heartbeat + alerting on sync failure: M. Structured logging standard: M (cross-cutting). UI signal fixes (StatusBar): S. Overall this dimension is a multi-week effort; the highest-ROI, lowest-effort first steps are Sentry, real /health checks + uptime alerting, and fixing the silent-success/swallowed-error paths.\""
+      },
+      {
+        "dimension": "Code Quality, Maintainability & Repo Hygiene",
+        "currentState": "The codebase ships working features but is in a pre-production hygiene state with no automated guardrails. There is ZERO lint/format/typecheck tooling across all four subsystems: no eslint/prettier config (none of .eslintrc*, eslint.config.*, .prettierrc* exist at root or in backend/), no Python ruff/black/mypy/flake8/pyproject (git ls-files shows none), and the only test script is backend's `\"test\": \"echo \\\"Error: no test specified\\\" && exit 1\"`. TypeScript strict mode IS enabled in all three tsconfigs (root, tsconfig.main.json, backend/tsconfig.json — backend even adds noUncheckedIndexedAccess + exactOptionalPropertyTypes), but it's undermined by pervasive `any`: 102 `any`/`as any`/Record<string,unknown> occurrences in backend/src and 26 in src/renderer+src/main, plus the entire IPC contract (electron.d.ts) typed as `any`. Python is fully untyped: 0 of 11 files in src/python import `typing`. Repo hygiene is poor: a narrow .gitignore (no `*.log`/`*.err`/`*.html`/`*.pdf` patterns), 22 stale compiler artifacts (.js/.d.ts/.map) committed INSIDE backend/src next to source, 63 tracked .md files (52 under md_files/), a 30-file orphan `frontend/` Vite app, committed log files, secrets (parsing/.env) sitting in git history, 19 untracked junk files at root one `git add .` from being committed, and no README or CONTRIBUTING anywhere. Four god-files dominate: backend/src/routes/sync.ts (2992 LOC), src/python/sync_main.py (1905 LOC, with in-flight \"CHANGE 1-4\" revert markers), src/python/cloud_pusher.py (933 LOC), src/python/tally_client.py (678 LOC).",
+        "findings": [
+          {
+            "title": "Compiler artifacts (.js/.d.ts/.map) committed inside backend/src next to TypeScript source",
+            "severity": "high",
+            "evidence": "git ls-files shows 22 tracked emitted files in backend/src: backend/src/routes/sync.js, sync.d.ts, sync.d.ts.map, sync.js.map and the same quartet for index, db/supabase, middleware/auth, routes/push-invoice, routes/push-voucher. backend/tsconfig.json now sets rootDir ./src + outDir ./dist, and the build script is bare `tsc`, so these are STALE duplicates from an earlier config (committed in 1f327d5/feeb928) that were never removed. No backend/.gitignore exists to keep them out.",
+            "impact": "Stale .js can be imported/run instead of fresh source (`npm start` runs node dist, but stray src/*.js confuse editors, grep, and ESM resolution under module:nodenext). Diffs are doubled and noisy; a developer editing sync.ts but accidentally running the committed sync.js silently runs old code. Pure rot that masks real changes in review.",
+            "recommendation": "git rm the 22 emitted files in backend/src, add a backend/.gitignore with `*.js`/`*.d.ts`/`*.map` under src (or better, dist/ + node_modules/), and confirm `tsc` emits only to dist/. Add a CI check that fails if compiled output appears under src/."
+          },
+          {
+            "title": "No lint, format, or typecheck tooling or pre-commit hooks anywhere",
+            "severity": "high",
+            "evidence": "No eslint/prettier config at root or backend/ (probed .eslintrc*, eslint.config.*, .prettierrc*, .prettierignore — none). No Python linter/formatter config (no ruff.toml, pyproject.toml, setup.cfg, .flake8, mypy.ini in git ls-files). No .husky/.pre-commit-config. backend test = `exit 1`. Tailwind+postcss+autoprefixer are in devDeps but unused (per digest).",
+            "impact": "Nothing mechanically prevents `any` proliferation, dead code, secret commits, or style drift. Every quality regression must be caught by human review, which is already failing (stale artifacts, dead code, committed history secrets all slipped through). For a paid client ship this is the single biggest process gap.",
+            "recommendation": "Add eslint (typescript-eslint) + prettier with a shared config consumed by root, backend, and frontend; add ruff (lint+format) for src/python and parsing/; wire `npm run lint`/`npm run typecheck` (tsc --noEmit) scripts and a husky/lint-staged or pre-commit hook running them on changed files. Drop tailwind/postcss/autoprefixer from devDeps since renderer uses 100% inline styles, or actually wire it."
+          },
+          {
+            "title": "IPC type contract (electron.d.ts) is hand-maintained, already drifted, and entirely `any`-typed",
+            "severity": "high",
+            "evidence": "src/renderer/electron.d.ts declares the window.electronAPI surface with getConfig/saveSettings/addCompany etc. but OMITS getStartupSetting, setStartupSetting, openLogFile — all three exist in src/main/preload.ts (lines 40,41,44) and are called from Settings.tsx. Every method is typed `Promise<any>`/`(s:any)`. There is no generated bridge.",
+            "impact": "Runtime works but the type contract is a lie: any channel signature change (rename, arg shape) compiles clean and breaks only at runtime in front of the client. With strict mode on, this is the one place strictness is fully defeated.",
+            "recommendation": "Define a single shared IpcApi interface in src/main and have both preload.ts and the renderer consume it (import type), eliminating the hand-kept .d.ts. Type each channel's payload/return concretely. As an interim, add the 3 missing methods and replace `any` with real types so drift surfaces at compile time."
+          },
+          {
+            "title": "Secrets committed to git history (parsing/.env) — not removable by deletion alone",
+            "severity": "critical",
+            "evidence": "`git log --all -- parsing/.env` returns commits ae5872a, 51895e3, 434da8b. The file is no longer in the working tree (git ls-files shows none) but remains fully recoverable from history. Per the architecture digest it contained service_role Supabase key + RunPod key + Firebase private key.",
+            "impact": "Anyone with repo (or a fork/clone) access can `git show ae5872a:parsing/.env` and obtain full write access to the yynuu Supabase project and the Firebase project. Deleting the file does nothing; the credentials are exposed for the life of the history.",
+            "recommendation": "Rotate ALL credentials in that file immediately (treat as compromised), then scrub history with git-filter-repo/BFG and force-push (coordinate with collaborators). Add `*.env` already covered by .gitignore — verify parsing/ is covered. This overlaps the security dimension but is fundamentally a repo-hygiene failure."
+          },
+          {
+            "title": "Narrow .gitignore lets 19 junk files at root sit one `git add .` from being committed",
+            "severity": "medium",
+            "evidence": "Root .gitignore has no `*.log`/`*.err`/`*.out`/`*.html`/`*.pdf`/`*.txt` patterns (only node_modules, dist, release, *.pyc, _*.json etc.). git status shows 19 untracked: backend-3002.log/.err, backend-dev.{log,err,stderr.log,stdout.log}, backend-live.{log,err}, E2E_error_log.txt, multiple *_2026-06-17.html, TallyBridge_Walkthrough.pdf, SESSION_HANDOFF_2026-06-22.md, .tmp-ztugw-companies.js, command.txt, endpoints.txt, phase*_*.txt, run7_done.txt. Already-tracked precedent exists: backend/backend-dev.stderr.log, backend/backend-dev.stdout.log, parsing/server_test.log, parsing/server_test_err.log are committed.",
+            "impact": "Process artifacts and operational logs (some may contain tokens/URLs) keep leaking into the repo; the 4 already-committed log files prove the pattern. Bloats clone size and pollutes blame/diffs.",
+            "recommendation": "Add broad ignore rules: `*.log`, `*.err`, `*.out`, `*.tmp`, `*.tmp-*`, `.tmp-*`, `*.pdf`, `*.html` (or a /docs exception), plus `phase*_*.txt`, `*_done.txt`. git rm the 4 tracked log files. Move keep-worthy handoff docs into a single docs/ tree and ignore everything else at root."
+          },
+          {
+            "title": "Four god-files concentrate the system's risk; sync_main.py carries in-flight revert markers",
+            "severity": "high",
+            "evidence": "wc -l: backend/src/routes/sync.ts=2992, src/python/sync_main.py=1905, src/python/cloud_pusher.py=933, src/python/tally_client.py=678, src/python/tally_pusher.py=531. sync.ts mixes auth, validation, ingest, push-queue, GCS proxy, dashboard reads, and an inventory-analytics engine. sync_main.py header carries explicit CHANGE 1/2/4 revert markers (per digest) — an experimental branch state, not settled design. cloud_pusher/tally_pusher import tally_client private internals (_post, _xml_escape, _fetch).",
+            "impact": "Every change to ingest, auth, or queue touches the same 3000-line file → high merge-conflict and regression surface, slow review, and the documented non-transactional ingest bugs live here. Reviewers cannot reason about a 2992-line file in front of a paying client.",
+            "recommendation": "Decompose by responsibility. Priority 1: split sync.ts into routes/sync (ingest), routes/push-queue, routes/reorder, services/ingest-tx, services/snapshot-restore, middleware reuse (collapse requireApiKey/requireClientApiKey). Priority 2: extract sync_main.py's voucher-window, parsing-ladder, and verify logic into modules and DELETE the CHANGE 1-4 reverted experimental code before ship (do not ship a half-reverted branch). Priority 3: give tally_client a public interface so cloud_pusher/tally_pusher stop importing `_`-prefixed internals."
+          },
+          {
+            "title": "Dead Guided/non-Guided duplication and orphan components/dirs",
+            "severity": "medium",
+            "evidence": "src/renderer/pages/Home.tsx and AddCompany.tsx are one-line re-exports of their *Guided siblings with the old buggy implementation left commented below (AddCompany's commented body references undefined setSelected/selected). Three CompanyCard variants exist (CompanyCard.tsx, CompanyCardGuided.tsx, CompanyCardStable.tsx) — only CompanyCardStable is active. A 30-file `frontend/` Vite app (frontend/package.json, eslint.config.js, index.html, public/) is committed but is not referenced by the Electron app's build (package.json build:renderer = `vite build` at root, files = dist/**). scanner/index.html + scanner/new/index.html are loose HTML.",
+            "impact": "New contributors cannot tell live from dead code; the commented originals contain real bugs presented as 'documentation'. The orphan frontend/ and scanner/ dirs add clone weight and confusion about which UI ships.",
+            "recommendation": "Delete the commented bodies in Home.tsx/AddCompany.tsx (git history preserves them); collapse the three CompanyCard variants to one. Determine if frontend/ and scanner/ are live products — if not, remove them from this repo or move to a clearly-labeled /experiments tree."
+          },
+          {
+            "title": "No README, CONTRIBUTING, or runbook; duplicated bootstrap logic and dual config keys",
+            "severity": "medium",
+            "evidence": "git ls-files shows no top-level README or CONTRIBUTING (frontend/ has its own README but the Electron root does not). Python command resolution is triplicated: sync-engine.ts:302/306, local-push-server.ts:114/220, push-queue-poller.ts:36/140 each rebuild the dev `py -3 -u sync_main.py` vs prod `process.resourcesPath/.../tallybridge-engine.exe` path independently. store.ts:34-37 keeps legacy backendUrl/apiKey AND controlPlaneUrl/controlPlaneApiKey, with resolve* helpers (store.ts:156) branching across both. Backend uses bespoke per-field validation with no schema validator (no zod/valibot/joi/yup in backend/package.json).",
+            "impact": "Onboarding a developer to a 4-runtime system (Electron TS + Python + Express + Flutter) with no entry doc is high-friction and error-prone. Triplicated spawn logic means a bundling/path change must be made in 3 places (easy to miss one → broken push or sync). Dual config keys double the branching surface and the chance of one path reading a stale value.",
+            "recommendation": "Add a root README (architecture + run/build/release commands — CLAUDE.md content is a good seed) and a CONTRIBUTING/runbook covering envs, secrets handling, and the release flow. Extract a shared resolvePythonCommand() helper used by all three main-process files. Pick controlPlane* as canonical, write a one-time migration, and delete the legacy keys + fallback branches. Adopt zod for /api/sync body validation."
+          }
+        ],
+        "recommendations": [
+          "IMMEDIATE (pre-ship blocker): Rotate all credentials in parsing/.env (compromised via history commits ae5872a/51895e3/434da8b), then scrub history with BFG/git-filter-repo and force-push. Verify parsing/ is covered by .gitignore.",
+          "Add automated guardrails before client ship: eslint+prettier (shared config for root/backend/frontend), ruff for Python, `npm run typecheck` (tsc --noEmit) per package, and a husky/lint-staged or pre-commit hook running them on staged files. This is the highest-leverage process fix.",
+          "Clean the repo: git rm the 22 stale compiler artifacts in backend/src and the 4 committed *.log files; broaden .gitignore to cover *.log/*.err/*.out/*.tmp/*.tmp-*/*.html/*.pdf and add a backend/.gitignore. Then commit the 19 untracked junk files away (delete or ignore).",
+          "Delete dead code now (low risk, git preserves it): the commented bodies in Home.tsx/AddCompany.tsx, the two orphan CompanyCard variants, and decide the fate of orphan frontend/ (30 files) and scanner/ dirs.",
+          "Type the IPC boundary: define one shared IpcApi interface consumed by preload.ts and the renderer (drop the hand-kept electron.d.ts), adding the 3 missing channels and replacing `any` with concrete payload types.",
+          "Decompose god-files in priority order: (1) sync.ts 2992 LOC → ingest/queue/reorder/auth modules + a real transactional ingest service; (2) sync_main.py 1905 LOC → DELETE the reverted CHANGE 1-4 experimental code and split voucher/parse/verify modules; (3) give tally_client a public API so cloud_pusher/tally_pusher stop importing `_`-prefixed internals.",
+          "Add a root README + CONTRIBUTING/runbook (seed from CLAUDE.md), extract the triplicated resolvePythonCommand() helper, consolidate the legacy backendUrl/apiKey config keys onto controlPlane* via a migration, and introduce zod for backend request validation to retire 102 `any` sites incrementally.",
+          "Replace the backend's `test: exit 1` with a minimal vitest/pytest harness (even smoke tests on /api/sync validation and the parsing rule engine) so CI has something to gate on; without this, lint+typecheck are the only mechanical checks available."
+        ],
+        "toolingChoices": [
+          "typescript-eslint (eslint v9 flat config) + Prettier — one shared config package consumed by root Electron, backend, and frontend; rationale: enforces no-explicit-any/no-unused-vars and kills style drift across the 3 TS surfaces with a single source of truth.",
+          "Ruff (lint + format, replaces black+flake8+isort in one fast tool) for src/python and parsing/, plus optional mypy in non-strict mode for new code; rationale: zero Python tooling exists today and 0/11 files use typing — Ruff is the lowest-friction way to add gradual quality without a heavy mypy migration.",
+          "Husky + lint-staged (Node side) and pre-commit framework (Python side), or a single pre-commit config covering both; rationale: mechanically blocks the exact failures already in the repo (secret commits, stale artifacts, junk files).",
+          "git-filter-repo (preferred over BFG for path-scoped scrubbing) to purge parsing/.env and committed *.log from history; rationale: deletion alone leaves secrets recoverable.",
+          "zod for backend request/payload validation; rationale: replaces 102 ad-hoc `any`/Record<string,unknown> normalizations in sync.ts with one declarative schema per endpoint and gives runtime safety the hand-rolled checks lack.",
+          "Vitest (backend/frontend) + pytest (python/parsing) to replace `test: exit 1`; rationale: gives CI an actual gate and lets the brittle parsing rule engine and non-transactional ingest get regression coverage where it matters most.",
+          "gitleaks or trufflehog as a CI/pre-commit secret scanner; rationale: the repo has already leaked a service_role + Firebase key — a scanner prevents recurrence after history scrub."
+        ],
+        "effort": "Repo hygiene cleanup (gitignore + rm stale artifacts/logs + delete dead Guided code + secret rotation/history scrub): S-M, ~1-2 days, do FIRST. Tooling setup (eslint/prettier/ruff + pre-commit + typecheck scripts + secret scanner): M, ~2-3 days, parallelizable. IPC typing + dual-config consolidation + shared python-cmd helper: M, ~2-3 days. README/CONTRIBUTING/runbook: S, ~1 day. God-file decomposition is the long tail: sync.ts split=L (~1-2 weeks), sync_main.py de-revert+split=L (~1-2 weeks, must remove experimental CHANGE 1-4 before ship), cloud_pusher/tally_client public-API=M. Test harness bootstrap=M ongoing. Total to a defensible pre-ship hygiene baseline (everything except full god-file decomposition): roughly 1.5-2 weeks; full decomposition adds 3-4 weeks."
+      }
+    ]
+  },
+  "workflowProgress": [
+    {
+      "type": "workflow_phase",
+      "index": 1,
+      "title": "Architecture"
+    },
+    {
+      "type": "workflow_phase",
+      "index": 2,
+      "title": "Production-Readiness"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 1,
+      "label": "arch:electron-main",
+      "phaseIndex": 1,
+      "phaseTitle": "Architecture",
+      "agentId": "a1c5fa5d53b8b1822",
+      "model": "claude-opus-4-8",
+      "state": "done",
+      "startedAt": 1782389670202,
+      "lastProgressAt": 1782389670202,
+      "cached": true,
+      "resultPreview": "{\"component\":\"Electron Main Process (src/main/)\",\"purpose\":\"The Electron main process is the orchestration core of TallyBridge: it boots the app, applies one-time config migrations, spawns the bundled Python sync engine as short-lived subprocesses, runs a loopback HTTP server on port 3002 for cloud-initiated voucher pushes, polls the cloud control plane for queued pushes, and bridges a curated IPC…",
+      "promptPreview": "You are mapping the architecture of the ELECTRON MAIN PROCESS of TallyBridge, a Windows desktop app that syncs TallyPrime accounting software to Supabase cloud.\nRead these files fully under D:/Desktop/TallyBridge/src/main/ : index.ts, sync-engine.ts, local-push-server.ts, push-queue-poller.ts, ipc-handlers.ts, store.ts, updater.ts, remote-log.ts, tray.ts, logger.ts, preload.ts.\nFocus on: process o…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 2,
+      "label": "arch:renderer",
+      "phaseIndex": 1,
+      "phaseTitle": "Architecture",
+      "agentId": "a5adc777e83485f8e",
+      "model": "claude-opus-4-8",
+      "state": "done",
+      "startedAt": 1782389670203,
+      "lastProgressAt": 1782389670203,
+      "cached": true,
+      "resultPreview": "{\"component\":\"React Renderer (Electron renderer process UI)\",\"purpose\":\"The TallyBridge desktop UI: a Vite + React 19 SPA that runs in the Electron renderer process and is the control surface for the sync connector. It lets users add/remove TallyPrime companies, edit sync/connection/ingest settings, watch a live sync log, and manage in-app auto-updates. All real work (Tally reads, sync, config per…",
+      "promptPreview": "You are mapping the architecture of the REACT RENDERER (Vite+React19+Tailwind) of TallyBridge desktop app.\nRead these under D:/Desktop/TallyBridge/src/renderer/ : App.tsx, main.tsx, electron.d.ts, pages/*.tsx (Home, HomeGuided, Settings, AddCompany, AddCompanyGuided, SyncLog, About), components/*.tsx (Sidebar, StatusBar, CompanyCard*, UpdateBanner).\nFocus on: routing, how the UI talks to main via …"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 3,
+      "label": "arch:python-engine",
+      "phaseIndex": 1,
+      "phaseTitle": "Architecture",
+      "agentId": "a52f279fe93a24d95",
+      "model": "claude-opus-4-8",
+      "state": "done",
+      "startedAt": 1782389670203,
+      "lastProgressAt": 1782389670203,
+      "cached": true,
+      "resultPreview": "{\"component\":\"Python Sync Engine (src/python/)\",\"purpose\":\"The Python sync engine is a single-shot subprocess spawned by the Electron main process (sync-engine.ts) that bridges a local TallyPrime/Tally.ERP 9 instance with the cloud. It reads masters/vouchers/reports from Tally's XML-RPC server on port 9000 (with an optional Tally ODBC fast-path), batches and uploads them to the cloud either via th…",
+      "promptPreview": "You are mapping the PYTHON SYNC ENGINE of TallyBridge (spawned as subprocess by Electron).\nRead fully under D:/Desktop/TallyBridge/src/python/ : sync_main.py (1905 loc), tally_client.py, cloud_pusher.py (933 loc), tally_pusher.py, odbc_bridge.py, xml_parser.py, definition_extractor.py, proxy.py, diagnose.py.\nFocus on: entry/decision logic in sync_main (read modes auto/xml-only/hybrid/shadow, inges…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 4,
+      "label": "arch:backend-express",
+      "phaseIndex": 1,
+      "phaseTitle": "Architecture",
+      "agentId": "a9f0408811e239cde",
+      "model": "claude-opus-4-8",
+      "state": "done",
+      "startedAt": 1782389670203,
+      "lastProgressAt": 1782389670203,
+      "cached": true,
+      "resultPreview": "{\"component\":\"Express Cloud Backend (TallyBridge API, port 3001, GCP Cloud Run)\",\"purpose\":\"A thin, stateless Express 5 (ESM/TypeScript) cloud API that ingests TallyPrime/ERP data from the desktop connector and serves it to the Flutter app and web dashboard, backed by Supabase (Postgres) and GCS. It is the central node of the multi-tenant model (one Supabase project per client), authenticating cal…",
+      "promptPreview": "You are mapping the EXPRESS CLOUD BACKEND of TallyBridge (port 3001, deployed on GCP Cloud Run).\nRead fully under D:/Desktop/TallyBridge/backend/src/ : index.ts, middleware/auth.ts, routes/sync.ts (2992 loc — read it carefully in chunks), routes/push-voucher.ts, routes/push-invoice.ts, db/supabase.ts, db/firebase.ts, db/gcs.ts. Also skim the SQL files at D:/Desktop/TallyBridge/backend/*.sql and D:…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 5,
+      "label": "arch:parsing-ocr",
+      "phaseIndex": 1,
+      "phaseTitle": "Architecture",
+      "agentId": "ac9408ec6ea8a79b7",
+      "model": "claude-opus-4-8",
+      "state": "done",
+      "startedAt": 1782389670203,
+      "lastProgressAt": 1782389670203,
+      "cached": true,
+      "resultPreview": "{\"component\":\"Parsing / OCR Backend (Flask-style HTTP server on GCP Cloud Run + RunPod serverless GPU workers)\",\"purpose\":\"Turns scanned/PDF invoices into draft Tally vouchers. A phone/web scan POSTs a PDF to this stateless HTTP service (Cloud Run); it rasterizes the PDF, OCRs it on a RunPod serverless GPU (Nanonets-OCR2-3B for purchase, MiniCPM-V-4.5 for sale), runs a per-vendor regex rule engine…",
+      "promptPreview": "You are mapping the PARSING / OCR BACKEND of TallyBridge (Flask, deployed on GCP Cloud Run + RunPod serverless GPU workers) that turns scanned/PDF invoices into Tally vouchers.\nRead under D:/Desktop/TallyBridge/parsing/ : the Flask servers (nanonets_invoice_server.py, paddleocr_vl_server.py, docstrange_invoice_server.py, n8n_minicpm_server.py), the pipelines (purchase_paddle_runner.py, purchase_im…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 6,
+      "label": "arch:aiaccountant-flutter",
+      "phaseIndex": 1,
+      "phaseTitle": "Architecture",
+      "agentId": "ada3f8ea5c3ca8a19",
+      "model": "claude-opus-4-8",
+      "state": "done",
+      "startedAt": 1782389670221,
+      "queuedAt": 1782389670203,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "aiaccountant Flutter frontend (mobile/web client for TallyB…",
+      "promptPreview": "You are mapping the AIACCOUNTANT FLUTTER FRONTEND (mobile/web client) at D:/Desktop/Ai_Accountant/aiaccountant.\nRead pubspec.yaml, lib/main.dart, lib/firebase_options.dart, and explore lib/core, lib/data, lib/services, lib/shared, and each feature under lib/features/ (auth, camera, history, profile, queue, report, shell). Read the most important file in each feature dir. Also read README.md, .fire…",
+      "lastProgressAt": 1782389815942,
+      "tokens": 110753,
+      "toolCalls": 30,
+      "durationMs": 145721,
+      "resultPreview": "{\"component\":\"aiaccountant Flutter frontend (mobile/web client for TallyBridge)\",\"purpose\":\"A Flutter mobile (Android) + web client that lets users photograph/scan sale and purchase invoices, sends them to a Cloud Run parsing service, then reviews/edits the parsed voucher in a live queue and one-tap \\\"pushes\\\" it into TallyPrime via the desktop TallyBridge app. It authenticates users with Firebase…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 7,
+      "label": "prod:testing",
+      "phaseIndex": 2,
+      "phaseTitle": "Production-Readiness",
+      "agentId": "ad3ce1820331997b9",
+      "model": "claude-opus-4-8",
+      "state": "done",
+      "startedAt": 1782389815965,
+      "queuedAt": 1782389815950,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "Automated Testing Strategy",
+      "promptPreview": "You are assessing the TallyBridge system for PRODUCTION readiness (it will be shipped to a paying client). Here is the architecture digest from the mapping phase:\n\n### Electron Main Process (src/main/)\nPurpose: The Electron main process is the orchestration core of TallyBridge: it boots the app, applies one-time config migrations, spawns the bundled Python sync engine as short-lived subprocesses, …",
+      "lastProgressAt": 1782389984718,
+      "tokens": 47803,
+      "toolCalls": 21,
+      "durationMs": 168753,
+      "resultPreview": "{\"dimension\":\"Automated Testing Strategy\",\"currentState\":\"Effectively zero automated test coverage across all three repos, and no test runner or CI wired anywhere. Concrete evidence: (1) backend/package.json:7 test script is literally `echo \\\"Error: no test specified\\\" && exit 1` — there is no vitest/jest dependency in backend devDependencies (only nodemon/ts-node/tsx/typescript). (2) Root D:/Desk…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 8,
+      "label": "prod:security",
+      "phaseIndex": 2,
+      "phaseTitle": "Production-Readiness",
+      "agentId": "ad2c55c23e5a9c33f",
+      "model": "claude-opus-4-8",
+      "state": "done",
+      "startedAt": 1782389815966,
+      "queuedAt": 1782389815950,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "Security & Secrets Management",
+      "promptPreview": "You are assessing the TallyBridge system for PRODUCTION readiness (it will be shipped to a paying client). Here is the architecture digest from the mapping phase:\n\n### Electron Main Process (src/main/)\nPurpose: The Electron main process is the orchestration core of TallyBridge: it boots the app, applies one-time config migrations, spawns the bundled Python sync engine as short-lived subprocesses, …",
+      "lastProgressAt": 1782390164554,
+      "tokens": 61350,
+      "toolCalls": 31,
+      "durationMs": 348588,
+      "resultPreview": "{\"dimension\":\"Security & Secrets Management\",\"currentState\":\"The system is NOT production-ready from a security standpoint and currently carries at least one critical, internet-exposed secret leak. Auth on the Express backend is structurally sound at the transport level (constant-time API-key compare via timingSafeEqual + length guard, Firebase JWT verification, every route mounts requireApiKey/re…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 9,
+      "label": "prod:cicd-release",
+      "phaseIndex": 2,
+      "phaseTitle": "Production-Readiness",
+      "agentId": "a3119f6e9b8c172bf",
+      "model": "claude-opus-4-8",
+      "state": "done",
+      "startedAt": 1782389815967,
+      "queuedAt": 1782389815950,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "CI/CD, Build, Release & Packaging",
+      "promptPreview": "You are assessing the TallyBridge system for PRODUCTION readiness (it will be shipped to a paying client). Here is the architecture digest from the mapping phase:\n\n### Electron Main Process (src/main/)\nPurpose: The Electron main process is the orchestration core of TallyBridge: it boots the app, applies one-time config migrations, spawns the bundled Python sync engine as short-lived subprocesses, …",
+      "lastProgressAt": 1782390160276,
+      "tokens": 73291,
+      "toolCalls": 41,
+      "durationMs": 344309,
+      "resultPreview": "{\"dimension\":\"CI/CD, Build, Release & Packaging\",\"currentState\":\"There is zero CI/CD. No .github/workflows exists in either repo; the backend test script is literally `echo \\\"Error: no test specified\\\" && exit 1`. Every build, sign, release, and deploy across all five components is a manual, copy-pasted shell sequence captured only in untracked scratch files (TallyBridge/command.txt, aiaccountant/…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 10,
+      "label": "prod:observability",
+      "phaseIndex": 2,
+      "phaseTitle": "Production-Readiness",
+      "agentId": "a1cf9e94ebf1bd29c",
+      "model": "claude-opus-4-8",
+      "state": "done",
+      "startedAt": 1782389815967,
+      "queuedAt": 1782389815950,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "Observability, Error Handling & Resilience",
+      "promptPreview": "You are assessing the TallyBridge system for PRODUCTION readiness (it will be shipped to a paying client). Here is the architecture digest from the mapping phase:\n\n### Electron Main Process (src/main/)\nPurpose: The Electron main process is the orchestration core of TallyBridge: it boots the app, applies one-time config migrations, spawns the bundled Python sync engine as short-lived subprocesses, …",
+      "lastProgressAt": 1782389968796,
+      "tokens": 62052,
+      "toolCalls": 18,
+      "durationMs": 152829,
+      "resultPreview": "{\"dimension\":\"Observability, Error Handling & Resilience\",\"currentState\":\"The system has thin, ad-hoc observability and is NOT production-ready on this dimension for a paying client. There is NO crash reporting (zero Sentry/crashReporter across Electron, backend, parsing, or Flutter), NO alerting, and NO automated detection of failures. Logging is unstructured/string-based in most places: the Elec…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 11,
+      "label": "prod:data-tenancy",
+      "phaseIndex": 2,
+      "phaseTitle": "Production-Readiness",
+      "agentId": "adeda09ad69b02f69",
+      "model": "claude-opus-4-8",
+      "state": "error",
+      "startedAt": 1782389815968,
+      "queuedAt": 1782389815950,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "Data Integrity Schema and Multi-Tenancy",
+      "promptPreview": "You are assessing the TallyBridge system for PRODUCTION readiness (it will be shipped to a paying client). Here is the architecture digest from the mapping phase:\n\n### Electron Main Process (src/main/)\nPurpose: The Electron main process is the orchestration core of TallyBridge: it boots the app, applies one-time config migrations, spawns the bundled Python sync engine as short-lived subprocesses, …",
+      "lastProgressAt": 1782390258292,
+      "error": "agent({schema}): StructuredOutput retry cap (5) exceeded — 5 failed calls with no valid output",
+      "tokens": 120051,
+      "toolCalls": 37,
+      "durationMs": 442324
+    },
+    {
+      "type": "workflow_agent",
+      "index": 12,
+      "label": "prod:code-quality",
+      "phaseIndex": 2,
+      "phaseTitle": "Production-Readiness",
+      "agentId": "ae52dea75faf8e427",
+      "model": "claude-opus-4-8",
+      "state": "done",
+      "startedAt": 1782389815968,
+      "queuedAt": 1782389815951,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "Code Quality, Maintainability & Repo Hygiene",
+      "promptPreview": "You are assessing the TallyBridge system for PRODUCTION readiness (it will be shipped to a paying client). Here is the architecture digest from the mapping phase:\n\n### Electron Main Process (src/main/)\nPurpose: The Electron main process is the orchestration core of TallyBridge: it boots the app, applies one-time config migrations, spawns the bundled Python sync engine as short-lived subprocesses, …",
+      "lastProgressAt": 1782390045769,
+      "tokens": 43873,
+      "toolCalls": 18,
+      "durationMs": 229801,
+      "resultPreview": "{\"dimension\":\"Code Quality, Maintainability & Repo Hygiene\",\"currentState\":\"The codebase ships working features but is in a pre-production hygiene state with no automated guardrails. There is ZERO lint/format/typecheck tooling across all four subsystems: no eslint/prettier config (none of .eslintrc*, eslint.config.*, .prettierrc* exist at root or in backend/), no Python ruff/black/mypy/flake8/pypr…"
+    }
+  ],
+  "totalTokens": 519173,
+  "totalToolCalls": 196
+}
