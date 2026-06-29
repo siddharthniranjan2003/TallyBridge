@@ -247,8 +247,36 @@ async function probeOdbcCapabilities(tallyUrl: string, odbcDsnOverride = "") {
       ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", helperPath],
       {
         stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
       },
     );
+
+    // Settle once, and ALWAYS bound the probe: a wedged ODBC handshake never
+    // emits 'close', so without this the renderer await hangs forever and the
+    // powershell child leaks holding a Tally ODBC connection. Kill the tree and
+    // resolve with an error if it overruns.
+    let settled = false;
+    const done = (result: Record<string, unknown>) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      resolve(result);
+    };
+    const watchdog = setTimeout(() => {
+      if (proc.pid) {
+        try {
+          spawn("taskkill", ["/pid", String(proc.pid), "/f", "/t"], { windowsHide: true });
+        } catch {
+          try { proc.kill(); } catch { /* best effort */ }
+        }
+      }
+      done({
+        state: "error",
+        dsn: null,
+        supported_sections: [],
+        message: "ODBC probe timed out — TallyPrime may be busy or locked.",
+      });
+    }, 15000);
 
     let stdout = "";
     let stderr = "";
@@ -259,7 +287,7 @@ async function probeOdbcCapabilities(tallyUrl: string, odbcDsnOverride = "") {
       stderr += chunk.toString("utf8");
     });
     proc.on("error", (error) => {
-      resolve({
+      done({
         state: "error",
         dsn: null,
         supported_sections: [],
@@ -272,7 +300,7 @@ async function probeOdbcCapabilities(tallyUrl: string, odbcDsnOverride = "") {
         .map((value) => value.trim())
         .find(Boolean);
       if (!line) {
-        resolve({
+        done({
           state: "error",
           dsn: null,
           supported_sections: [],
@@ -282,9 +310,9 @@ async function probeOdbcCapabilities(tallyUrl: string, odbcDsnOverride = "") {
       }
 
       try {
-        resolve(JSON.parse(line));
+        done(JSON.parse(line));
       } catch {
-        resolve({
+        done({
           state: "error",
           dsn: null,
           supported_sections: [],
@@ -293,6 +321,8 @@ async function probeOdbcCapabilities(tallyUrl: string, odbcDsnOverride = "") {
       }
     });
 
+    // Guard EPIPE if the child died before stdin is fully written.
+    proc.stdin.on("error", () => {});
     proc.stdin.write(`${JSON.stringify({
       cmd: "probe",
       dsn_override: odbcDsnOverride,
@@ -667,6 +697,21 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
     const tallyUrl = store.get("tallyUrl");
     const readMode = store.get("readMode", "auto");
     const odbcDsnOverride = store.get("odbcDsnOverride", "");
+
+    // Don't open a competing XML + ODBC connection to single-threaded Tally while
+    // a sync or push worker owns it — that's the concurrent-access condition that
+    // crashes TallyPrime (c0000005). Report busy and let the user retry.
+    if (tallyGate.isBusy()) {
+      return {
+        xml: { connected: false, error: "TallyBridge is busy with Tally — try again in a moment." },
+        odbc: { state: "busy", dsn: null, supported_sections: [], message: "Tally is busy; capability check deferred." },
+        readMode,
+        transportPlan: {
+          groups: "xml", ledgers: "xml", stock_items: "xml", vouchers: "xml",
+          outstanding: "xml", profit_loss: "xml", balance_sheet: "xml", trial_balance: "xml",
+        },
+      };
+    }
 
     let xmlConnected = false;
     let xmlError: string | null = null;
