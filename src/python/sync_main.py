@@ -384,6 +384,7 @@ def build_full_sync_plan(reason: str, fy_from: str, fy_to: str) -> dict:
         "voucher_from_date": fy_from,
         "voucher_to_date": fy_to,
         "voucher_sync_mode": "full",
+        "voucher_min_alter_id": 0,
         "reason": reason,
     }
 
@@ -422,14 +423,30 @@ def build_sync_plan(current_ids: dict, fy_from: str, fy_to: str, force_full_sync
 
     voucher_from_date = fy_from
     voucher_sync_mode = "none"
+    voucher_min_alter_id = 0
 
     if voucher_changed:
         voucher_sync_mode = "full"
         fy_from_date = parse_tally_compact_date(fy_from)
         cached_last = parse_iso_date(cached_ids.get("last_voucher_date"))
         current_last = parse_iso_date(current_ids.get("last_voucher_date"))
+        try:
+            cached_vch_alter = int(str(cached_ids.get("alt_vch_id", "0")).strip() or "0")
+        except (TypeError, ValueError):
+            cached_vch_alter = 0
 
-        if (
+        if ENABLE_INCREMENTAL_VOUCHER_SYNC and cached_vch_alter > 0:
+            # AlterID-driven incremental: fetch only vouchers altered since the
+            # last successful sync ($AlterID > cached ALTVCHID), regardless of
+            # their date. This is what stops a back-dated / edited / same-day
+            # voucher from triggering a full financial-year re-scan (the repeated
+            # voucher-window TallyPrime UI freezes). The date-window full sync
+            # remains the fallback for first sync, master changes, cache misses,
+            # or a missing/zero cached AlterID.
+            voucher_from_date = fy_from
+            voucher_sync_mode = "incremental"
+            voucher_min_alter_id = cached_vch_alter
+        elif (
             ENABLE_INCREMENTAL_VOUCHER_SYNC
             and fy_from_date
             and cached_last
@@ -453,6 +470,7 @@ def build_sync_plan(current_ids: dict, fy_from: str, fy_to: str, force_full_sync
         "voucher_from_date": voucher_from_date,
         "voucher_to_date": fy_to,
         "voucher_sync_mode": voucher_sync_mode,
+        "voucher_min_alter_id": voucher_min_alter_id,
         "reason": "changes_detected",
     }
 
@@ -530,6 +548,7 @@ def validate_voucher_batch(
     from_date: str,
     to_date: str,
     voucher_source: str = "xml_collection",
+    allow_wide_span: bool = False,
 ) -> None:
     if not vouchers:
         print("[Tally] Voucher batch returned no rows")
@@ -599,7 +618,8 @@ def validate_voucher_batch(
     )
 
     if (
-        requested_span_days >= 30
+        not allow_wide_span
+        and requested_span_days >= 30
         and total >= 25
         and unique_date_count == 1
     ):
@@ -804,6 +824,7 @@ def fetch_voucher_window(
     prefer_day_book: bool = False,
     allow_day_book_fallback: bool = False,
     is_tallyprime: bool = False,  # CHANGE 2 — new param
+    min_alter_id: int = 0,
 ) -> tuple[list[dict], str]:
     if is_tallyprime:
         print(
@@ -814,7 +835,7 @@ def fetch_voucher_window(
     try:
         vouchers = fetch_structured_section(
             "vouchers",
-            {"from_date": from_date, "to_date": to_date},
+            {"from_date": from_date, "to_date": to_date, "min_alter_id": str(min_alter_id or 0)},
         )
         print("[Tally] Vouchers loaded via definition-driven collection")
         return vouchers, "xml_collection"
@@ -848,8 +869,17 @@ def fetch_vouchers_with_batches(
     prefer_day_book: bool = False,
     allow_day_book_fallback: bool = False,
     is_tallyprime: bool = False,  # CHANGE 3 — new param, passed through to fetch_voucher_window
+    min_alter_id: int = 0,
 ) -> tuple[list[dict], str]:
-    initial_windows = build_month_windows(from_date, to_date)
+    # AlterID-incremental runs make a single pass over the whole range (the
+    # $AlterID > N filter already trims it to the few changed rows), instead of
+    # ~50 calendar windows that each re-walk Tally and freeze its UI. ERP 9's
+    # two-pass header path can't filter by AlterID, so it keeps month-windowing.
+    incremental_alter_id = min_alter_id if (min_alter_id > 0 and not prefer_day_book) else 0
+    if incremental_alter_id > 0:
+        initial_windows = [(from_date, to_date)]
+    else:
+        initial_windows = build_month_windows(from_date, to_date)
     all_vouchers: list[dict] = []
     transport_sources: set[str] = set()
 
@@ -868,6 +898,7 @@ def fetch_vouchers_with_batches(
                     prefer_day_book=prefer_day_book,
                     allow_day_book_fallback=allow_day_book_fallback,
                     is_tallyprime=is_tallyprime,  # CHANGE 3 — pass through
+                    min_alter_id=incremental_alter_id,
                 )
             transport_sources.add(source)
             print(f"{indent}[Tally] Voucher window succeeded with {len(rows)} rows")
@@ -905,6 +936,11 @@ def fetch_vouchers_with_batches(
             "[Tally] Month-window batching is enabled on ERP 9 so header fetches stay light "
             "while detail rows are loaded by voucher master id."
         )
+    if incremental_alter_id > 0:
+        print(
+            f"[Tally] AlterID-incremental voucher fetch: single pass for $AlterID > "
+            f"{incremental_alter_id} (skipping the full-year window scan)"
+        )
     for window_from, window_to in initial_windows:
         all_vouchers.extend(fetch_recursive(window_from, window_to))
 
@@ -920,7 +956,13 @@ def fetch_vouchers_with_batches(
         voucher_source = "xml_mixed"
     else:
         voucher_source = "xml_collection"
-    validate_voucher_batch(all_vouchers, from_date, to_date, voucher_source=voucher_source)
+    validate_voucher_batch(
+        all_vouchers,
+        from_date,
+        to_date,
+        voucher_source=voucher_source,
+        allow_wide_span=incremental_alter_id > 0,
+    )
     deduped = dedupe_vouchers(all_vouchers)
     duplicates_removed = len(all_vouchers) - len(deduped)
     if duplicates_removed > 0:
@@ -1624,6 +1666,7 @@ def main() -> int:
                     prefer_day_book=prefer_day_book,
                     allow_day_book_fallback=allow_day_book_fallback,
                     is_tallyprime=is_tallyprime,  # CHANGE 4
+                    min_alter_id=sync_plan.get("voucher_min_alter_id", 0),
                 )
                 section_sources["vouchers"] = voucher_source
                 record_updates["vouchers"] = len(vouchers)

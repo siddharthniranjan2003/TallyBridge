@@ -9,6 +9,7 @@ import { PushQueuePoller } from "./push-queue-poller";
 import { SyncEngine } from "./sync-engine";
 import { setupAutoUpdater } from "./updater";
 import { store } from "./store";
+import { tallyGate } from "./tally-gate";
 
 if (!isDev) {
   initLogger();
@@ -111,7 +112,10 @@ app.whenReady().then(() => {
   createWindow();
 
   const syncEngine = new SyncEngine(mainWindow!);
-  localPushServer = new LocalPushServer(mainWindow!);
+  // Let the shared Tally gate see when a sync child currently owns port 9000 so
+  // no other caller fires a competing request at the single-threaded gateway.
+  tallyGate.setBusyProbe(() => syncEngine.isSyncInProgress());
+  localPushServer = new LocalPushServer(mainWindow!, syncEngine);
   pushQueuePoller = new PushQueuePoller(mainWindow!, syncEngine);
   localPushServer.start();
   const trayController = setupTray(mainWindow!, () => {

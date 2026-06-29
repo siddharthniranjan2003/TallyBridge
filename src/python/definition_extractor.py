@@ -83,8 +83,26 @@ def build_collection_request(request_def: dict, request_context: dict | None = N
       </BODY>
     </ENVELOPE>"""
 
+    # Incremental voucher sync: when a minimum AlterID is supplied, restrict the
+    # voucher collection to rows altered since the last successful sync
+    # ($AlterID > N). This keeps a back-dated / edited / same-day voucher from
+    # forcing a full financial-year re-scan (the repeated voucher-window passes
+    # that freeze TallyPrime's single-threaded UI). Omitted / 0 for full syncs, so
+    # the request stays byte-identical to before when no threshold is passed.
+    extra_filters: list[dict] = []
+    try:
+        min_alter_id = int(str((request_context or {}).get("min_alter_id", "0")).strip() or "0")
+    except (TypeError, ValueError):
+        min_alter_id = 0
+    if request_def.get("object_type") == "Voucher" and min_alter_id > 0:
+        static_vars.append({"name": "SVMINALTERID", "type": "Number", "value": str(min_alter_id)})
+        extra_filters.append({
+            "name": "IncrementalAlterIdFilter",
+            "expression": "$AlterID > ##SVMINALTERID",
+        })
+
     fetch_xml = ", ".join(request_def.get("fetch", []))
-    filters = request_def.get("filters", [])
+    filters = list(request_def.get("filters", [])) + [f["name"] for f in extra_filters]
     filters_xml = f"<FILTERS>{', '.join(filters)}</FILTERS>" if filters else ""
     formulas_xml = "".join(
         (
@@ -92,7 +110,7 @@ def build_collection_request(request_def: dict, request_context: dict | None = N
             f'{_xml_escape(formula["expression"])}'
             "</SYSTEM>"
         )
-        for formula in request_def.get("system_formulae", [])
+        for formula in list(request_def.get("system_formulae", [])) + extra_filters
     )
 
     return f"""

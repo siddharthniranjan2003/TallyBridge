@@ -1,3 +1,4 @@
+import html
 import os
 import re
 from datetime import datetime
@@ -119,6 +120,32 @@ def _post(
         raise TallyError(f"Tally request failed: {exc}") from exc
 
 
+def _clean_tally_error(raw: str) -> str:
+    """Turn Tally's raw XML error text into a clean, actionable message.
+
+    Strips embedded tags and decodes XML entities (so `&apos;` shows as `'`
+    instead of leaking through to the UI). Also rewrites TallyPrime's confusing
+    "Could not find Company '<name>'!" error — when no company is loaded Tally
+    echoes an empty name (`''`), which tells the user nothing — into guidance
+    that names the configured company and what to do about it.
+    """
+    text = re.sub(r'<[^>]+>', ' ', raw or '')
+    text = html.unescape(text).strip()
+    text = re.sub(r'\s+', ' ', text)
+
+    if re.match(r"could not find company", text, re.IGNORECASE):
+        echoed = re.search(r"company\s+'([^']*)'", text, re.IGNORECASE)
+        echoed_name = echoed.group(1).strip() if echoed else ""
+        company = echoed_name or (TALLY_COMPANY or "").strip()
+        target = f'"{company}"' if company else "the configured company"
+        return (
+            f"Could not find {target} in TallyPrime. "
+            "Open that company in TallyPrime (Gateway of Tally) and keep it loaded, then retry the sync."
+        )
+
+    return text or "Unknown error"
+
+
 def _check_response(xml_text: str) -> str:
     """Check Tally response STATUS tag. Raises on failure (STATUS=0)."""
     # Look for <STATUS>0</STATUS> indicating failure
@@ -127,14 +154,11 @@ def _check_response(xml_text: str) -> str:
         # Try to extract error description
         err_match = re.search(r'<DATA>\s*(.*?)\s*</DATA>', xml_text, re.IGNORECASE | re.DOTALL)
         err_desc = err_match.group(1).strip() if err_match else "Unknown error"
-        # Clean HTML/XML from error
-        err_desc = re.sub(r'<[^>]+>', ' ', err_desc).strip()
-        raise RuntimeError(f"Tally returned error: {err_desc}")
+        raise RuntimeError(f"Tally returned error: {_clean_tally_error(err_desc)}")
 
     line_error = re.search(r'<LINEERROR>\s*(.*?)\s*</LINEERROR>', xml_text, re.IGNORECASE | re.DOTALL)
     if line_error:
-        err_desc = re.sub(r'<[^>]+>', ' ', line_error.group(1)).strip()
-        raise RuntimeError(f"Tally returned error: {err_desc}")
+        raise RuntimeError(f"Tally returned error: {_clean_tally_error(line_error.group(1))}")
 
     return xml_text
 

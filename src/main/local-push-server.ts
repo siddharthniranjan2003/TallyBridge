@@ -6,6 +6,8 @@ import isDev from "electron-is-dev";
 
 import { store } from "./store";
 import { shipSyncLog } from "./remote-log";
+import { SyncEngine } from "./sync-engine";
+import { tallyGate } from "./tally-gate";
 
 const DEFAULT_LOCAL_PUSH_HOST = "127.0.0.1";
 const DEFAULT_LOCAL_PUSH_PORT = 3002;
@@ -135,7 +137,10 @@ export class LocalPushServer {
   private server: Server | null = null;
   private readonly port = resolveLocalPushPort();
 
-  constructor(private readonly mainWindow: BrowserWindow) {}
+  constructor(
+    private readonly mainWindow: BrowserWindow,
+    private readonly syncEngine?: SyncEngine,
+  ) {}
 
   start() {
     if (this.server) {
@@ -195,6 +200,21 @@ export class LocalPushServer {
       return;
     }
 
+    // A push writes vouchers into Tally. If a sync is already reading from the
+    // single-threaded gateway, stacking a write on top of it can crash
+    // TallyPrime (c0000005). Defer with a retriable status — the voucher stays
+    // in the backend queue and the push-queue poller will deliver it once the
+    // sync finishes.
+    if (this.syncEngine?.isSyncInProgress()) {
+      this.log("[Push API] Sync in progress — deferring push; it will be retried from the queue.");
+      sendJson(res, 503, {
+        ok: false,
+        deferred: true,
+        error: "TallyBridge is syncing; push deferred and will be retried.",
+      });
+      return;
+    }
+
     try {
       const payload = await readJsonBody(req);
       const companyName = pickCompanyName(payload);
@@ -228,6 +248,17 @@ export class LocalPushServer {
         TB_USER_DATA_DIR: app.getPath("userData"),
       };
 
+      // Mark the gateway busy for the worker's lifetime so the status-bar probe
+      // (and any other main-process Tally request) stays out of its way.
+      tallyGate.beginPythonWork();
+      let pythonWorkEnded = false;
+      const endPythonWork = () => {
+        if (!pythonWorkEnded) {
+          pythonWorkEnded = true;
+          tallyGate.endPythonWork();
+        }
+      };
+
       const proc = spawn(pythonCommand.command, pythonCommand.args, { env });
       let stdout = "";
       let stderr = "";
@@ -241,10 +272,12 @@ export class LocalPushServer {
       });
 
       proc.on("error", (error) => {
+        endPythonWork();
         reject(error);
       });
 
       proc.on("close", () => {
+        endPythonWork();
         try {
           const parsed = parseLastJsonObject(stdout);
           if (stderr.trim()) {

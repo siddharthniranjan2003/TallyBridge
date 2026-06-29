@@ -6,6 +6,7 @@ import path from "path";
 import { Company, resolveControlPlaneApiKey, resolveControlPlaneUrl, store } from "./store";
 import { SyncEngine } from "./sync-engine";
 import { shipSyncLog } from "./remote-log";
+import { tallyGate } from "./tally-gate";
 
 const DEFAULT_PUSH_QUEUE_POLL_INTERVAL_MS = 5000;
 const INITIAL_PUSH_QUEUE_POLL_DELAY_MS = 5000;
@@ -153,6 +154,17 @@ export class PushQueuePoller {
         TB_USER_DATA_DIR: app.getPath("userData"),
       };
 
+      // A push worker writes vouchers into Tally — mark the gateway busy so the
+      // status-bar connectivity probe won't fire a competing request meanwhile.
+      tallyGate.beginPythonWork();
+      let pythonWorkEnded = false;
+      const endPythonWork = () => {
+        if (!pythonWorkEnded) {
+          pythonWorkEnded = true;
+          tallyGate.endPythonWork();
+        }
+      };
+
       const proc = spawn(pythonCommand.command, pythonCommand.args, { env });
       let stdout = "";
       let stderr = "";
@@ -166,11 +178,13 @@ export class PushQueuePoller {
       });
 
       proc.on("error", (error) => {
+        endPythonWork();
         this.log(company.name, `[Push] Queue poll failed to start: ${error.message}`);
         resolve();
       });
 
       proc.on("close", (code) => {
+        endPythonWork();
         const lines = stdout
           .split(/\r?\n/)
           .map((line) => line.trim())

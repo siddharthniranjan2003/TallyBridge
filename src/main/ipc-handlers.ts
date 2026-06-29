@@ -18,8 +18,13 @@ import {
   TallyCompanySelection,
 } from "./store";
 import { SyncEngine } from "./sync-engine";
+import { tallyGate } from "./tally-gate";
 
 const TALLY_REQUEST_TIMEOUT_MS = 5000;
+
+// Last successful connectivity result, served to the status-bar poll while Tally
+// is busy so we don't fire a competing probe at the single-threaded gateway.
+let lastTallyConnected = true;
 
 type TallyCompanyOption = {
   name: string;
@@ -457,15 +462,19 @@ function buildTallyCompanyCollectionXml(id: string, fetchFields: string) {
 
 async function postTallyXml(tallyUrl: string, xml: string, responseType: "text" | "arraybuffer" = "text") {
   const xmlBuf = Buffer.from(xml, "utf8");
-  return axios.post(tallyUrl, xmlBuf, {
-    headers: {
-      "Content-Type": "text/xml;charset=utf-8",
-      "Content-Length": xmlBuf.length.toString(),
-    },
-    timeout: TALLY_REQUEST_TIMEOUT_MS,
-    responseType,
-    transformResponse: response => response,
-  });
+  // Route every main-process Tally request through the shared gate so two
+  // requests can never overlap on TallyPrime's single-threaded gateway.
+  return tallyGate.runExclusive(() =>
+    axios.post(tallyUrl, xmlBuf, {
+      headers: {
+        "Content-Type": "text/xml;charset=utf-8",
+        "Content-Length": xmlBuf.length.toString(),
+      },
+      timeout: TALLY_REQUEST_TIMEOUT_MS,
+      responseType,
+      transformResponse: response => response,
+    }),
+  );
 }
 
 async function postAndDecodeTallyXml(tallyUrl: string, xml: string) {
@@ -635,11 +644,20 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
   });
 
   ipcMain.handle("check-tally", async () => {
+    // The status bar fires this every 10s. While a sync/push is talking to
+    // Tally, issuing another request would stack a second call onto the
+    // single-threaded gateway — the classic c0000005 crash trigger. If Tally is
+    // already busy, report the last-known status instead of probing again.
+    if (tallyGate.isBusy()) {
+      return { connected: lastTallyConnected, busy: true };
+    }
     try {
       const tallyUrl = store.get("tallyUrl");
       await fetchTallyCompanies(tallyUrl);
+      lastTallyConnected = true;
       return { connected: true };
     } catch (error: any) {
+      lastTallyConnected = false;
       return { connected: false, error: error?.message || "Could not connect to TallyPrime." };
     }
   });
