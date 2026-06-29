@@ -2,9 +2,18 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from functools import lru_cache
 
 from xml_parser import safe_float, safe_int, safe_str
+
+try:
+    # Cap how long we wait for one ODBC helper response. A wedged helper (locked
+    # Tally / stuck ODBC handshake) would otherwise block readline() forever,
+    # hanging the engine until the Electron 10-min idle watchdog kills it.
+    ODBC_READ_TIMEOUT_SECONDS = max(5, int(os.environ.get("TB_ODBC_READ_TIMEOUT_SECONDS", "30") or "30"))
+except ValueError:
+    ODBC_READ_TIMEOUT_SECONDS = 30
 
 
 DEFINITIONS_FILE = os.path.join(
@@ -267,7 +276,33 @@ class OdbcBridge:
 
         self._proc.stdin.write(json.dumps(payload) + "\n")
         self._proc.stdin.flush()
-        line = self._proc.stdout.readline()
+
+        # Read the response with a timeout. readline() on a pipe can't be
+        # interrupted directly (and select() doesn't work on Windows pipes), so
+        # read on a daemon thread and bail if it doesn't finish in time. On
+        # timeout, tear down the wedged helper so the next call starts a fresh one
+        # and the caller falls back to XML.
+        read_result: dict = {}
+
+        def _read_line() -> None:
+            try:
+                read_result["line"] = self._proc.stdout.readline()
+            except Exception as error:  # pragma: no cover - defensive
+                read_result["error"] = error
+
+        reader = threading.Thread(target=_read_line, daemon=True)
+        reader.start()
+        reader.join(timeout=ODBC_READ_TIMEOUT_SECONDS)
+        if reader.is_alive():
+            self.close()
+            raise RuntimeError(
+                f"ODBC helper did not respond within {ODBC_READ_TIMEOUT_SECONDS}s "
+                "(TallyPrime may be busy or locked); falling back to XML."
+            )
+        if "error" in read_result:
+            raise RuntimeError(f"ODBC helper read failed: {read_result['error']}")
+
+        line = read_result.get("line")
         if not line:
             stderr_output = ""
             if self._proc.stderr:
