@@ -233,17 +233,18 @@ export class LocalPushServer {
       return;
     }
 
-    // A push writes vouchers into Tally. If a sync is already reading from the
-    // single-threaded gateway, stacking a write on top of it can crash
-    // TallyPrime (c0000005). Defer with a retriable status — the voucher stays
-    // in the backend queue and the push-queue poller will deliver it once the
-    // sync finishes.
-    if (this.syncEngine?.isSyncInProgress()) {
-      this.log("[Push API] Sync in progress — deferring push; it will be retried from the queue.");
+    // A push writes vouchers into Tally. If ANYONE else is touching the
+    // single-threaded gateway — a sync, the push-queue poller's own worker, or a
+    // main-process request — stacking a write on top crashes TallyPrime
+    // (c0000005). Defer with a retriable status; the voucher stays in the backend
+    // queue and the poller redelivers it once Tally is free. (Fast-path check;
+    // the race-free guard is inside runPythonPushWorker right before spawn.)
+    if (this.syncEngine?.isSyncInProgress() || tallyGate.isBusy()) {
+      this.log("[Push API] Tally is busy (sync or another push) — deferring; it will be retried from the queue.");
       sendJson(res, 503, {
         ok: false,
         deferred: true,
-        error: "TallyBridge is syncing; push deferred and will be retried.",
+        error: "TallyBridge is busy with Tally; push deferred and will be retried.",
       });
       return;
     }
@@ -255,7 +256,10 @@ export class LocalPushServer {
         ...payload,
         company_name: companyName,
       });
-      sendJson(res, result.ok ? 200 : 422, result);
+      // A deferred result (Tally became busy between the fast-path check and the
+      // spawn) maps to 503 so the backend retries it, not 422 (a real failure).
+      const statusCode = result.deferred ? 503 : result.ok ? 200 : 422;
+      sendJson(res, statusCode, result);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown local push error";
       this.log(`[Push API] ${message}`);
@@ -268,6 +272,15 @@ export class LocalPushServer {
 
   private runPythonPushWorker(payload: PushVoucherPayload) {
     return new Promise<Record<string, unknown>>((resolve, reject) => {
+      // Race-free gate: the handler's fast-path check ran before an await
+      // (readJsonBody), during which the 5s poller could have started a worker.
+      // This synchronous check right before beginPythonWork() closes that window
+      // so two push workers never write to single-threaded Tally at once.
+      if (tallyGate.isBusy()) {
+        resolve({ ok: false, deferred: true, error: "Tally became busy; push deferred and will be retried." });
+        return;
+      }
+
       const scriptPath = isDev
         ? path.join(__dirname, "../../src/python/sync_main.py")
         : path.join(process.resourcesPath, "python", "sync_main.py");

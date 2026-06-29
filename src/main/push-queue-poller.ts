@@ -174,6 +174,16 @@ export class PushQueuePoller {
     },
   ) {
     return new Promise<void>((resolve) => {
+      // Don't start a push worker while anyone else owns single-threaded Tally —
+      // a sync, the local-push :3002 worker, or a main-process request. Two
+      // writers on :9000 crash it (c0000005). Skip this tick; the 5s poll
+      // retries. This check is synchronous right before beginPythonWork() below,
+      // so no other caller can slip in between.
+      if (tallyGate.isBusy()) {
+        resolve();
+        return;
+      }
+
       const scriptPath = isDev
         ? path.join(__dirname, "../../src/python/sync_main.py")
         : path.join(process.resourcesPath, "python", "sync_main.py");
