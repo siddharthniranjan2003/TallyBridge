@@ -209,6 +209,7 @@ export class PushQueuePoller {
       // Watchdog: terminate a push worker that runs too long (e.g. Tally is
       // locked behind a modal and the worker is stuck in its HTTP read) so it
       // can't pin the process or hold the tally gate forever.
+      let settled = false;
       const watchdogMs = resolvePushWorkerTimeoutMs();
       let watchdog: NodeJS.Timeout | null = setTimeout(() => {
         watchdog = null;
@@ -217,6 +218,12 @@ export class PushQueuePoller {
           `[Push] Worker exceeded ${Math.round(watchdogMs / 1000)}s (Tally may be busy or locked) — terminating.`,
         );
         killProcessTree(proc);
+        // Fallback settle: if 'close' never fires (taskkill couldn't fully reap,
+        // or a surviving grandchild holds the stdout pipe), resolve anyway after
+        // a grace period so pollOnce()'s await returns and the poller keeps
+        // polling instead of wedging for the process lifetime. finish() is
+        // idempotent, so a later 'close' is harmless.
+        setTimeout(finish, 2000);
       }, watchdogMs);
 
       const cleanup = () => {
@@ -226,6 +233,15 @@ export class PushQueuePoller {
         }
         this.activeChildren.delete(proc);
         endPythonWork();
+      };
+
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve();
       };
 
       let stdout = "";
@@ -240,13 +256,17 @@ export class PushQueuePoller {
       });
 
       proc.on("error", (error) => {
-        cleanup();
+        if (settled) {
+          return;
+        }
         this.log(company.name, `[Push] Queue poll failed to start: ${error.message}`);
-        resolve();
+        finish();
       });
 
       proc.on("close", (code) => {
-        cleanup();
+        if (settled) {
+          return; // watchdog fallback already settled this worker
+        }
         const lines = stdout
           .split(/\r?\n/)
           .map((line) => line.trim())
@@ -268,7 +288,7 @@ export class PushQueuePoller {
           this.log(company.name, `[Push] Queue poll exited with code ${code}.`);
         }
 
-        resolve();
+        finish();
       });
     });
   }

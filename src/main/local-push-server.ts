@@ -295,13 +295,7 @@ export class LocalPushServer {
       const proc = spawn(pythonCommand.command, pythonCommand.args, { env });
       this.activeChildren.add(proc);
 
-      // Watchdog: kill a worker stuck writing to a locked Tally so it can't pin
-      // the process / tally gate forever and reject the request instead.
-      const watchdogMs = resolvePushWorkerTimeoutMs();
-      let watchdog: NodeJS.Timeout | null = setTimeout(() => {
-        watchdog = null;
-        killProcessTree(proc);
-      }, watchdogMs);
+      let settled = false;
 
       const cleanup = () => {
         if (watchdog) {
@@ -311,6 +305,34 @@ export class LocalPushServer {
         this.activeChildren.delete(proc);
         endPythonWork();
       };
+
+      // Settle the worker Promise exactly once (idempotent), running cleanup
+      // first. Used by the close/error handlers AND the watchdog fallback so a
+      // worker whose 'close' never fires can't hang the request forever.
+      const settle = (act: () => void) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        act();
+      };
+
+      // Watchdog: kill a worker stuck writing to a locked Tally so it can't pin
+      // the process / tally gate forever, log it (so the kill is diagnosable on
+      // an unattended box), and settle after a grace period if 'close' never fires.
+      const watchdogMs = resolvePushWorkerTimeoutMs();
+      let watchdog: NodeJS.Timeout | null = setTimeout(() => {
+        watchdog = null;
+        this.log(
+          `[Push API] Worker exceeded ${Math.round(watchdogMs / 1000)}s (Tally may be busy or locked) — terminating.`,
+        );
+        killProcessTree(proc);
+        setTimeout(
+          () => settle(() => reject(new Error("Push worker timed out — Tally may be busy or locked."))),
+          2000,
+        );
+      }, watchdogMs);
 
       let stdout = "";
       let stderr = "";
@@ -324,28 +346,31 @@ export class LocalPushServer {
       });
 
       proc.on("error", (error) => {
-        cleanup();
-        reject(error);
+        settle(() => reject(error));
       });
 
       proc.on("close", () => {
-        cleanup();
-        try {
-          const parsed = parseLastJsonObject(stdout);
-          if (stderr.trim()) {
-            parsed.stderr = stderr.trim();
+        settle(() => {
+          try {
+            const parsed = parseLastJsonObject(stdout);
+            if (stderr.trim()) {
+              parsed.stderr = stderr.trim();
+            }
+            resolve(parsed);
+          } catch (error) {
+            reject(
+              new Error(
+                stderr.trim()
+                  || (error instanceof Error ? error.message : "Python push worker failed"),
+              ),
+            );
           }
-          resolve(parsed);
-        } catch (error) {
-          reject(
-            new Error(
-              stderr.trim()
-                || (error instanceof Error ? error.message : "Python push worker failed"),
-            ),
-          );
-        }
+        });
       });
 
+      // Guard against EPIPE if the worker already died before we finish writing
+      // its stdin — an unhandled 'error' here would crash the main process.
+      proc.stdin?.on("error", () => {});
       proc.stdin?.write(JSON.stringify(payload));
       proc.stdin?.end();
     });
