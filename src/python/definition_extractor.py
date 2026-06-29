@@ -9,6 +9,16 @@ import xmltodict
 from tally_client import TALLY_COMPANY, _fetch, _xml_escape
 from xml_parser import clean_xml, get_messages, parse_tally_date, safe_float, safe_int, safe_str, _ensure_list
 
+# Pin SVCURRENTCOMPANY on EVERY request (including Data reports and voucher
+# exports) so a request can't silently read from a different company that
+# happens to be UI-focused when 2+ companies are open in Tally. The legacy
+# tally_client report/master requests already pin it; this brings the structured
+# path in line. Kill-switch in case a specific Tally build rejects it on a Data
+# export: TB_PIN_COMPANY_ALL_REQUESTS=0.
+_PIN_COMPANY_ON_ALL_REQUESTS = os.environ.get(
+    "TB_PIN_COMPANY_ALL_REQUESTS", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
+
 
 DEFINITIONS_FILE = os.path.join(
     os.path.dirname(__file__),
@@ -59,7 +69,13 @@ def parse_structured_section(section_name: str, xml_text: str):
 def build_collection_request(request_def: dict, request_context: dict | None = None) -> str:
     request_type = request_def.get("type", "Collection")
     static_vars = [{"name": "SVEXPORTFORMAT", "value": "$$SysName:XML"}]
-    if request_type != "Data" and request_def.get("object_type") != "Voucher":
+    # Include the company pin on all requests (default) so voucher + Data report
+    # exports read from the configured company, not whichever is UI-focused.
+    pin_all = _PIN_COMPANY_ON_ALL_REQUESTS and bool(TALLY_COMPANY)
+    include_company = pin_all or (
+        request_type != "Data" and request_def.get("object_type") != "Voucher"
+    )
+    if include_company:
         static_vars.append(
             {"name": "SVCURRENTCOMPANY", "value": TALLY_COMPANY, "escape": True}
         )
