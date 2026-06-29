@@ -112,6 +112,18 @@ ENABLE_PUSH = os.environ.get(
     "TB_ENABLE_PUSH",
     "",
 ).strip().lower() in {"1", "true", "yes", "on"}
+# Per-ack short timeout and per-cycle wall-clock budget for the push loop. Both
+# stay well under the Electron push-worker watchdog (TB_PUSH_WORKER_TIMEOUT_MS,
+# default 90s) so the worker is never taskkilled mid-write/mid-ack (which would
+# re-import an already-written voucher).
+try:
+    PUSH_ACK_TIMEOUT_SECONDS = max(3, int(os.environ.get("TB_PUSH_ACK_TIMEOUT_SECONDS", "8") or "8"))
+except ValueError:
+    PUSH_ACK_TIMEOUT_SECONDS = 8
+try:
+    PUSH_CYCLE_BUDGET_SECONDS = max(10, int(os.environ.get("TB_PUSH_CYCLE_BUDGET_SECONDS", "70") or "70"))
+except ValueError:
+    PUSH_CYCLE_BUDGET_SECONDS = 70
 COMMAND = (os.environ.get("TB_COMMAND", "sync") or "sync").strip().lower()
 if COMMAND not in {"sync", "push_voucher", "poll_push_queue"}:
     COMMAND = "sync"
@@ -1400,21 +1412,36 @@ def run_pending_push_cycle(
     print(f"[Push] Found {len(pending_jobs)} pending job(s).")
 
     def _ack(job_result: dict) -> bool:
-        # Acknowledge ONE job (with a few retries) immediately after its push,
-        # rather than batching every ack to the end of the loop. The backend only
-        # stops handing a job back once it is acked, so batching meant a crash or
-        # backend blip after a successful Tally write left EVERY written voucher
-        # un-acked — the next 5s poll re-imported all of them (duplicate
-        # accounting). Acking per job bounds that window to the single job
-        # currently between its Tally write and its ack.
-        for attempt in range(3):
-            if mark_push_results([job_result]):
+        # Acknowledge ONE job (with a short, bounded retry) immediately after its
+        # push, rather than batching every ack to the end of the loop. The backend
+        # only stops handing a job back once it is acked, so batching meant a
+        # crash or backend blip after a successful Tally write left EVERY written
+        # voucher un-acked — the next 5s poll re-imported all of them (duplicate
+        # accounting). Acking per job bounds that window to the single job between
+        # its Tally write and its ack.
+        #
+        # Each ack uses a SHORT timeout (not the 60s ingest timeout) and at most 2
+        # attempts so a stalling backend can't drag a single ack past the
+        # push-worker watchdog (which would taskkill the worker mid-ack and cause
+        # exactly the duplicate re-import this is meant to prevent).
+        for attempt in range(2):
+            if mark_push_results([job_result], timeout_seconds=PUSH_ACK_TIMEOUT_SECONDS):
                 return True
-            if attempt < 2:
-                time.sleep(1.5 * (attempt + 1))
+            if attempt < 1:
+                time.sleep(1.5)
         return False
 
+    cycle_started_at = time.perf_counter()
     for job in pending_jobs:
+        # Stop before the push-worker watchdog can kill us mid-write/mid-ack:
+        # leave any remaining jobs pending so the next poll picks them up, rather
+        # than getting taskkilled after a Tally write but before its ack.
+        if time.perf_counter() - cycle_started_at > PUSH_CYCLE_BUDGET_SECONDS:
+            print(
+                f"[Push] Time budget ({PUSH_CYCLE_BUDGET_SECONDS}s) reached; "
+                "deferring remaining jobs to the next poll."
+            )
+            break
         job_id = str(job.get("id") or "").strip()
         voucher_payload = job.get("voucher_payload")
         if not job_id or not isinstance(voucher_payload, dict):

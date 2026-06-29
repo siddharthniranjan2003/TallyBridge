@@ -655,13 +655,18 @@ def fetch_pending_push_vouchers(limit: int = 10) -> tuple[list[dict], str]:
         return [], "lookup_failed"
 
 
-def mark_push_results(job_results: list[dict]) -> bool:
+def mark_push_results(job_results: list[dict], timeout_seconds: int | None = None) -> bool:
     if not CONTROL_PLANE_URL:
         print("[Control][Push] No control plane URL configured; cannot store push results")
         return False
 
     if not job_results:
         return True
+
+    # The ack is a tiny POST; callers on the time-budgeted push path pass a short
+    # timeout so a stalling backend can't push a single ack past the push-worker
+    # watchdog (which would taskkill a worker mid-ack and re-import the voucher).
+    effective_timeout = timeout_seconds if timeout_seconds else min(get_backend_timeout_seconds(), 60)
 
     try:
         response = requests.post(
@@ -671,7 +676,7 @@ def mark_push_results(job_results: list[dict]) -> bool:
                 "Content-Type": "application/json",
                 "x-api-key": CONTROL_PLANE_API_KEY,
             },
-            timeout=min(get_backend_timeout_seconds(), 60),
+            timeout=effective_timeout,
         )
 
         if response.ok:
