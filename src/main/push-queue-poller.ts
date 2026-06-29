@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { spawn, ChildProcess } from "child_process";
 import { app, BrowserWindow } from "electron";
 import isDev from "electron-is-dev";
 import path from "path";
@@ -10,6 +10,10 @@ import { tallyGate } from "./tally-gate";
 
 const DEFAULT_PUSH_QUEUE_POLL_INTERVAL_MS = 5000;
 const INITIAL_PUSH_QUEUE_POLL_DELAY_MS = 5000;
+// A push worker should finish quickly; if Tally is locked behind a modal/license
+// popup the worker blocks in its HTTP read (~45s) holding the tally gate. Cap it
+// so a wedged worker can't pin a process/the gate indefinitely.
+const DEFAULT_PUSH_WORKER_TIMEOUT_MS = 90000;
 
 function resolvePushQueuePollIntervalMs() {
   const parsed = Number((process.env.TB_PUSH_QUEUE_POLL_INTERVAL_MS || "").trim());
@@ -17,6 +21,32 @@ function resolvePushQueuePollIntervalMs() {
     return parsed;
   }
   return DEFAULT_PUSH_QUEUE_POLL_INTERVAL_MS;
+}
+
+function resolvePushWorkerTimeoutMs() {
+  const parsed = Number((process.env.TB_PUSH_WORKER_TIMEOUT_MS || "").trim());
+  if (Number.isInteger(parsed) && parsed >= 5000) {
+    return parsed;
+  }
+  return DEFAULT_PUSH_WORKER_TIMEOUT_MS;
+}
+
+// Force-kill a spawned engine process and its children. On Windows the
+// PyInstaller exe spawns child processes that a plain SIGTERM leaves orphaned,
+// so use taskkill /t to take down the whole tree (mirrors sync-engine).
+function killProcessTree(proc: ChildProcess) {
+  if (!proc.pid || proc.killed) {
+    return;
+  }
+  try {
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/pid", String(proc.pid), "/f", "/t"]);
+    } else {
+      proc.kill("SIGKILL");
+    }
+  } catch {
+    // best-effort termination
+  }
 }
 
 function resolvePythonCommand(scriptPath: string) {
@@ -54,6 +84,10 @@ function isInterestingPollLine(line: string) {
 export class PushQueuePoller {
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
+  // In-flight push worker processes, so they can be killed on quit/auto-update
+  // instead of being orphaned (a leaked engine.exe holds RAM and contends with
+  // Tally on port 9000 — costly on a 4GB box).
+  private readonly activeChildren = new Set<ChildProcess>();
 
   constructor(
     private readonly mainWindow: BrowserWindow,
@@ -75,6 +109,10 @@ export class PushQueuePoller {
       clearTimeout(this.timer);
       this.timer = null;
     }
+    for (const proc of this.activeChildren) {
+      killProcessTree(proc);
+    }
+    this.activeChildren.clear();
   }
 
   private scheduleNext(delayMs = resolvePushQueuePollIntervalMs()) {
@@ -166,6 +204,30 @@ export class PushQueuePoller {
       };
 
       const proc = spawn(pythonCommand.command, pythonCommand.args, { env });
+      this.activeChildren.add(proc);
+
+      // Watchdog: terminate a push worker that runs too long (e.g. Tally is
+      // locked behind a modal and the worker is stuck in its HTTP read) so it
+      // can't pin the process or hold the tally gate forever.
+      const watchdogMs = resolvePushWorkerTimeoutMs();
+      let watchdog: NodeJS.Timeout | null = setTimeout(() => {
+        watchdog = null;
+        this.log(
+          company.name,
+          `[Push] Worker exceeded ${Math.round(watchdogMs / 1000)}s (Tally may be busy or locked) — terminating.`,
+        );
+        killProcessTree(proc);
+      }, watchdogMs);
+
+      const cleanup = () => {
+        if (watchdog) {
+          clearTimeout(watchdog);
+          watchdog = null;
+        }
+        this.activeChildren.delete(proc);
+        endPythonWork();
+      };
+
       let stdout = "";
       let stderr = "";
 
@@ -178,13 +240,13 @@ export class PushQueuePoller {
       });
 
       proc.on("error", (error) => {
-        endPythonWork();
+        cleanup();
         this.log(company.name, `[Push] Queue poll failed to start: ${error.message}`);
         resolve();
       });
 
       proc.on("close", (code) => {
-        endPythonWork();
+        cleanup();
         const lines = stdout
           .split(/\r?\n/)
           .map((line) => line.trim())

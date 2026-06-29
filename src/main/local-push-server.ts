@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { spawn, ChildProcess } from "child_process";
 import { app, BrowserWindow, dialog } from "electron";
 import { createServer, IncomingMessage, Server, ServerResponse } from "http";
 import path from "path";
@@ -12,6 +12,32 @@ import { tallyGate } from "./tally-gate";
 const DEFAULT_LOCAL_PUSH_HOST = "127.0.0.1";
 const DEFAULT_LOCAL_PUSH_PORT = 3002;
 const MAX_REQUEST_BYTES = 1024 * 1024;
+const DEFAULT_PUSH_WORKER_TIMEOUT_MS = 90000;
+
+function resolvePushWorkerTimeoutMs() {
+  const parsed = Number((process.env.TB_PUSH_WORKER_TIMEOUT_MS || "").trim());
+  if (Number.isInteger(parsed) && parsed >= 5000) {
+    return parsed;
+  }
+  return DEFAULT_PUSH_WORKER_TIMEOUT_MS;
+}
+
+// Force-kill a spawned engine process and its children (Windows taskkill /t
+// takes down the PyInstaller exe's grandchildren that SIGTERM would orphan).
+function killProcessTree(proc: ChildProcess) {
+  if (!proc.pid || proc.killed) {
+    return;
+  }
+  try {
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/pid", String(proc.pid), "/f", "/t"]);
+    } else {
+      proc.kill("SIGKILL");
+    }
+  } catch {
+    // best-effort termination
+  }
+}
 
 type PushVoucherPayload = Record<string, unknown> & {
   company_name?: unknown;
@@ -136,6 +162,9 @@ function parseLastJsonObject(stdout: string) {
 export class LocalPushServer {
   private server: Server | null = null;
   private readonly port = resolveLocalPushPort();
+  // In-flight push worker processes, killed on stop()/quit so they aren't
+  // orphaned (a leaked engine.exe holds RAM and contends with Tally on :9000).
+  private readonly activeChildren = new Set<ChildProcess>();
 
   constructor(
     private readonly mainWindow: BrowserWindow,
@@ -170,6 +199,10 @@ export class LocalPushServer {
   }
 
   stop() {
+    for (const proc of this.activeChildren) {
+      killProcessTree(proc);
+    }
+    this.activeChildren.clear();
     if (!this.server) {
       return;
     }
@@ -260,6 +293,25 @@ export class LocalPushServer {
       };
 
       const proc = spawn(pythonCommand.command, pythonCommand.args, { env });
+      this.activeChildren.add(proc);
+
+      // Watchdog: kill a worker stuck writing to a locked Tally so it can't pin
+      // the process / tally gate forever and reject the request instead.
+      const watchdogMs = resolvePushWorkerTimeoutMs();
+      let watchdog: NodeJS.Timeout | null = setTimeout(() => {
+        watchdog = null;
+        killProcessTree(proc);
+      }, watchdogMs);
+
+      const cleanup = () => {
+        if (watchdog) {
+          clearTimeout(watchdog);
+          watchdog = null;
+        }
+        this.activeChildren.delete(proc);
+        endPythonWork();
+      };
+
       let stdout = "";
       let stderr = "";
 
@@ -272,12 +324,12 @@ export class LocalPushServer {
       });
 
       proc.on("error", (error) => {
-        endPythonWork();
+        cleanup();
         reject(error);
       });
 
       proc.on("close", () => {
-        endPythonWork();
+        cleanup();
         try {
           const parsed = parseLastJsonObject(stdout);
           if (stderr.trim()) {
