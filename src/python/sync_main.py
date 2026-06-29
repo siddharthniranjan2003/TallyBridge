@@ -1398,7 +1398,22 @@ def run_pending_push_cycle(
         return
 
     print(f"[Push] Found {len(pending_jobs)} pending job(s).")
-    job_results: list[dict] = []
+
+    def _ack(job_result: dict) -> bool:
+        # Acknowledge ONE job (with a few retries) immediately after its push,
+        # rather than batching every ack to the end of the loop. The backend only
+        # stops handing a job back once it is acked, so batching meant a crash or
+        # backend blip after a successful Tally write left EVERY written voucher
+        # un-acked — the next 5s poll re-imported all of them (duplicate
+        # accounting). Acking per job bounds that window to the single job
+        # currently between its Tally write and its ack.
+        for attempt in range(3):
+            if mark_push_results([job_result]):
+                return True
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+        return False
+
     for job in pending_jobs:
         job_id = str(job.get("id") or "").strip()
         voucher_payload = job.get("voucher_payload")
@@ -1429,17 +1444,17 @@ def run_pending_push_cycle(
                     f"altered={result.get('altered', 0)})."
                 )
 
-            job_results.append({
+            job_result = {
                 "id": job_id,
                 "status": status_value,
                 "error_message": error_message,
                 "tally_response": result,
-            })
+            }
         except Exception as error:
             warning = f"Voucher push failed for job {job_id}: {error}"
             warnings.append(warning)
             print(f"[Push] {warning}")
-            job_results.append({
+            job_result = {
                 "id": job_id,
                 "status": "failed",
                 "error_message": str(error),
@@ -1449,12 +1464,21 @@ def run_pending_push_cycle(
                     "errors": 1,
                     "line_errors": [str(error)],
                 },
-            })
+            }
 
-    if job_results and not mark_push_results(job_results):
-        warning = "Outbound push results could not be stored in the backend queue."
-        warnings.append(warning)
-        print(f"[Push] {warning}")
+        if not _ack(job_result):
+            # The voucher reached Tally but the backend could not be updated. Do
+            # NOT keep going as if nothing happened: surface it loudly. (Full
+            # closure of this single-job window needs an atomic claim/lease on the
+            # backend queue, which is outside the desktop app.)
+            warning = (
+                f"Job {job_id} was sent to Tally but its result could not be recorded "
+                f"in the backend queue after retries (status={job_result['status']}). "
+                "If this was a successful import, the queue may re-offer it — verify "
+                "before re-pushing to avoid a duplicate voucher."
+            )
+            warnings.append(warning)
+            print(f"[Push] {warning}")
 
 
 def run_poll_push_queue_command() -> int:
