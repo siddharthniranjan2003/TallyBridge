@@ -569,6 +569,56 @@ def fetch_remote_voucher_count() -> tuple[int | None, str]:
         return None, f"error:{error}"
 
 
+# Master section name -> PostgREST table for the cloud row-count cold-start guard.
+_REMOTE_MASTER_TABLES = {
+    "groups": "groups",
+    "ledgers": "ledgers",
+    "stock_items": "stock_items",
+}
+
+
+def fetch_remote_master_count(section_name: str) -> tuple[int | None, str]:
+    """Best-effort count of a master section's rows already in the cloud, via the
+    same PostgREST count trick as fetch_remote_voucher_count. Lets the master
+    wipe guard protect the very first sync after a fresh install / cache wipe
+    (when there is no local baseline yet). Returns (count, "ok") or (None, reason)."""
+    table = _REMOTE_MASTER_TABLES.get(section_name)
+    if not table:
+        return None, "unknown_section"
+
+    rest = _postgrest_base()
+    if not rest or not SYNC_INGEST_KEY:
+        return None, "not_configured"
+
+    headers = _postgrest_headers()
+    timeout = min(get_backend_timeout_seconds(), 60)
+    try:
+        company_id = _resolve_company_id_readonly(rest, headers)
+        if not company_id:
+            return None, "company_not_found"
+
+        count_headers = {**headers, "Prefer": "count=exact", "Range": "0-0"}
+        response = requests.get(
+            f"{rest}/{table}",
+            headers=count_headers,
+            params={"company_id": f"eq.{company_id}", "select": "id"},
+            timeout=timeout,
+        )
+        if not response.ok:
+            return None, f"http_{response.status_code}"
+
+        content_range = response.headers.get("Content-Range", "")
+        if "/" in content_range:
+            total = content_range.rsplit("/", 1)[1].strip()
+            if total.isdigit():
+                return int(total), "ok"
+        return None, "no_count"
+    except requests.exceptions.RequestException as error:
+        return None, f"error:{error}"
+    except Exception as error:
+        return None, f"error:{error}"
+
+
 def fetch_remote_alter_ids() -> tuple[dict | None, str]:
     if not CONTROL_PLANE_URL:
         return None, "backend_unconfigured"

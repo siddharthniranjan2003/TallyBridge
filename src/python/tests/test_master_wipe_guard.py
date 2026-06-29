@@ -61,6 +61,27 @@ def test_disable_flag_allows(monkeypatch=None):
         sync_main.DISABLE_MASTER_WIPE_GUARD = original
 
 
+def test_cold_start_uses_cloud_baseline():
+    # No local baseline (fresh install / cache wipe), hybrid mode: the guard
+    # must fall back to the cloud row count so a degraded first sync can't wipe.
+    _with_baseline()  # empty cache
+    orig_mode = sync_main.SYNC_INGEST_MODE
+    orig_fetch = sync_main.fetch_remote_master_count
+    sync_main.SYNC_INGEST_MODE = "hybrid"
+    try:
+        sync_main.fetch_remote_master_count = lambda section: (500, "ok")
+        assert sync_main.evaluate_master_wipe_guard("ledgers", 0) is not None  # cloud has 500 -> block
+        # A genuinely-new company (cloud also empty) must NOT false-trip.
+        sync_main.fetch_remote_master_count = lambda section: (0, "ok")
+        assert sync_main.evaluate_master_wipe_guard("ledgers", 0) is None
+        # Cloud unreadable -> fall back to (absent) local baseline -> allow.
+        sync_main.fetch_remote_master_count = lambda section: (None, "company_not_found")
+        assert sync_main.evaluate_master_wipe_guard("ledgers", 0) is None
+    finally:
+        sync_main.SYNC_INGEST_MODE = orig_mode
+        sync_main.fetch_remote_master_count = orig_fetch
+
+
 def test_baseline_persistence():
     _with_baseline(last_groups_count=42)
     ids = {}

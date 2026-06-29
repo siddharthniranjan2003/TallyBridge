@@ -28,6 +28,7 @@ from datetime import date, datetime, timedelta
 from cloud_pusher import (
     fetch_pending_push_vouchers,
     fetch_remote_alter_ids,
+    fetch_remote_master_count,
     fetch_remote_voucher_count,
     get_last_push_error,
     get_last_push_stats,
@@ -701,7 +702,9 @@ _MASTER_BASELINE_KEYS = {
 def evaluate_master_wipe_guard(section_name: str, new_count: int) -> str | None:
     """Return a human-readable reason to BLOCK pushing this master section
     (because doing so would wipe most of its cloud copy), or None to allow.
-    Uses the locally cached last known-good count as the baseline."""
+    Uses the locally cached last known-good count as the baseline, falling back
+    to the cloud's current row count on cold start (so the very first sync after
+    a fresh install / cache wipe is protected too)."""
     if DISABLE_MASTER_WIPE_GUARD:
         return None
     cache_key = _MASTER_BASELINE_KEYS.get(section_name)
@@ -710,9 +713,28 @@ def evaluate_master_wipe_guard(section_name: str, new_count: int) -> str | None:
 
     cached_ids, _ = load_cached_ids()
     try:
-        baseline = int(str(cached_ids.get(cache_key, 0)).strip() or "0")
+        local_baseline = int(str(cached_ids.get(cache_key, 0)).strip() or "0")
     except (TypeError, ValueError):
-        baseline = 0
+        local_baseline = 0
+
+    baseline = local_baseline
+    baseline_source = "last known-good"
+
+    # Cold start (or a low local baseline): ask the cloud how many rows this
+    # section already has — that is exactly the set a full reconciliation would
+    # delete, so it's the authoritative baseline and lets the guard protect the
+    # first full sync after a Tally crash on a fresh machine (mirrors the voucher
+    # wipe guard). Only the direct/hybrid transports have a PostgREST endpoint.
+    if local_baseline < MASTER_WIPE_GUARD_MIN_BASELINE and SYNC_INGEST_MODE in {"hybrid", "direct"}:
+        remote_count, remote_status = fetch_remote_master_count(section_name)
+        if remote_status == "ok" and isinstance(remote_count, int) and remote_count > baseline:
+            baseline = remote_count
+            baseline_source = "cloud"
+        elif remote_status != "ok":
+            print(
+                f"[WipeGuard] Could not read cloud {section_name} count ({remote_status}); "
+                f"falling back to local baseline {local_baseline}."
+            )
 
     if baseline < MASTER_WIPE_GUARD_MIN_BASELINE:
         return None
@@ -723,7 +745,7 @@ def evaluate_master_wipe_guard(section_name: str, new_count: int) -> str | None:
 
     return (
         f"Refusing to push {section_name}: TallyPrime returned {new_count} row(s) "
-        f"but the last known-good count was {baseline}. Pushing this would delete "
+        f"but the {baseline_source} count is {baseline}. Pushing this would delete "
         f"~{baseline - new_count} cloud row(s), below the "
         f"{int(MASTER_WIPE_GUARD_MIN_RATIO * 100)}% safety floor. This usually means "
         "TallyPrime is busy or no company is loaded — load the company in TallyPrime "
