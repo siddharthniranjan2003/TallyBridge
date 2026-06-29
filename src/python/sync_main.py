@@ -650,6 +650,93 @@ def update_voucher_count_baseline(
         current_ids["last_voucher_count"] = prior
 
 
+# Master-section wipe guard. Mirrors the voucher wipe guard for groups/ledgers/
+# stock. A degraded TallyPrime (busy, modal/license popup, no company loaded)
+# can return 0/near-0 master rows that look identical to a genuinely empty
+# company. Pushing that empty set as the authoritative snapshot wipes the cloud
+# chart of accounts / stock master. This refuses any master section that
+# collapsed far below its last known-good count.
+DISABLE_MASTER_WIPE_GUARD = os.environ.get(
+    "TB_DISABLE_MASTER_WIPE_GUARD",
+    "",
+).strip().lower() in {"1", "true", "yes", "on"}
+try:
+    # Don't police tiny companies: only guard once the known-good baseline is at
+    # least this many rows.
+    MASTER_WIPE_GUARD_MIN_BASELINE = max(
+        0,
+        int(os.environ.get("TB_MASTER_WIPE_GUARD_MIN_BASELINE", "10") or "10"),
+    )
+except ValueError:
+    MASTER_WIPE_GUARD_MIN_BASELINE = 10
+try:
+    MASTER_WIPE_GUARD_MIN_RATIO = float(
+        os.environ.get("TB_MASTER_WIPE_GUARD_MIN_RATIO", "0.5") or "0.5"
+    )
+except ValueError:
+    MASTER_WIPE_GUARD_MIN_RATIO = 0.5
+if not 0 < MASTER_WIPE_GUARD_MIN_RATIO <= 1:
+    MASTER_WIPE_GUARD_MIN_RATIO = 0.5
+
+# section name -> alter-id cache key holding its last known-good row count.
+_MASTER_BASELINE_KEYS = {
+    "groups": "last_groups_count",
+    "ledgers": "last_ledgers_count",
+    "stock_items": "last_stock_count",
+}
+
+
+def evaluate_master_wipe_guard(section_name: str, new_count: int) -> str | None:
+    """Return a human-readable reason to BLOCK pushing this master section
+    (because doing so would wipe most of its cloud copy), or None to allow.
+    Uses the locally cached last known-good count as the baseline."""
+    if DISABLE_MASTER_WIPE_GUARD:
+        return None
+    cache_key = _MASTER_BASELINE_KEYS.get(section_name)
+    if not cache_key:
+        return None
+
+    cached_ids, _ = load_cached_ids()
+    try:
+        baseline = int(str(cached_ids.get(cache_key, 0)).strip() or "0")
+    except (TypeError, ValueError):
+        baseline = 0
+
+    if baseline < MASTER_WIPE_GUARD_MIN_BASELINE:
+        return None
+
+    threshold = max(1, int(baseline * MASTER_WIPE_GUARD_MIN_RATIO))
+    if new_count >= threshold:
+        return None
+
+    return (
+        f"Refusing to push {section_name}: TallyPrime returned {new_count} row(s) "
+        f"but the last known-good count was {baseline}. Pushing this would delete "
+        f"~{baseline - new_count} cloud row(s), below the "
+        f"{int(MASTER_WIPE_GUARD_MIN_RATIO * 100)}% safety floor. This usually means "
+        "TallyPrime is busy or no company is loaded — load the company in TallyPrime "
+        "and re-sync. To override intentionally, set TB_DISABLE_MASTER_WIPE_GUARD=1."
+    )
+
+
+def update_master_count_baseline(current_ids: dict, section_name: str, rows) -> None:
+    """Persist a master section's row count into the alter-id cache so the next
+    run's wipe guard has a baseline. When the section was not fetched this run
+    (rows is None — e.g. an incremental sync), carry the prior baseline forward
+    rather than dropping it."""
+    cache_key = _MASTER_BASELINE_KEYS.get(section_name)
+    if not cache_key:
+        return
+    if isinstance(rows, list):
+        current_ids[cache_key] = len(rows)
+        return
+
+    cached_ids, _ = load_cached_ids()
+    prior = cached_ids.get(cache_key)
+    if prior is not None:
+        current_ids[cache_key] = prior
+
+
 def validate_voucher_batch(
     vouchers: list[dict],
     from_date: str,
@@ -1880,6 +1967,40 @@ def main() -> int:
             )
             log_section_metric("stock_items", section_metrics["stock_items"])
 
+        # MASTER WIPE GUARD: a degraded Tally can return 0/near-0 groups,
+        # ledgers, or stock that look like a genuinely empty company. Pushing
+        # that empty snapshot as authoritative wipes the cloud chart of accounts
+        # / stock master. Drop any master section that collapsed far below its
+        # last known-good count (None = "don't touch" in direct ingest) and flag
+        # it so the alter-id cache is NOT advanced — the next sync retries once
+        # Tally recovers instead of silently caching the empty state.
+        master_wipe_triggered = False
+        for _section_name, _rows in (
+            ("groups", groups),
+            ("ledgers", ledgers),
+            ("stock_items", stock),
+        ):
+            if not isinstance(_rows, list):
+                continue
+            _reason = evaluate_master_wipe_guard(_section_name, len(_rows))
+            if not _reason:
+                continue
+            master_wipe_triggered = True
+            warnings.append(_reason)
+            print(f"[TallyBridge] {_reason}")
+            section_sources[_section_name] = "skipped_master_wipe_guard"
+            section_metrics[_section_name] = build_skipped_section_metric(_reason)
+            log_section_metric(_section_name, section_metrics[_section_name])
+            if _section_name == "groups":
+                groups = None
+                record_updates.pop("groups", None)
+            elif _section_name == "ledgers":
+                ledgers = None
+                record_updates.pop("ledgers", None)
+            elif _section_name == "stock_items":
+                stock = None
+                record_updates.pop("stock", None)
+
         if sync_plan.get("need_outstanding") and not voucher_family_skipped:
             pace_tally()
             outstanding_started_at = time.perf_counter()
@@ -2059,16 +2180,20 @@ def main() -> int:
         upload_stats = get_last_push_stats()
         print(f"[Metrics] Upload stats: {upload_stats}")
 
-        if current_ids and not voucher_family_skipped:
+        if current_ids and not voucher_family_skipped and not master_wipe_triggered:
             update_voucher_count_baseline(current_ids, vouchers, effective_voucher_sync_mode)
+            update_master_count_baseline(current_ids, "groups", groups)
+            update_master_count_baseline(current_ids, "ledgers", ledgers)
+            update_master_count_baseline(current_ids, "stock_items", stock)
             if save_cached_ids(current_ids):
                 print("[TallyBridge] Cached alter IDs for next change detection.")
             else:
                 print("[TallyBridge] Alter ID cache could not be updated; next sync may re-fetch more data.")
-        elif current_ids and voucher_family_skipped:
+        elif current_ids and (voucher_family_skipped or master_wipe_triggered):
+            reason = "voucher-family sync did not complete" if voucher_family_skipped else "a master wipe guard tripped"
             print(
-                "[TallyBridge] Skipped updating alter ID cache because voucher-family sync "
-                "did not complete."
+                f"[TallyBridge] Skipped updating alter ID cache because {reason}; "
+                "the next sync will retry once Tally recovers."
             )
 
         if ENABLE_PUSH:
