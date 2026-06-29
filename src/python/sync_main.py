@@ -2318,11 +2318,20 @@ def main() -> int:
         effective_voucher_changed = False if voucher_family_skipped else sync_plan.get(
             "voucher_changed", True
         )
+        # When a master section was guard-skipped, roll the master change-markers
+        # in the OUTGOING payload back to their cached values too — otherwise the
+        # cloud records masters as synced to the new alt_mst_id while no master
+        # rows were written, diverging from the local cache (which A6 already
+        # holds). Voucher markers/baselines still advance.
+        payload_alter_ids = current_ids
+        if master_wipe_triggered and current_ids:
+            cached_for_payload, _ = load_cached_ids()
+            payload_alter_ids = hold_master_markers_for_retry(dict(current_ids), cached_for_payload)
         payload = {
             "company_name": COMPANY,
             "company_guid": COMPANY_GUID or None,
             "company_info": company_info,
-            "alter_ids": current_ids,
+            "alter_ids": payload_alter_ids,
             "groups": groups,
             "ledgers": ledgers,
             "vouchers": vouchers,
