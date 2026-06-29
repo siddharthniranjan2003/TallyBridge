@@ -771,6 +771,29 @@ def update_master_count_baseline(current_ids: dict, section_name: str, rows) -> 
         current_ids[cache_key] = prior
 
 
+# Master change-markers: holding these at their previously-cached values forces
+# the next run to re-detect masters (build_sync_plan compares current vs cached
+# alt_mst_id / alter_id).
+_MASTER_CHANGE_MARKERS = ("alt_mst_id", "alter_id")
+
+
+def hold_master_markers_for_retry(saved_ids: dict, cached_ids: dict) -> dict:
+    """When a master section was guard-skipped but the voucher family synced fine,
+    keep the master change-markers at their previously-cached values in the
+    to-be-saved dict so the NEXT run re-detects masters and retries the skipped
+    section — while the voucher markers/baseline (already in saved_ids) advance so
+    vouchers don't needlessly re-sync. This replaces the old all-or-nothing
+    behaviour where one tripped section blocked the entire cache, forcing a
+    full re-detect (and re-push) of every section each cycle. Mutates and returns
+    saved_ids."""
+    for key in _MASTER_CHANGE_MARKERS:
+        if key in cached_ids:
+            saved_ids[key] = cached_ids[key]
+        else:
+            saved_ids.pop(key, None)
+    return saved_ids
+
+
 def validate_voucher_batch(
     vouchers: list[dict],
     from_date: str,
@@ -2271,11 +2294,32 @@ def main() -> int:
                 print("[TallyBridge] Cached alter IDs for next change detection.")
             else:
                 print("[TallyBridge] Alter ID cache could not be updated; next sync may re-fetch more data.")
-        elif current_ids and (voucher_family_skipped or master_wipe_triggered):
-            reason = "voucher-family sync did not complete" if voucher_family_skipped else "a master wipe guard tripped"
+        elif current_ids and master_wipe_triggered and not voucher_family_skipped:
+            # A master section was guard-skipped but vouchers synced fine. Advance
+            # the VOUCHER cache (so vouchers don't needlessly re-sync) and the
+            # cleanly-synced sections' baselines, but HOLD the master change-markers
+            # so masters re-detect and retry next run — instead of blocking the
+            # whole cache, which forced a full masters + voucher re-detect every
+            # cycle until Tally recovered (the re-sync storm).
+            cached_for_hold, _ = load_cached_ids()
+            partial_ids = hold_master_markers_for_retry(dict(current_ids), cached_for_hold)
+            update_voucher_count_baseline(partial_ids, vouchers, effective_voucher_sync_mode)
+            # Tripped sections are None here, so update_master_count_baseline carries
+            # their prior baseline forward; cleanly-synced sections advance.
+            update_master_count_baseline(partial_ids, "groups", groups)
+            update_master_count_baseline(partial_ids, "ledgers", ledgers)
+            update_master_count_baseline(partial_ids, "stock_items", stock)
+            if save_cached_ids(partial_ids):
+                print(
+                    "[TallyBridge] Advanced voucher cache; held master markers so the "
+                    "guard-skipped master section retries next sync."
+                )
+            else:
+                print("[TallyBridge] Alter ID cache could not be updated; next sync may re-fetch more data.")
+        elif current_ids and voucher_family_skipped:
             print(
-                f"[TallyBridge] Skipped updating alter ID cache because {reason}; "
-                "the next sync will retry once Tally recovers."
+                "[TallyBridge] Skipped updating alter ID cache because voucher-family "
+                "sync did not complete; the next sync will retry once Tally recovers."
             )
 
         if ENABLE_PUSH:

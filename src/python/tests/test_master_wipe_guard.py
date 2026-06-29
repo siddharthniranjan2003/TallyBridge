@@ -94,6 +94,20 @@ def test_baseline_persistence():
     assert ids2["last_groups_count"] == 42
 
 
+def test_hold_master_markers_for_retry():
+    # Voucher markers advance; master markers are held at cached values so masters
+    # re-detect next run (A6: stop one tripped section blocking the whole cache).
+    saved = {"alt_mst_id": "B", "alter_id": "Y", "alt_vch_id": "V2", "vch_id": "9"}
+    cached = {"alt_mst_id": "A", "alter_id": "X", "alt_vch_id": "V1", "vch_id": "4"}
+    out = sync_main.hold_master_markers_for_retry(saved, cached)
+    assert out["alt_mst_id"] == "A" and out["alter_id"] == "X"   # held -> masters re-detect
+    assert out["alt_vch_id"] == "V2" and out["vch_id"] == "9"     # voucher markers advanced
+    # If the cache had no master marker yet, it must be removed (not left advanced).
+    saved2 = {"alt_mst_id": "B", "alter_id": "Y"}
+    sync_main.hold_master_markers_for_retry(saved2, {})
+    assert "alt_mst_id" not in saved2 and "alter_id" not in saved2
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:
