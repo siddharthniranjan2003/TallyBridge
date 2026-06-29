@@ -73,7 +73,9 @@ function decodeXmlEntities(value: string) {
 function parseTallyPort(tallyUrl: string) {
   try {
     const parsed = new URL(tallyUrl);
-    return Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+    // Fall back to Tally's port 9000 (not the protocol default 80/443) when the
+    // URL omits an explicit port, so a no-port tallyUrl still probes Tally.
+    return Number(parsed.port) || 9000;
   } catch {
     return 9000;
   }

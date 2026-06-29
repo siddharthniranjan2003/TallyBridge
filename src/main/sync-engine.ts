@@ -97,7 +97,11 @@ export class SyncEngine {
     try {
       const parsed = new URL(tallyUrl);
       host = parsed.hostname || "127.0.0.1";
-      port = Number(parsed.port) || (parsed.protocol === "https:" ? 443 : 80);
+      // Tally speaks on 9000. A tallyUrl without an explicit port (e.g.
+      // "http://localhost") must fall back to 9000, NOT the protocol default
+      // (80/443) — otherwise the pre-flight probes a closed port and skips every
+      // sync forever while the log claims it's checking 9000.
+      port = Number(parsed.port) || 9000;
     } catch {
       // use defaults
     }
