@@ -1,6 +1,7 @@
 import html
 import os
 import re
+import time
 from datetime import datetime
 from xml.sax.saxutils import escape
 
@@ -94,30 +95,48 @@ def _post(
     read_timeout: int | None = None,
     request_encoding: str | None = None,
 ) -> str:
-    try:
-        encoded, headers = _encode_request_body(xml, request_encoding or get_request_encoding_mode())
-        response = SESSION.post(
-            TALLY_URL,
-            data=encoded,
-            headers=headers,
-            timeout=(
-                connect_timeout or get_connect_timeout_seconds(),
-                read_timeout or get_read_timeout_seconds(),
-            ),
-        )
-        response.raise_for_status()
-        return _decode_response(response)
-    except requests.exceptions.Timeout as exc:
-        raise TallyTimeoutError(
-            "Timed out waiting for Tally XML response. "
-            "This often happens on large ERP 9 exports; retry with a smaller date window."
-        ) from exc
-    except requests.exceptions.ConnectionError as exc:
-        raise TallyConnectionError(
-            "Could not reach the Tally XML server. Verify Tally is open and listening on the configured port."
-        ) from exc
-    except requests.exceptions.RequestException as exc:
-        raise TallyError(f"Tally request failed: {exc}") from exc
+    encoded, headers = _encode_request_body(xml, request_encoding or get_request_encoding_mode())
+    # One bounded retry, only for transient transport failures where the request
+    # almost certainly didn't reach/run inside Tally: a dropped/refused connection
+    # (Tally mid-restart) or a 5xx (a proxy in front of it). We deliberately do
+    # NOT retry timeouts — a timeout means Tally is slow/busy and hitting it again
+    # would compound the load on the single-threaded gateway.
+    max_attempts = 2
+    for attempt in range(max_attempts):
+        try:
+            response = SESSION.post(
+                TALLY_URL,
+                data=encoded,
+                headers=headers,
+                timeout=(
+                    connect_timeout or get_connect_timeout_seconds(),
+                    read_timeout or get_read_timeout_seconds(),
+                ),
+            )
+            response.raise_for_status()
+            return _decode_response(response)
+        except requests.exceptions.Timeout as exc:
+            raise TallyTimeoutError(
+                "Timed out waiting for Tally XML response. "
+                "This often happens on large ERP 9 exports; retry with a smaller date window."
+            ) from exc
+        except requests.exceptions.ConnectionError as exc:
+            if attempt < max_attempts - 1:
+                time.sleep(1.0)  # Tally may be mid-restart; give it a moment
+                continue
+            raise TallyConnectionError(
+                "Could not reach the Tally XML server. Verify Tally is open and listening on the configured port."
+            ) from exc
+        except requests.exceptions.HTTPError as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", 0) or 0
+            if 500 <= status < 600 and attempt < max_attempts - 1:
+                time.sleep(1.0)
+                continue
+            raise TallyError(f"Tally request failed: {exc}") from exc
+        except requests.exceptions.RequestException as exc:
+            raise TallyError(f"Tally request failed: {exc}") from exc
+    # Unreachable (the loop either returns or raises), but keeps type-checkers happy.
+    raise TallyError("Tally request failed after retries.")
 
 
 def _clean_tally_error(raw: str) -> str:
