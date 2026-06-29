@@ -1419,10 +1419,32 @@ def run_single_push_command() -> int:
         return 1
 
 
+# Byte-size estimation is observability-only (logging/metrics), never functional.
+# Fully serializing a large list — e.g. a full financial year of vouchers — just
+# to measure it transiently allocates a complete JSON copy of the data, which is
+# itself an OOM trigger on the 4GB target machines. Above the threshold we
+# serialize a small sample and extrapolate instead of the whole list.
+_BYTES_SAMPLE_THRESHOLD = 500
+_BYTES_SAMPLE_SIZE = 200
+
+
 def estimate_payload_bytes(value) -> int:
     if value is None:
         return 0
     try:
+        if isinstance(value, list) and len(value) > _BYTES_SAMPLE_THRESHOLD:
+            sample = value[:_BYTES_SAMPLE_SIZE]
+            sample_bytes = len(
+                json.dumps(
+                    sample,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            )
+            # Strip the sample's own "[]" framing, scale per row, re-add framing.
+            per_row = max(0, sample_bytes - 2) / max(1, len(sample))
+            return int(per_row * len(value)) + 2
         return len(
             json.dumps(
                 value,
@@ -2008,7 +2030,10 @@ def main() -> int:
             },
         }
         payload_section_bytes = build_payload_section_sizes(payload)
-        payload_total_bytes = estimate_payload_bytes(payload)
+        # Sum the per-section estimates instead of serializing the entire payload
+        # dict again here (that would allocate a full JSON copy of every voucher —
+        # an OOM risk on low-memory machines). +1024 covers the small sync_meta block.
+        payload_total_bytes = sum(payload_section_bytes.values()) + 1024
         total_extract_ms = round((time.perf_counter() - total_sync_started_at) * 1000, 2)
         payload["sync_meta"]["observability"] = {
             "transport": {
