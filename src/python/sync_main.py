@@ -28,6 +28,7 @@ from datetime import date, datetime, timedelta
 from cloud_pusher import (
     fetch_pending_push_vouchers,
     fetch_remote_alter_ids,
+    fetch_remote_voucher_count,
     get_last_push_error,
     get_last_push_stats,
     mark_push_results,
@@ -143,6 +144,38 @@ try:
     VOUCHER_WINDOW_DAYS = max(0, int(os.environ.get("TB_VOUCHER_WINDOW_DAYS", "7") or "7"))
 except ValueError:
     VOUCHER_WINDOW_DAYS = 7
+
+# Client-side wipe guard. A full-sync payload tells the cloud "these are all the
+# vouchers" and the backend reconciliation deletes anything else for the company.
+# A degraded TallyPrime can return 0/near-0 vouchers, turning a routine full sync
+# into a mass delete (caught at the DB by tb_guard, but only after the bad payload
+# travels). This guard stops the payload at the source: if a FULL sync carries far
+# fewer vouchers than the last known-good full sync, the voucher family is skipped
+# (masters/stock still sync) instead of wiping the cloud. Tunable; disable only for
+# an intentional large reduction.
+DISABLE_VOUCHER_WIPE_GUARD = os.environ.get(
+    "TB_DISABLE_VOUCHER_WIPE_GUARD",
+    "",
+).strip().lower() in {"1", "true", "yes", "on"}
+try:
+    # Don't police small companies: only guard once the known-good baseline is at
+    # least this many vouchers (mirrors the DB guard's 1000-row floor).
+    VOUCHER_WIPE_GUARD_MIN_BASELINE = max(
+        0,
+        int(os.environ.get("TB_VOUCHER_WIPE_GUARD_MIN_BASELINE", "1000") or "1000"),
+    )
+except ValueError:
+    VOUCHER_WIPE_GUARD_MIN_BASELINE = 1000
+try:
+    # Block a full sync that retains fewer than this fraction of the baseline
+    # (0.5 = "would wipe more than half", matching the DB guard's intent).
+    VOUCHER_WIPE_GUARD_MIN_RATIO = float(
+        os.environ.get("TB_VOUCHER_WIPE_GUARD_MIN_RATIO", "0.5") or "0.5"
+    )
+except ValueError:
+    VOUCHER_WIPE_GUARD_MIN_RATIO = 0.5
+if not 0 < VOUCHER_WIPE_GUARD_MIN_RATIO <= 1:
+    VOUCHER_WIPE_GUARD_MIN_RATIO = 0.5
 
 
 def pace_tally() -> None:
@@ -541,6 +574,80 @@ def dedupe_vouchers(vouchers: list[dict]) -> list[dict]:
         deduped.append(voucher)
 
     return deduped
+
+
+def evaluate_voucher_wipe_guard(new_count: int) -> str | None:
+    """Decide whether a FULL-sync voucher push should be blocked because it would
+    wipe most of the company's cloud vouchers. Returns a human-readable reason to
+    block, or None to allow.
+
+    Compares the just-fetched full set against the locally cached count from the
+    last successful full sync. A legitimate full re-sync re-sends every voucher, so
+    its count stays at/above the baseline; a degraded TallyPrime that returns a
+    near-empty set drops well below it and is refused. This is a client-side mirror
+    of the DB-level tb_guard, stopping the bad payload before it ever leaves."""
+    if DISABLE_VOUCHER_WIPE_GUARD:
+        return None
+
+    cached_ids, _ = load_cached_ids()
+    try:
+        local_baseline = int(str(cached_ids.get("last_voucher_count", 0)).strip() or "0")
+    except (TypeError, ValueError):
+        local_baseline = 0
+
+    baseline = local_baseline
+    baseline_source = "last full sync"
+
+    # Cold start (or a low local baseline): ask the cloud how many vouchers this
+    # company already has. That is exactly the set a full reconciliation would
+    # delete, so it's the authoritative baseline and lets the guard protect even
+    # the first full sync after a Tally crash — before any local baseline exists.
+    if SYNC_INGEST_MODE in {"hybrid", "direct"}:
+        remote_count, remote_status = fetch_remote_voucher_count()
+        if remote_status == "ok" and isinstance(remote_count, int) and remote_count > baseline:
+            baseline = remote_count
+            baseline_source = "cloud"
+        elif remote_status != "ok":
+            print(
+                f"[WipeGuard] Could not read cloud voucher count ({remote_status}); "
+                f"falling back to local baseline {local_baseline}."
+            )
+
+    if baseline < VOUCHER_WIPE_GUARD_MIN_BASELINE:
+        return None
+
+    threshold = int(baseline * VOUCHER_WIPE_GUARD_MIN_RATIO)
+    if new_count >= threshold:
+        return None
+
+    return (
+        f"Refusing to push a full voucher sync: Tally returned {new_count} voucher(s) "
+        f"but the {baseline_source} count is {baseline}. Pushing this would delete "
+        f"~{baseline - new_count} cloud voucher(s), below the "
+        f"{int(VOUCHER_WIPE_GUARD_MIN_RATIO * 100)}% safety floor. This usually means "
+        "TallyPrime is degraded or returning a partial set — restart TallyPrime, reset "
+        "the period to the full financial year, and re-sync. To override intentionally, "
+        "set TB_DISABLE_VOUCHER_WIPE_GUARD=1."
+    )
+
+
+def update_voucher_count_baseline(
+    current_ids: dict,
+    vouchers,
+    voucher_sync_mode: str,
+) -> None:
+    """Persist the full-sync voucher count into the alter-id cache so the next run's
+    wipe guard has a baseline. On incremental syncs the fetched set is only the
+    changed delta, so carry the prior baseline forward rather than overwriting it
+    with a misleadingly small number."""
+    if voucher_sync_mode == "full" and isinstance(vouchers, list):
+        current_ids["last_voucher_count"] = len(vouchers)
+        return
+
+    cached_ids, _ = load_cached_ids()
+    prior = cached_ids.get("last_voucher_count")
+    if prior is not None:
+        current_ids["last_voucher_count"] = prior
 
 
 def validate_voucher_batch(
@@ -1694,6 +1801,31 @@ def main() -> int:
                     log_section_metric(section_name, section_metrics[section_name])
                 vouchers = None
 
+        # WIPE GUARD: a full sync carrying far fewer vouchers than the last
+        # known-good full sync would tell the cloud to delete the rest. Refuse it
+        # at the source (skip the voucher family) so masters/stock still sync and
+        # no cloud data is deleted; the next sync retries once Tally recovers.
+        if (
+            sync_plan.get("need_vouchers")
+            and not voucher_family_skipped
+            and isinstance(vouchers, list)
+            and sync_plan.get("voucher_sync_mode", "full") == "full"
+        ):
+            wipe_guard_reason = evaluate_voucher_wipe_guard(len(vouchers))
+            if wipe_guard_reason:
+                voucher_family_skipped = True
+                warnings.append(wipe_guard_reason)
+                print(f"[TallyBridge] {wipe_guard_reason}")
+                section_sources["vouchers"] = "skipped_voucher_wipe_guard"
+                section_metrics["vouchers"] = build_skipped_section_metric(wipe_guard_reason)
+                log_section_metric("vouchers", section_metrics["vouchers"])
+                for section_name in ("outstanding", "profit_loss", "balance_sheet", "trial_balance"):
+                    section_sources[section_name] = "skipped_voucher_wipe_guard"
+                    section_metrics[section_name] = build_skipped_section_metric("skipped_voucher_wipe_guard")
+                    log_section_metric(section_name, section_metrics[section_name])
+                vouchers = None
+                record_updates.pop("vouchers", None)
+
         if sync_plan.get("need_stock"):
             pace_tally()
             stock_started_at = time.perf_counter()
@@ -1903,6 +2035,7 @@ def main() -> int:
         print(f"[Metrics] Upload stats: {upload_stats}")
 
         if current_ids and not voucher_family_skipped:
+            update_voucher_count_baseline(current_ids, vouchers, effective_voucher_sync_mode)
             if save_cached_ids(current_ids):
                 print("[TallyBridge] Cached alter IDs for next change detection.")
             else:

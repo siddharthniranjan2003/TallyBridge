@@ -492,6 +492,83 @@ def _build_direct_voucher_payloads(
     return direct_payloads
 
 
+def _resolve_company_id_readonly(rest: str, headers: dict) -> str | None:
+    """Look up the company's Supabase id by GUID then name, without inserting or
+    patching anything (unlike _resolve_direct_company_id, which is write-capable)."""
+    timeout = min(get_backend_timeout_seconds(), 60)
+    guid = TALLY_COMPANY_GUID or None
+    name = TALLY_COMPANY or None
+
+    if guid:
+        rows = requests.get(
+            f"{rest}/companies",
+            headers=headers,
+            params={"guid": f"eq.{guid}", "select": "id"},
+            timeout=timeout,
+        )
+        rows.raise_for_status()
+        data = rows.json()
+        if data:
+            return data[0]["id"]
+
+    if name:
+        rows = requests.get(
+            f"{rest}/companies",
+            headers=headers,
+            params={"name": f"eq.{name}", "select": "id", "limit": "1"},
+            timeout=timeout,
+        )
+        rows.raise_for_status()
+        data = rows.json()
+        if data:
+            return data[0]["id"]
+
+    return None
+
+
+def fetch_remote_voucher_count() -> tuple[int | None, str]:
+    """Best-effort count of the company's vouchers already in the cloud, via the
+    PostgREST (direct) transport. This is exactly the row set a full-sync
+    reconciliation would delete, so it seeds the client wipe-guard baseline on
+    cold start — letting the very first full sync after a Tally crash be refused
+    before it can wipe anything. Returns (count, "ok") or (None, reason)."""
+    rest = _postgrest_base()
+    if not rest:
+        return None, "not_configured"
+    if not SYNC_INGEST_KEY:
+        return None, "not_configured"
+
+    headers = _postgrest_headers()
+    timeout = min(get_backend_timeout_seconds(), 60)
+    try:
+        company_id = _resolve_company_id_readonly(rest, headers)
+        if not company_id:
+            return None, "company_not_found"
+
+        # Prefer: count=exact + a 0-0 range returns the total in Content-Range
+        # ("0-0/<total>") without transferring every row.
+        count_headers = {**headers, "Prefer": "count=exact", "Range": "0-0"}
+        response = requests.get(
+            f"{rest}/vouchers",
+            headers=count_headers,
+            params={"company_id": f"eq.{company_id}", "select": "id"},
+            timeout=timeout,
+        )
+        if not response.ok:
+            return None, f"http_{response.status_code}"
+
+        content_range = response.headers.get("Content-Range", "")
+        if "/" in content_range:
+            total = content_range.rsplit("/", 1)[1].strip()
+            if total.isdigit():
+                return int(total), "ok"
+        return None, "no_count"
+    except requests.exceptions.RequestException as error:
+        return None, f"error:{error}"
+    except Exception as error:
+        return None, f"error:{error}"
+
+
 def fetch_remote_alter_ids() -> tuple[dict | None, str]:
     if not CONTROL_PLANE_URL:
         return None, "backend_unconfigured"
