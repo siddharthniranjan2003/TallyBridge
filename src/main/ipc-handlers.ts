@@ -796,6 +796,11 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
     };
   });
   ipcMain.handle("get-tally-companies", async () => {
+    // Don't fire a Tally read while a sync/push worker owns the single-threaded
+    // gateway — defer so we don't add a competing request (c0000005 risk).
+    if (tallyGate.isBusy()) {
+      return { success: false, companies: [], error: "TallyBridge is busy with Tally — try again in a moment." };
+    }
     try {
       const tallyUrl = store.get("tallyUrl");
       const companies = await fetchTallyCompanies(tallyUrl);
@@ -825,6 +830,9 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
   });
 
   ipcMain.handle("get-tally-company-date-ranges", async () => {
+    if (tallyGate.isBusy()) {
+      return { success: false, companies: [], error: "TallyBridge is busy with Tally — try again in a moment." };
+    }
     try {
       const tallyUrl = store.get("tallyUrl");
       const companies = await fetchTallyCompanyDateRanges(tallyUrl);
