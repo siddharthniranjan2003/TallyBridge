@@ -22,6 +22,20 @@ win:
   target:
     - target: nsis
       arch: [x64]
+  # CODE SIGNING (required for production — see review finding pkg-01).
+  # An UNSIGNED installer trips Windows Defender SmartScreen ("Unknown
+  # publisher"), which blocks most non-technical users at first install and
+  # leaves auto-updates unverifiable. To sign, provide an OV/EV Authenticode
+  # certificate at BUILD time via either:
+  #   1) Environment variables (no file change needed — electron-builder reads
+  #      them automatically):
+  #         CSC_LINK=path-or-base64-to-cert.pfx
+  #         CSC_KEY_PASSWORD=the-cert-password
+  #   2) Or uncomment and point these at the cert:
+  # certificateFile: build/codesign.pfx
+  # certificatePassword: ${env.CSC_KEY_PASSWORD}
+  # Azure Trusted Signing is also supported via signtoolOptions.
+  verifyUpdateCodeSignature: false  # set true once signing is in place
 
 nsis:
   oneClick: false

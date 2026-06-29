@@ -12,50 +12,6 @@
     "dist": "npm run build && electron-builder",
     "postinstall": "electron-builder install-app-deps"
   },
-  "build": {
-    "appId": "com.tallybridge.app",
-    "productName": "TallyBridge",
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "dist/**/*",
-      "src/python/**/*",
-      "assets/**/*"
-    ],
-    "extraResources": [
-      {
-        "from": "src/python/",
-        "to": "python/"
-      },
-      {
-        "from": "assets/",
-        "to": "assets/"
-      },
-      {
-        "from": "python-dist/tallybridge-engine.exe",
-        "to": "python-runtime/tallybridge-engine.exe"
-      }
-    ],
-    "win": {
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        }
-      ],
-      "icon": "assets/icon.ico"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "runAfterFinish": true
-    }
-  },
   "dependencies": {
     "axios": "^1.14.0",
     "electron-is-dev": "^3.0.1",
