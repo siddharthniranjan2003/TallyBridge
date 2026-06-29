@@ -2147,6 +2147,7 @@ def main() -> int:
             pace_tally()
             outstanding_started_at = time.perf_counter()
             print("[Tally] Fetching outstanding...")
+            outstanding = None
             try:
                 outstanding = (
                     fetch_structured_section("outstanding_receivables")
@@ -2158,24 +2159,35 @@ def main() -> int:
                     f"[Tally] Structured outstanding fetch failed ({structured_error}) - "
                     "falling back to legacy parser"
                 )
-                outstanding = (
-                    parse_outstanding(get_outstanding_receivables(), "receivable")
-                    + parse_outstanding(get_outstanding_payables(), "payable")
+                try:
+                    outstanding = (
+                        parse_outstanding(get_outstanding_receivables(), "receivable")
+                        + parse_outstanding(get_outstanding_payables(), "payable")
+                    )
+                except Exception as legacy_error:
+                    outstanding = None
+                    warning = f"Outstanding report skipped (structured and legacy fetch both failed): {legacy_error}"
+                    warnings.append(warning)
+                    print(f"[TallyBridge] {warning}")
+                    section_sources["outstanding"] = "skipped_report_error"
+                    section_metrics["outstanding"] = build_skipped_section_metric(str(legacy_error))
+                    log_section_metric("outstanding", section_metrics["outstanding"])
+            if outstanding is not None:
+                section_sources["outstanding"] = "xml"
+                record_updates["outstanding"] = len(outstanding)
+                section_metrics["outstanding"] = build_section_metric(
+                    outstanding,
+                    outstanding_started_at,
+                    source=section_sources.get("outstanding"),
                 )
-            section_sources["outstanding"] = "xml"
-            record_updates["outstanding"] = len(outstanding)
-            section_metrics["outstanding"] = build_section_metric(
-                outstanding,
-                outstanding_started_at,
-                source=section_sources.get("outstanding"),
-            )
-            log_section_metric("outstanding", section_metrics["outstanding"])
-            print(f"[Tally] Got {len(outstanding)} outstanding entries")
+                log_section_metric("outstanding", section_metrics["outstanding"])
+                print(f"[Tally] Got {len(outstanding)} outstanding entries")
 
         if sync_plan.get("need_reports") and not voucher_family_skipped:
             pace_tally()
             profit_loss_started_at = time.perf_counter()
             print("[Tally] Fetching Profit & Loss...")
+            profit_loss = None
             try:
                 profit_loss = fetch_structured_section(
                     "profit_loss",
@@ -2189,20 +2201,33 @@ def main() -> int:
                     f"[Tally] Structured Profit & Loss fetch failed ({structured_error}) - "
                     "falling back to legacy parser"
                 )
-                profit_loss = parse_profit_and_loss(get_profit_and_loss(from_date, to_date))
-            section_sources["profit_loss"] = "xml"
-            record_updates["profit_loss"] = len(profit_loss)
-            section_metrics["profit_loss"] = build_section_metric(
-                profit_loss,
-                profit_loss_started_at,
-                source=section_sources.get("profit_loss"),
-            )
-            log_section_metric("profit_loss", section_metrics["profit_loss"])
-            print(f"[Tally] Got {len(profit_loss)} P&L line items")
+                try:
+                    profit_loss = parse_profit_and_loss(get_profit_and_loss(from_date, to_date))
+                except Exception as legacy_error:
+                    # Don't let one failed report abort the whole sync (discarding
+                    # already-fetched masters + vouchers). Skip it with a warning.
+                    profit_loss = None
+                    warning = f"Profit & Loss report skipped (structured and legacy fetch both failed): {legacy_error}"
+                    warnings.append(warning)
+                    print(f"[TallyBridge] {warning}")
+                    section_sources["profit_loss"] = "skipped_report_error"
+                    section_metrics["profit_loss"] = build_skipped_section_metric(str(legacy_error))
+                    log_section_metric("profit_loss", section_metrics["profit_loss"])
+            if profit_loss is not None:
+                section_sources["profit_loss"] = "xml"
+                record_updates["profit_loss"] = len(profit_loss)
+                section_metrics["profit_loss"] = build_section_metric(
+                    profit_loss,
+                    profit_loss_started_at,
+                    source=section_sources.get("profit_loss"),
+                )
+                log_section_metric("profit_loss", section_metrics["profit_loss"])
+                print(f"[Tally] Got {len(profit_loss)} P&L line items")
 
             pace_tally()
             balance_sheet_started_at = time.perf_counter()
             print("[Tally] Fetching Balance Sheet...")
+            balance_sheet = None
             try:
                 balance_sheet = fetch_structured_section(
                     "balance_sheet",
@@ -2216,20 +2241,31 @@ def main() -> int:
                     f"[Tally] Structured Balance Sheet fetch failed ({structured_error}) - "
                     "falling back to legacy parser"
                 )
-                balance_sheet = parse_balance_sheet(get_balance_sheet(from_date, to_date))
-            section_sources["balance_sheet"] = "xml"
-            record_updates["balance_sheet"] = len(balance_sheet)
-            section_metrics["balance_sheet"] = build_section_metric(
-                balance_sheet,
-                balance_sheet_started_at,
-                source=section_sources.get("balance_sheet"),
-            )
-            log_section_metric("balance_sheet", section_metrics["balance_sheet"])
-            print(f"[Tally] Got {len(balance_sheet)} Balance Sheet items")
+                try:
+                    balance_sheet = parse_balance_sheet(get_balance_sheet(from_date, to_date))
+                except Exception as legacy_error:
+                    balance_sheet = None
+                    warning = f"Balance Sheet report skipped (structured and legacy fetch both failed): {legacy_error}"
+                    warnings.append(warning)
+                    print(f"[TallyBridge] {warning}")
+                    section_sources["balance_sheet"] = "skipped_report_error"
+                    section_metrics["balance_sheet"] = build_skipped_section_metric(str(legacy_error))
+                    log_section_metric("balance_sheet", section_metrics["balance_sheet"])
+            if balance_sheet is not None:
+                section_sources["balance_sheet"] = "xml"
+                record_updates["balance_sheet"] = len(balance_sheet)
+                section_metrics["balance_sheet"] = build_section_metric(
+                    balance_sheet,
+                    balance_sheet_started_at,
+                    source=section_sources.get("balance_sheet"),
+                )
+                log_section_metric("balance_sheet", section_metrics["balance_sheet"])
+                print(f"[Tally] Got {len(balance_sheet)} Balance Sheet items")
 
             pace_tally()
             trial_balance_started_at = time.perf_counter()
             print("[Tally] Fetching Trial Balance...")
+            trial_balance = None
             try:
                 trial_balance = fetch_structured_section(
                     "trial_balance",
@@ -2243,16 +2279,26 @@ def main() -> int:
                     f"[Tally] Structured Trial Balance fetch failed ({structured_error}) - "
                     "falling back to legacy parser"
                 )
-                trial_balance = parse_trial_balance(get_trial_balance(from_date, to_date))
-            section_sources["trial_balance"] = "xml"
-            record_updates["trial_balance"] = len(trial_balance)
-            section_metrics["trial_balance"] = build_section_metric(
-                trial_balance,
-                trial_balance_started_at,
-                source=section_sources.get("trial_balance"),
-            )
-            log_section_metric("trial_balance", section_metrics["trial_balance"])
-            print(f"[Tally] Got {len(trial_balance)} Trial Balance items")
+                try:
+                    trial_balance = parse_trial_balance(get_trial_balance(from_date, to_date))
+                except Exception as legacy_error:
+                    trial_balance = None
+                    warning = f"Trial Balance report skipped (structured and legacy fetch both failed): {legacy_error}"
+                    warnings.append(warning)
+                    print(f"[TallyBridge] {warning}")
+                    section_sources["trial_balance"] = "skipped_report_error"
+                    section_metrics["trial_balance"] = build_skipped_section_metric(str(legacy_error))
+                    log_section_metric("trial_balance", section_metrics["trial_balance"])
+            if trial_balance is not None:
+                section_sources["trial_balance"] = "xml"
+                record_updates["trial_balance"] = len(trial_balance)
+                section_metrics["trial_balance"] = build_section_metric(
+                    trial_balance,
+                    trial_balance_started_at,
+                    source=section_sources.get("trial_balance"),
+                )
+                log_section_metric("trial_balance", section_metrics["trial_balance"])
+                print(f"[Tally] Got {len(trial_balance)} Trial Balance items")
 
         print("[Ingest] Preparing sync payload...")
         effective_voucher_sync_mode = (
