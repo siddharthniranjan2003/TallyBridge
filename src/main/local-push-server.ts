@@ -305,7 +305,7 @@ export class LocalPushServer {
         }
       };
 
-      const proc = spawn(pythonCommand.command, pythonCommand.args, { env });
+      const proc = spawn(pythonCommand.command, pythonCommand.args, { env, windowsHide: true });
       this.activeChildren.add(proc);
 
       let settled = false;

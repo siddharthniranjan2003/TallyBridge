@@ -213,7 +213,7 @@ export class PushQueuePoller {
         }
       };
 
-      const proc = spawn(pythonCommand.command, pythonCommand.args, { env });
+      const proc = spawn(pythonCommand.command, pythonCommand.args, { env, windowsHide: true });
       this.activeChildren.add(proc);
 
       // Watchdog: terminate a push worker that runs too long (e.g. Tally is

@@ -580,8 +580,27 @@ export function setupIpcHandlers(engine: SyncEngine, window: BrowserWindow) {
       syncIngestKey: s.syncIngestKey,
     });
 
-    store.set("tallyUrl", s.tallyUrl);
-    store.set("syncIntervalMinutes", Number(s.syncIntervalMinutes));
+    // Validate the sync interval: a NaN / 0 / negative value would schedule
+    // back-to-back full syncs that hammer single-threaded TallyPrime. Keep the
+    // previous value if invalid; floor at 5 minutes.
+    const rawInterval = Number(s.syncIntervalMinutes);
+    const syncIntervalMinutes =
+      Number.isFinite(rawInterval) && rawInterval >= 5
+        ? Math.floor(rawInterval)
+        : store.get("syncIntervalMinutes", 360);
+
+    // Normalize the Tally URL: trim, default to the standard endpoint if blank,
+    // and ensure a scheme so URL parsing + port detection work.
+    let tallyUrl = typeof s.tallyUrl === "string" ? s.tallyUrl.trim() : "";
+    const lowerUrl = tallyUrl.toLowerCase();
+    if (!tallyUrl) {
+      tallyUrl = "http://localhost:9000";
+    } else if (!lowerUrl.startsWith("http://") && !lowerUrl.startsWith("https://")) {
+      tallyUrl = `http://${tallyUrl}`;
+    }
+
+    store.set("tallyUrl", tallyUrl);
+    store.set("syncIntervalMinutes", syncIntervalMinutes);
     store.set("backendUrl", controlPlaneUrl);
     store.set("apiKey", controlPlaneApiKey);
     store.set("controlPlaneUrl", controlPlaneUrl);

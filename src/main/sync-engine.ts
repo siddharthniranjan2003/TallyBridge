@@ -199,7 +199,11 @@ export class SyncEngine {
 
   private scheduleNext(delayMs?: number) {
     if (this.paused) return;
-    const minutes = store.get("syncIntervalMinutes", 360);
+    // Defense-in-depth floor: never schedule a sub-1-minute heartbeat even if a
+    // bad/zero value reached the store, so a misconfig can't spin back-to-back
+    // full syncs against single-threaded Tally. (Settings validation enforces >=5.)
+    const rawMinutes = Number(store.get("syncIntervalMinutes", 360));
+    const minutes = Number.isFinite(rawMinutes) && rawMinutes >= 1 ? rawMinutes : 360;
     if (this.timer) {
       clearTimeout(this.timer);
     }
@@ -561,7 +565,7 @@ export class SyncEngine {
 
       let proc: ReturnType<typeof spawn> | null = null;
       try {
-        proc = spawn(pythonBin, args, { env });
+        proc = spawn(pythonBin, args, { env, windowsHide: true });
         this.currentProc = proc;
         this.activeChildRunId = runId;
       } catch (error) {
