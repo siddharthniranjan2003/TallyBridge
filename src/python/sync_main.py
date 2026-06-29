@@ -239,8 +239,19 @@ def save_cached_ids(ids: dict) -> bool:
     try:
         cache = {}
         if os.path.exists(CACHE_FILE):
-            with open(CACHE_FILE, "r", encoding="utf-8") as handle:
-                cache = json.load(handle)
+            try:
+                with open(CACHE_FILE, "r", encoding="utf-8") as handle:
+                    cache = json.load(handle)
+                if not isinstance(cache, dict):
+                    cache = {}
+            except (json.JSONDecodeError, ValueError, OSError) as read_error:
+                # SELF-HEAL: a corrupt/unreadable shared cache must NOT make the
+                # save fail — that would leave the corruption in place and force a
+                # full whole-year re-sync of every company on every run, forever.
+                # Start fresh and overwrite it atomically below (each company
+                # re-establishes its baseline on its next sync).
+                print(f"[Cache] Existing cache unreadable ({read_error}); resetting it.")
+                cache = {}
         cache[COMPANY_CACHE_KEY] = ids
         temp_path = f"{CACHE_FILE}.{os.getpid()}.tmp"
         last_error = None
