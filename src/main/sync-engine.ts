@@ -485,6 +485,7 @@ export class SyncEngine {
           let records = this.normalizeRecordCounts(existing?.lastSyncRecords);
           let status = "success";
           let syncMeta: any = undefined;
+          let warnings: string[] = [];
           try {
             // Find the last line that starts with "{" (tally/python logs might have trailing empty lines or junk)
             const validJsonLine = [...outputLines].reverse().find(line => line.trim().startsWith("{"));
@@ -493,6 +494,9 @@ export class SyncEngine {
               records = this.mergeRecordCounts(records, parsed.records);
               status = parsed.status || "success";
               syncMeta = parsed.sync_meta;
+              if (Array.isArray(parsed.warnings)) {
+                warnings = parsed.warnings.filter((w: unknown) => typeof w === "string" && w.trim());
+              }
             }
           } catch (e) {
             console.error("JSON parse error from python output:", e);
@@ -503,11 +507,24 @@ export class SyncEngine {
             records = this.normalizeRecordCounts(existing?.lastSyncRecords || records);
           }
 
+          // A run can exit 0 / status "success" yet carry warnings (e.g. a wipe
+          // guard skipped a section to protect cloud data). Surface those so the
+          // card doesn't show an unqualified green success and the operator knows
+          // the cloud isn't fully current.
+          const warningText = warnings.length ? warnings.join(" | ") : undefined;
+          if (warningText) {
+            this.emit("sync-log", {
+              company: companyName,
+              line: `[TallyBridge] Sync completed WITH WARNINGS: ${warningText}`,
+            });
+          }
+
           const update: Partial<Company> = {
             lastSyncStatus: "success",
             lastSyncedAt: new Date().toISOString(),
             lastSyncRecords: records,
             lastSyncError: undefined,
+            lastSyncWarning: warningText,
           };
           if (status === "success" && shouldUseManualBackfill && backfillSignature) {
             update.lastCompletedBackfillSignature = backfillSignature;

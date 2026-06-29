@@ -12,6 +12,10 @@ export interface Company {
   lastSyncStatus?: "success" | "error" | "syncing" | "idle";
   lastSyncRecords?: SyncRecordCounts;
   lastSyncError?: string;
+  // Non-fatal warnings from the last otherwise-successful run (e.g. a wipe guard
+  // skipped a section). Surfaced in the UI so a protective skip isn't mistaken
+  // for a clean, fully-current sync.
+  lastSyncWarning?: string;
   lastCompletedBackfillSignature?: string;
 }
 

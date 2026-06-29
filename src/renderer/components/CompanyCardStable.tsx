@@ -102,6 +102,11 @@ export default function CompanyCardStable({ company, onRemove, showIdentityHint 
           {status === "idle" && (
             <span>Added {formatTime(company.addedAt)} | Click Sync All to start</span>
           )}
+          {company.lastSyncWarning && status !== "syncing" && status !== "error" && (
+            <div style={{ color: "#f59e0b", marginTop: 4 }}>
+              ⚠ {company.lastSyncWarning}
+            </div>
+          )}
         </div>
       </div>
 
