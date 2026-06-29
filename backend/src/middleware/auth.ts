@@ -1,5 +1,6 @@
 import { timingSafeEqual } from 'crypto';
 import type { Request, Response, NextFunction } from 'express';
+import * as Sentry from '@sentry/node';
 import { firebaseAuth } from '../db/firebase.js';
 
 export async function requireApiKey(
@@ -14,6 +15,8 @@ export async function requireApiKey(
     try {
       const decoded = await firebaseAuth.verifyIdToken(token);
       (req as Request & { firebaseUser: typeof decoded }).firebaseUser = decoded;
+      // Attribute any error captured during this request to the calling user.
+      Sentry.getIsolationScope().setUser({ id: decoded.uid });
       next();
       return;
     } catch {
