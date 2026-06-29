@@ -1761,6 +1761,43 @@ def main() -> int:
                 print(f"[ODBC] Probe status: {probe.get('state')} ({probe.get('message') or 'no DSN detected'})")
 
         company_info, default_from_date, default_to_date = fetch_company_info_with_fallback()
+
+        # PRE-FLIGHT (no company loaded): if TallyPrime returned no company info at
+        # all, the configured company is almost certainly not open in Tally (or
+        # Tally is showing a modal/license dialog). Stop here instead of marching
+        # on to the heavier groups/ledgers/voucher collection requests — that
+        # wastes work, can destabilize TallyPrime, and would only hit the wipe
+        # guards anyway. Skip cleanly with a warning (surfaced as an amber note in
+        # the UI) so the user knows to open the company; the next sync retries.
+        # A loaded-but-empty company still returns its name/books dates, so this
+        # only fires when Tally genuinely isn't serving the company.
+        if not company_info:
+            message = (
+                "No company appears to be loaded in TallyPrime (or it is showing a "
+                "dialog). Open the company in TallyPrime and re-sync. Sync skipped."
+            )
+            print(f"[TallyBridge] {message}")
+            print(json.dumps({
+                "status": "skipped",
+                "reason": "no_company_loaded",
+                "records": {},
+                "warnings": [message],
+                "sync_meta": {
+                    "change_detection_mode": SYNC_TRIGGER,
+                    "manual_backfill_pending": MANUAL_BACKFILL_PENDING,
+                    "observability": {
+                        "transport": {
+                            "control_plane_url": CONTROL_PLANE_URL,
+                            "ingest_mode": SYNC_INGEST_MODE,
+                            "ingest_url": SYNC_INGEST_URL if SYNC_INGEST_MODE in {"hybrid", "direct"} else "",
+                            "contract_version": SYNC_CONTRACT_VERSION,
+                        },
+                        "total_sync_ms": round((time.perf_counter() - total_sync_started_at) * 1000, 2),
+                    },
+                },
+            }))
+            return 0
+
         from_date, to_date, date_range_source = resolve_effective_date_range(
             default_from_date,
             default_to_date,
