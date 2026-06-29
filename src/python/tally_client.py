@@ -148,6 +148,30 @@ def _clean_tally_error(raw: str) -> str:
 
 def _check_response(xml_text: str) -> str:
     """Check Tally response STATUS tag. Raises on failure (STATUS=0)."""
+    # Defense-in-depth (review finding tally-dep-02): a busy/locked TallyPrime,
+    # one with no company loaded, or one showing a license/activation dialog
+    # answers port 9000 with HTTP 200 whose body is NOT XML data — an HTML
+    # license/info page or an empty body. These contain neither STATUS=0 nor
+    # LINEERROR, so they used to pass straight through to the parsers, which
+    # returned 0 rows that looked like a genuinely empty company (a path to
+    # wiping cloud data). Reject the clearly-non-data shapes loudly instead so
+    # the section is skipped, not parsed to []. (Conservative: only the
+    # unambiguous HTML/empty cases — a near-empty <ENVELOPE/> is left to the
+    # master/voucher wipe guards.)
+    stripped = (xml_text or "").strip()
+    if not stripped:
+        raise RuntimeError(
+            "TallyPrime returned an empty response. Make sure a company is loaded "
+            "and TallyPrime is not showing a dialog, then retry the sync."
+        )
+    head = stripped[:512].lower()
+    if head.startswith("<!doctype html") or head.startswith("<html") or "<html>" in head:
+        raise RuntimeError(
+            "TallyPrime returned a web/license page instead of XML data. Open the "
+            "company in TallyPrime and make sure no activation/license dialog is open, "
+            "then retry the sync."
+        )
+
     # Look for <STATUS>0</STATUS> indicating failure
     status_match = re.search(r'<STATUS>\s*(\d+)\s*</STATUS>', xml_text, re.IGNORECASE)
     if status_match and status_match.group(1) == "0":
