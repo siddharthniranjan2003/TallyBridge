@@ -481,6 +481,14 @@ def build_sync_plan(current_ids: dict, fy_from: str, fy_to: str, force_full_sync
     voucher_from_date = fy_from
     voucher_sync_mode = "none"
     voucher_min_alter_id = 0
+    # Whether the cloud should run a date-scoped voucher reconciliation DELETE for
+    # this plan. True for full + date-window incremental (both send EVERY voucher
+    # in their range, so deleting in-range vouchers absent from the payload is
+    # correct). False for AlterID-incremental, which sends only the alter-id delta
+    # across the whole financial year — a date-scoped delete there would wipe every
+    # unchanged voucher (tb_guard then blocks it -> stuck sync loop). See
+    # resolve_voucher_reconcile_dates().
+    voucher_reconcile = True
 
     if voucher_changed:
         voucher_sync_mode = "full"
@@ -503,6 +511,10 @@ def build_sync_plan(current_ids: dict, fy_from: str, fy_to: str, force_full_sync
             voucher_from_date = fy_from
             voucher_sync_mode = "incremental"
             voucher_min_alter_id = cached_vch_alter
+            # Only the alter-id delta is fetched (not the full year), so the cloud
+            # must NOT reconcile-delete over the year — it would wipe unchanged
+            # vouchers. Deletions are reconciled by the periodic full sync instead.
+            voucher_reconcile = False
         elif (
             ENABLE_INCREMENTAL_VOUCHER_SYNC
             and fy_from_date
@@ -528,8 +540,36 @@ def build_sync_plan(current_ids: dict, fy_from: str, fy_to: str, force_full_sync
         "voucher_to_date": fy_to,
         "voucher_sync_mode": voucher_sync_mode,
         "voucher_min_alter_id": voucher_min_alter_id,
+        "voucher_reconcile": voucher_reconcile,
         "reason": "changes_detected",
     }
+
+
+def resolve_voucher_reconcile_dates(sync_plan: dict) -> tuple[str | None, str | None]:
+    """Return the (from_date, to_date) range the cloud should use for the voucher
+    reconciliation DELETE, or (None, None) to skip reconciliation entirely.
+
+    All three ingest transports (direct RPC tb_ingest_vouchers, the hybrid edge
+    function which calls the same RPC, and the render backend route) skip the
+    date-scoped stale-voucher delete when either date is null. An AlterID-
+    incremental payload carries only the alter-id delta but spans the whole
+    financial year, so it MUST send no range — otherwise every unchanged voucher
+    in the year is treated as stale and deleted (a near-full wipe that tb_guard
+    blocks, leaving the sync stuck in a retry loop).
+
+    Belt-and-suspenders: reconcile ONLY if build_sync_plan flagged it
+    (voucher_reconcile is not False) AND the payload is not an alter-id delta
+    (voucher_min_alter_id <= 0). Either signal alone is enough to suppress the
+    range, so an alter-id delta can never be paired with a reconciliation range
+    even if one of the signals regresses."""
+    try:
+        min_alter_id = int(str(sync_plan.get("voucher_min_alter_id", 0)).strip() or "0")
+    except (TypeError, ValueError):
+        min_alter_id = 0
+    reconcile = bool(sync_plan.get("voucher_reconcile", True)) and min_alter_id <= 0
+    if not reconcile:
+        return None, None
+    return sync_plan.get("voucher_from_date"), sync_plan.get("voucher_to_date")
 
 
 def get_fy_dates_fallback() -> tuple[str, str]:
@@ -2420,6 +2460,22 @@ def main() -> int:
         effective_voucher_changed = False if voucher_family_skipped else sync_plan.get(
             "voucher_changed", True
         )
+        # Reconciliation range for the cloud's stale-voucher DELETE. (None, None)
+        # for an AlterID-incremental delta payload so the cloud upserts the changed
+        # vouchers WITHOUT deleting unchanged ones. The voucher fetch already ran
+        # above (reading sync_plan directly), so this only changes what the cloud
+        # reconciles — never what was fetched.
+        voucher_reconcile_from, voucher_reconcile_to = resolve_voucher_reconcile_dates(sync_plan)
+        if (
+            not voucher_family_skipped
+            and sync_plan.get("voucher_from_date")
+            and voucher_reconcile_from is None
+        ):
+            print(
+                "[Ingest] AlterID-incremental delta payload: suppressing the voucher "
+                "reconciliation date range so the cloud won't delete unchanged vouchers "
+                "(deletions reconcile on the next full sync)."
+            )
         # When a master section was guard-skipped, roll the master change-markers
         # in the OUTGOING payload back to their cached values too — otherwise the
         # cloud records masters as synced to the new alt_mst_id while no master
@@ -2444,8 +2500,9 @@ def main() -> int:
             "trial_balance": trial_balance,
             "sync_meta": {
                 "voucher_sync_mode": effective_voucher_sync_mode,
-                "voucher_from_date": sync_plan.get("voucher_from_date"),
-                "voucher_to_date": sync_plan.get("voucher_to_date"),
+                "voucher_from_date": voucher_reconcile_from,
+                "voucher_to_date": voucher_reconcile_to,
+                "voucher_min_alter_id": sync_plan.get("voucher_min_alter_id", 0),
                 "effective_from_date": from_date,
                 "effective_to_date": to_date,
                 "date_range_source": date_range_source,
