@@ -53,10 +53,13 @@ These are read by the engine via the app's environment, so a Windows **System En
 
 | Env var | Default | Effect |
 |---------|---------|--------|
-| `TB_DISABLE_MASTER_WIPE_GUARD` | off | `1` = stop refusing empty master pushes (if the guard ever false-trips) |
+| `TB_DISABLE_MASTER_WIPE_GUARD` | off | `1` = stop refusing empty master pushes (if the guard ever false-trips). **Also disables the financial-report wipe guard** (P&L/BS/TB/outstanding share this switch) |
 | `TB_DISABLE_VOUCHER_WIPE_GUARD` | off | `1` = stop refusing empty voucher pushes |
-| `TB_MASTER_WIPE_GUARD_MIN_RATIO` / `TB_VOUCHER_WIPE_GUARD_MIN_RATIO` | `0.5` | how much shrink is allowed before the guard blocks |
-| `TB_MASTER_WIPE_GUARD_MIN_BASELINE` / `TB_VOUCHER_WIPE_GUARD_MIN_BASELINE` | `10` / `1000` | min rows before a section is policed (small companies aren't) |
+| `TB_MASTER_WIPE_GUARD_MIN_RATIO` / `TB_VOUCHER_WIPE_GUARD_MIN_RATIO` | `0.5` | how much shrink is allowed before the guard blocks (master ratio also governs reports) |
+| `TB_MASTER_WIPE_GUARD_MIN_BASELINE` / `TB_VOUCHER_WIPE_GUARD_MIN_BASELINE` | `10` / `1000` | min rows before a section is policed (small companies aren't; master baseline also governs reports) |
+| `TB_PIN_COMPANY_ALL_REQUESTS` | on | `0` = revert to old behaviour (don't pin SVCURRENTCOMPANY on Data/voucher exports) if a Tally build rejects it |
+| `TB_ODBC_READ_TIMEOUT_SECONDS` | `30` | cap on one ODBC helper response before it's torn down and XML is used (min 5) |
+| `TB_LOCAL_PUSH_PORT` | `3002` | move the local push server if 3002 is taken (it now retries 5× w/ backoff, no modal) |
 | `TB_PUSH_WORKER_TIMEOUT_MS` | `90000` | watchdog that kills a wedged push worker |
 | `TB_PUSH_ACK_TIMEOUT_SECONDS` | `8` | per-ack HTTP timeout |
 | `TB_PUSH_CYCLE_BUDGET_SECONDS` | `70` | stop a push batch before the watchdog |
@@ -89,11 +92,20 @@ Full reasoning is in each commit message and in `../tallybridge-rereview-report.
 
 ## 6. Known follow-ups (NOT done on this branch)
 
-- **Code signing** — needs an OV/EV Authenticode cert (`CSC_LINK`/`CSC_KEY_PASSWORD`). Until then the installer trips Windows SmartScreen. (Scaffolded in `electron-builder.yml`.)
-- **A10** render-mode voucher chunking (default `hybrid` already chunks, so lower urgency).
-- **Multi-company:** add `SVCURRENTCOMPANY` to voucher/report exports if more than one company is ever loaded at once.
-- **Transport resilience:** `cloud_pusher` could use a `requests.Session` + retry.
-- Full duplicate-push closure needs a backend atomic claim/lease + idempotency key (out of desktop scope).
+**Best done with the app RUNNABLE (risky to do blind, so left for the desktop env):**
+- **B-M10** — financial-year / timezone / clock date math (don't hard-clamp `books_to` to today; widen the FY fallback). Needs runtime + timezone testing.
+- **B-M11** — sleep/wake handling via Electron `powerMonitor` (re-arm timers / drop half-open sockets after resume).
+
+**Need backend coordination (out of desktop scope):**
+- **A10** render-mode voucher chunking — the default `hybrid` mode already chunks, so this only bites the legacy `render` path; chunking it needs the backend to accept partial voucher batches.
+- **Full duplicate-push closure** — the desktop side now acks per-job + has a cycle budget, but full idempotency needs a backend atomic claim/lease + a voucher idempotency key.
+
+**Excluded by request:**
+- **Code signing** — needs an OV/EV Authenticode cert (`CSC_LINK`/`CSC_KEY_PASSWORD`); until then the installer trips Windows SmartScreen. (Scaffolded in `electron-builder.yml`.)
+
+**Cosmetic backlog:** ~22 LOW findings (logging verbosity, minor leak edges, naming) — none are crash/data-loss risks.
+
+**Already done this round (was previously listed here):** multi-company `SVCURRENTCOMPANY` pinning (B-H4), `cloud_pusher` retry session (B-H10), no-company pre-flight, report wipe guard (B-M4), backfill retry bound (B-M16), key redaction (B-M6), and more — see §5 / git log.
 
 ---
 
