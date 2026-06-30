@@ -805,6 +805,72 @@ def hold_master_markers_for_retry(saved_ids: dict, cached_ids: dict) -> dict:
     return saved_ids
 
 
+# Report-section wipe guard. Mirrors the master wipe guard for the derived
+# financial reports (P&L, Balance Sheet, Trial Balance, outstanding). A degraded
+# TallyPrime can return an empty/near-empty report that is indistinguishable from
+# a genuinely zero-activity company; pushing it as the authoritative snapshot
+# wipes the cloud's financials. Unlike masters there is NO cloud cold-start
+# fallback here: a brand-new company legitimately has empty reports, so the very
+# first sync is allowed through and only an established baseline triggers the
+# guard. Reuses the master guard's kill-switch, min-baseline and ratio knobs.
+_REPORT_BASELINE_KEYS = {
+    "profit_loss": "last_profit_loss_count",
+    "balance_sheet": "last_balance_sheet_count",
+    "trial_balance": "last_trial_balance_count",
+    "outstanding": "last_outstanding_count",
+}
+
+
+def evaluate_report_wipe_guard(section_name: str, new_count: int) -> str | None:
+    """Return a human-readable reason to BLOCK pushing this financial report
+    (because doing so would wipe most of its cloud copy), or None to allow."""
+    if DISABLE_MASTER_WIPE_GUARD:
+        return None
+    cache_key = _REPORT_BASELINE_KEYS.get(section_name)
+    if not cache_key:
+        return None
+
+    cached_ids, _ = load_cached_ids()
+    try:
+        baseline = int(str(cached_ids.get(cache_key, 0)).strip() or "0")
+    except (TypeError, ValueError):
+        baseline = 0
+
+    if baseline < MASTER_WIPE_GUARD_MIN_BASELINE:
+        return None
+
+    threshold = max(1, int(baseline * MASTER_WIPE_GUARD_MIN_RATIO))
+    if new_count >= threshold:
+        return None
+
+    return (
+        f"Refusing to push {section_name}: TallyPrime returned {new_count} row(s) "
+        f"but the last known-good count is {baseline}. Pushing this would delete "
+        f"~{baseline - new_count} cloud row(s), below the "
+        f"{int(MASTER_WIPE_GUARD_MIN_RATIO * 100)}% safety floor. This usually means "
+        "TallyPrime is busy or no company is loaded — load the company in TallyPrime "
+        "and re-sync. To override intentionally, set TB_DISABLE_MASTER_WIPE_GUARD=1."
+    )
+
+
+def update_report_count_baseline(current_ids: dict, section_name: str, rows) -> None:
+    """Persist a report's row count into the alter-id cache so the next run's
+    report wipe guard has a baseline. When the report was not fetched/was skipped
+    this run (rows is None) carry the prior baseline forward rather than dropping
+    it (so a guard-skipped report keeps protecting the cloud next run)."""
+    cache_key = _REPORT_BASELINE_KEYS.get(section_name)
+    if not cache_key:
+        return
+    if isinstance(rows, list):
+        current_ids[cache_key] = len(rows)
+        return
+
+    cached_ids, _ = load_cached_ids()
+    prior = cached_ids.get(cache_key)
+    if prior is not None:
+        current_ids[cache_key] = prior
+
+
 def validate_voucher_batch(
     vouchers: list[dict],
     from_date: str,
@@ -2311,6 +2377,36 @@ def main() -> int:
                 log_section_metric("trial_balance", section_metrics["trial_balance"])
                 print(f"[Tally] Got {len(trial_balance)} Trial Balance items")
 
+        # Report wipe guard: refuse to push a financial report that collapsed far
+        # below its last known-good size (degraded TallyPrime), which would wipe
+        # the cloud's financials. Skip the push (leave the cloud's last good copy
+        # intact, as null) instead. Mirrors the master/voucher wipe guards.
+        for _report_name, _report_rows in (
+            ("profit_loss", profit_loss),
+            ("balance_sheet", balance_sheet),
+            ("trial_balance", trial_balance),
+            ("outstanding", outstanding),
+        ):
+            if not isinstance(_report_rows, list):
+                continue
+            _reason = evaluate_report_wipe_guard(_report_name, len(_report_rows))
+            if not _reason:
+                continue
+            warnings.append(_reason)
+            print(f"[TallyBridge] {_reason}")
+            section_sources[_report_name] = "skipped_report_wipe_guard"
+            section_metrics[_report_name] = build_skipped_section_metric(_reason)
+            log_section_metric(_report_name, section_metrics[_report_name])
+            record_updates.pop(_report_name, None)
+            if _report_name == "profit_loss":
+                profit_loss = None
+            elif _report_name == "balance_sheet":
+                balance_sheet = None
+            elif _report_name == "trial_balance":
+                trial_balance = None
+            elif _report_name == "outstanding":
+                outstanding = None
+
         print("[Ingest] Preparing sync payload...")
         effective_voucher_sync_mode = (
             "none" if voucher_family_skipped else sync_plan.get("voucher_sync_mode", "full")
@@ -2393,6 +2489,10 @@ def main() -> int:
             update_master_count_baseline(current_ids, "groups", groups)
             update_master_count_baseline(current_ids, "ledgers", ledgers)
             update_master_count_baseline(current_ids, "stock_items", stock)
+            update_report_count_baseline(current_ids, "profit_loss", profit_loss)
+            update_report_count_baseline(current_ids, "balance_sheet", balance_sheet)
+            update_report_count_baseline(current_ids, "trial_balance", trial_balance)
+            update_report_count_baseline(current_ids, "outstanding", outstanding)
             if save_cached_ids(current_ids):
                 print("[TallyBridge] Cached alter IDs for next change detection.")
             else:
@@ -2412,6 +2512,10 @@ def main() -> int:
             update_master_count_baseline(partial_ids, "groups", groups)
             update_master_count_baseline(partial_ids, "ledgers", ledgers)
             update_master_count_baseline(partial_ids, "stock_items", stock)
+            update_report_count_baseline(partial_ids, "profit_loss", profit_loss)
+            update_report_count_baseline(partial_ids, "balance_sheet", balance_sheet)
+            update_report_count_baseline(partial_ids, "trial_balance", trial_balance)
+            update_report_count_baseline(partial_ids, "outstanding", outstanding)
             if save_cached_ids(partial_ids):
                 print(
                     "[TallyBridge] Advanced voucher cache; held master markers so the "
