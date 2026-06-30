@@ -316,8 +316,11 @@ export class LocalPushServer {
       };
 
       // Mark the gateway busy for the worker's lifetime so the status-bar probe
-      // (and any other main-process Tally request) stays out of its way.
-      tallyGate.beginPythonWork();
+      // (and any other main-process Tally request) stays out of its way. Lease the
+      // slot for longer than the worker watchdog so a leaked slot self-heals
+      // (tally-gate) while a live worker never expires early.
+      const watchdogMs = resolvePushWorkerTimeoutMs();
+      tallyGate.beginPythonWork(watchdogMs + 60_000);
       let pythonWorkEnded = false;
       const endPythonWork = () => {
         if (!pythonWorkEnded) {
@@ -326,7 +329,17 @@ export class LocalPushServer {
         }
       };
 
-      const proc = spawn(pythonCommand.command, pythonCommand.args, { env, windowsHide: true });
+      let proc: ChildProcess;
+      try {
+        proc = spawn(pythonCommand.command, pythonCommand.args, { env, windowsHide: true });
+      } catch (error: any) {
+        // spawn() threw synchronously before the watchdog + handlers could wire up
+        // endPythonWork(). Release the gate slot (else every future sync defers
+        // forever) and reject so the push request fails cleanly.
+        endPythonWork();
+        reject(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
       this.activeChildren.add(proc);
 
       let settled = false;
@@ -355,7 +368,6 @@ export class LocalPushServer {
       // Watchdog: kill a worker stuck writing to a locked Tally so it can't pin
       // the process / tally gate forever, log it (so the kill is diagnosable on
       // an unattended box), and settle after a grace period if 'close' never fires.
-      const watchdogMs = resolvePushWorkerTimeoutMs();
       let watchdog: NodeJS.Timeout | null = setTimeout(() => {
         watchdog = null;
         this.log(

@@ -204,7 +204,10 @@ export class PushQueuePoller {
 
       // A push worker writes vouchers into Tally — mark the gateway busy so the
       // status-bar connectivity probe won't fire a competing request meanwhile.
-      tallyGate.beginPythonWork();
+      // Lease the slot for longer than the worker's watchdog so a leaked slot
+      // self-heals (tally-gate) while a live worker never expires early.
+      const watchdogMs = resolvePushWorkerTimeoutMs();
+      tallyGate.beginPythonWork(watchdogMs + 60_000);
       let pythonWorkEnded = false;
       const endPythonWork = () => {
         if (!pythonWorkEnded) {
@@ -213,14 +216,24 @@ export class PushQueuePoller {
         }
       };
 
-      const proc = spawn(pythonCommand.command, pythonCommand.args, { env, windowsHide: true });
+      let proc: ChildProcess;
+      try {
+        proc = spawn(pythonCommand.command, pythonCommand.args, { env, windowsHide: true });
+      } catch (error: any) {
+        // spawn() threw synchronously (bad args / OS limit) BEFORE the watchdog +
+        // handlers below could wire up endPythonWork(). Release the gate slot we
+        // just took — otherwise every future sync defers forever — then settle.
+        this.log(company.name, `[Push] Failed to spawn push worker: ${error?.message || error}`);
+        endPythonWork();
+        resolve();
+        return;
+      }
       this.activeChildren.add(proc);
 
       // Watchdog: terminate a push worker that runs too long (e.g. Tally is
       // locked behind a modal and the worker is stuck in its HTTP read) so it
       // can't pin the process or hold the tally gate forever.
       let settled = false;
-      const watchdogMs = resolvePushWorkerTimeoutMs();
       let watchdog: NodeJS.Timeout | null = setTimeout(() => {
         watchdog = null;
         this.log(
