@@ -563,6 +563,15 @@ export class SyncEngine {
             // Backfill completed — clear the failed-attempt counter.
             update.backfillAttemptCount = 0;
             update.backfillAttemptSignature = undefined;
+          } else if (status === "success" && company.backfillAttemptCount) {
+            // A non-backfill sync succeeded, so Tally is reachable — the earlier
+            // backfill failures were transient (Tally was down/busy), not a
+            // permanently-broken range. Clear the counter so the backfill gets a
+            // fresh set of attempts on the next manual/startup trigger instead of
+            // staying given-up forever. A genuinely-broken range simply re-fails
+            // (bounded again), so this can't reopen the re-arm storm.
+            update.backfillAttemptCount = 0;
+            update.backfillAttemptSignature = undefined;
           }
           updateCompanyStatus(companyId, update);
           if (syncMeta?.change_detection_mode === "heartbeat") {

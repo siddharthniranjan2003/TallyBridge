@@ -53,8 +53,9 @@ These are read by the engine via the app's environment, so a Windows **System En
 
 | Env var | Default | Effect |
 |---------|---------|--------|
-| `TB_DISABLE_MASTER_WIPE_GUARD` | off | `1` = stop refusing empty master pushes (if the guard ever false-trips). **Also disables the financial-report wipe guard** (P&L/BS/TB/outstanding share this switch) |
+| `TB_DISABLE_MASTER_WIPE_GUARD` | off | `1` = stop refusing empty master pushes (if the guard ever false-trips). Masters only — reports have their own switch below |
 | `TB_DISABLE_VOUCHER_WIPE_GUARD` | off | `1` = stop refusing empty voucher pushes |
+| `TB_DISABLE_REPORT_WIPE_GUARD` | off | `1` = stop refusing empty financial-report (P&L/BS/TB/outstanding) pushes — independent of the master switch |
 | `TB_MASTER_WIPE_GUARD_MIN_RATIO` / `TB_VOUCHER_WIPE_GUARD_MIN_RATIO` | `0.5` | how much shrink is allowed before the guard blocks (master ratio also governs reports) |
 | `TB_MASTER_WIPE_GUARD_MIN_BASELINE` / `TB_VOUCHER_WIPE_GUARD_MIN_BASELINE` | `10` / `1000` | min rows before a section is policed (small companies aren't; master baseline also governs reports) |
 | `TB_PIN_COMPANY_ALL_REQUESTS` | on | `0` = revert to old behaviour (don't pin SVCURRENTCOMPANY on Data/voucher exports) if a Tally build rejects it |

@@ -812,7 +812,13 @@ def hold_master_markers_for_retry(saved_ids: dict, cached_ids: dict) -> dict:
 # wipes the cloud's financials. Unlike masters there is NO cloud cold-start
 # fallback here: a brand-new company legitimately has empty reports, so the very
 # first sync is allowed through and only an established baseline triggers the
-# guard. Reuses the master guard's kill-switch, min-baseline and ratio knobs.
+# guard. Reuses the master guard's min-baseline and ratio knobs, but has its OWN
+# kill-switch so disabling the master guard (to intentionally rebuild masters)
+# does not silently drop financial-report protection too.
+DISABLE_REPORT_WIPE_GUARD = os.environ.get(
+    "TB_DISABLE_REPORT_WIPE_GUARD",
+    "",
+).strip().lower() in {"1", "true", "yes", "on"}
 _REPORT_BASELINE_KEYS = {
     "profit_loss": "last_profit_loss_count",
     "balance_sheet": "last_balance_sheet_count",
@@ -824,7 +830,7 @@ _REPORT_BASELINE_KEYS = {
 def evaluate_report_wipe_guard(section_name: str, new_count: int) -> str | None:
     """Return a human-readable reason to BLOCK pushing this financial report
     (because doing so would wipe most of its cloud copy), or None to allow."""
-    if DISABLE_MASTER_WIPE_GUARD:
+    if DISABLE_REPORT_WIPE_GUARD:
         return None
     cache_key = _REPORT_BASELINE_KEYS.get(section_name)
     if not cache_key:
@@ -849,7 +855,7 @@ def evaluate_report_wipe_guard(section_name: str, new_count: int) -> str | None:
         f"~{baseline - new_count} cloud row(s), below the "
         f"{int(MASTER_WIPE_GUARD_MIN_RATIO * 100)}% safety floor. This usually means "
         "TallyPrime is busy or no company is loaded — load the company in TallyPrime "
-        "and re-sync. To override intentionally, set TB_DISABLE_MASTER_WIPE_GUARD=1."
+        "and re-sync. To override intentionally, set TB_DISABLE_REPORT_WIPE_GUARD=1."
     )
 
 
