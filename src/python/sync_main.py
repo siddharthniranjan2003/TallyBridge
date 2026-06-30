@@ -157,6 +157,17 @@ try:
     VOUCHER_WINDOW_DAYS = max(0, int(os.environ.get("TB_VOUCHER_WINDOW_DAYS", "7") or "7"))
 except ValueError:
     VOUCHER_WINDOW_DAYS = 7
+try:
+    # Cap how deep a timed-out voucher window may recursively bisect before the
+    # fetch fails fast. The natural floor is 1-day windows, but on a genuinely
+    # hung/unresponsive Tally that still means a cascade of sub-window requests
+    # that keep hammering it. After this many splits, fail the fetch (it retries
+    # next sync) instead of grinding. Default 5 comfortably lets the default
+    # 7-day window bisect to 1-day (depth ~3) when Tally is merely slow, so this
+    # only bites a truly hung Tally or larger TB_VOUCHER_WINDOW_DAYS settings.
+    VOUCHER_MAX_SPLIT_DEPTH = max(1, int(os.environ.get("TB_VOUCHER_MAX_SPLIT_DEPTH", "5") or "5"))
+except ValueError:
+    VOUCHER_MAX_SPLIT_DEPTH = 5
 
 # Client-side wipe guard. A full-sync payload tells the cloud "these are all the
 # vouchers" and the backend reconciliation deletes anything else for the company.
@@ -1280,6 +1291,17 @@ def fetch_vouchers_with_batches(
         except Exception as error:
             if not is_retryable_voucher_error(error):
                 raise
+
+            if depth >= VOUCHER_MAX_SPLIT_DEPTH:
+                # A hung/unresponsive Tally: stop bisecting and hammering it with
+                # ever-smaller sub-window requests. Fail this fetch (it retries on
+                # the next sync) instead of grinding through a deep cascade.
+                raise RuntimeError(
+                    f"Tally stayed unresponsive exporting vouchers for "
+                    f"{window_from}..{window_to} after {depth} window split(s); "
+                    f"failing this fetch instead of splitting further (retries next "
+                    f"sync). Last error: {error}"
+                ) from error
 
             nested_windows = split_window(window_from, window_to)
             if len(nested_windows) == 1 and nested_windows[0] == (window_from, window_to):
