@@ -18,6 +18,10 @@ import {
 import { shipSyncLog, setLogContext } from "./remote-log";
 import { tallyGate } from "./tally-gate";
 
+// How many hard failures a single manual backfill range may incur before we stop
+// re-arming its heavy forced-full sync and fall back to normal incremental sync.
+const MAX_BACKFILL_ATTEMPTS = 3;
+
 type SyncLifecycleCallbacks = {
   onSyncStart?: () => void;
   onSyncComplete?: (hadErrors: boolean) => void;
@@ -366,9 +370,22 @@ export class SyncEngine {
       const syncIngestKey = resolveSyncIngestKey(config);
       const syncContractVersion = normalizeSyncContractVersion(config.syncContractVersion);
       const backfillSignature = this.buildBackfillSignature(configuredSyncFromDate, configuredSyncToDate);
+      // Bound how many times a failing backfill range re-arms its heavy
+      // forced-full sync: without this, a range that can never complete (too
+      // large, Tally errors on it) re-armed on every startup/manual trigger
+      // forever, hammering Tally each time. After MAX_BACKFILL_ATTEMPTS hard
+      // failures we give up and fall back to normal incremental sync; changing
+      // the date range (a new signature) resets the count.
+      const priorBackfillAttempts =
+        company.backfillAttemptSignature === backfillSignature
+          ? (company.backfillAttemptCount || 0)
+          : 0;
+      const backfillExhausted =
+        Boolean(backfillSignature) && priorBackfillAttempts >= MAX_BACKFILL_ATTEMPTS;
       const backfillPending = Boolean(
         backfillSignature
         && company.lastCompletedBackfillSignature !== backfillSignature
+        && !backfillExhausted
       );
       const shouldUseManualBackfill = backfillPending && trigger !== "heartbeat";
       const syncFromDate = shouldUseManualBackfill ? configuredSyncFromDate : "";
@@ -409,7 +426,14 @@ export class SyncEngine {
       if (shouldUseManualBackfill && backfillSignature) {
         this.emit("sync-log", {
           company: companyName,
-          line: `[TallyBridge] One-time backfill armed for ${backfillSignature}.`,
+          line: `[TallyBridge] One-time backfill armed for ${backfillSignature}.`
+            + (priorBackfillAttempts > 0 ? ` (retry ${priorBackfillAttempts + 1}/${MAX_BACKFILL_ATTEMPTS})` : ""),
+        });
+      } else if (backfillExhausted && trigger !== "heartbeat") {
+        this.emit("sync-log", {
+          company: companyName,
+          line: `[TallyBridge] Manual backfill ${backfillSignature} gave up after ${MAX_BACKFILL_ATTEMPTS} failed attempts; `
+            + "change the date range to retry. Continuing with normal incremental sync.",
         });
       } else if (backfillSignature && trigger === "heartbeat") {
         this.emit("sync-log", {
@@ -536,6 +560,9 @@ export class SyncEngine {
           };
           if (status === "success" && shouldUseManualBackfill && backfillSignature) {
             update.lastCompletedBackfillSignature = backfillSignature;
+            // Backfill completed — clear the failed-attempt counter.
+            update.backfillAttemptCount = 0;
+            update.backfillAttemptSignature = undefined;
           }
           updateCompanyStatus(companyId, update);
           if (syncMeta?.change_detection_mode === "heartbeat") {
@@ -551,10 +578,17 @@ export class SyncEngine {
             || timeoutReason
             || "Unknown error (database insert failed or python crashed)";
           this.hadCompanyError = true;
-          updateCompanyStatus(companyId, {
+          const errorUpdate: Partial<Company> = {
             lastSyncStatus: "error",
             lastSyncError: errMsg,
-          });
+          };
+          // Count this failure against the manual backfill so it can't re-arm
+          // its heavy forced-full sync forever (B-M16).
+          if (shouldUseManualBackfill && backfillSignature) {
+            errorUpdate.backfillAttemptSignature = backfillSignature;
+            errorUpdate.backfillAttemptCount = priorBackfillAttempts + 1;
+          }
+          updateCompanyStatus(companyId, errorUpdate);
           this.lifecycleCallbacks.onCompanyError?.();
           this.emit("company-error", { id: companyId, name: companyName, error: errMsg });
         }

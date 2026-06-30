@@ -17,6 +17,11 @@ export interface Company {
   // for a clean, fully-current sync.
   lastSyncWarning?: string;
   lastCompletedBackfillSignature?: string;
+  // Bounded-retry state for a manual backfill range that keeps failing, so it
+  // doesn't re-arm a heavy forced-full sync on every startup/manual trigger
+  // forever (see sync-engine MAX_BACKFILL_ATTEMPTS).
+  backfillAttemptSignature?: string;
+  backfillAttemptCount?: number;
 }
 
 export interface SyncRecordCounts {
