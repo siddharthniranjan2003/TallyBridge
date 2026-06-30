@@ -143,13 +143,25 @@ except ValueError:
 VOUCHER_OVERLAP_DAYS = 7
 ERP9_DETAIL_BATCH_SIZE = 25
 try:
-    # Optional extra gap (ms) between consecutive Tally requests. OFF by default:
-    # smaller voucher windows (TB_VOUCHER_WINDOW_DAYS) are the primary mechanism
-    # for keeping the single-threaded engine responsive; live testing showed pacing
-    # adds time without reducing the per-window freeze. Available as a tuning knob.
-    TALLY_PACING_MS = max(0, int(os.environ.get("TB_TALLY_PACING_MS", "0") or "0"))
+    # Extra gap (ms) between consecutive Tally requests so the single-threaded
+    # engine can service its UI between exports. RE-ENABLED at 50ms by default to
+    # re-test responsiveness during a full sync. (An earlier round found pacing
+    # added time without reducing the per-window freeze and turned it off; we're
+    # retrying it — smaller voucher windows via TB_VOUCHER_WINDOW_DAYS remain the
+    # primary lever. Set TB_TALLY_PACING_MS=0 to disable.)
+    TALLY_PACING_MS = max(0, int(os.environ.get("TB_TALLY_PACING_MS", "50") or "50"))
 except ValueError:
-    TALLY_PACING_MS = 0
+    TALLY_PACING_MS = 50
+try:
+    # A LARGER gap before the heavy, compute-bound sections (stock valuation,
+    # outstanding, and the full-year P&L/BS/TB reports). Each of these freezes
+    # Tally's UI for seconds while it computes; a bigger breather before each one
+    # lets the UI drain its queued input/paint between those long freezes. Few in
+    # number (~5), so even a large value costs little wall-clock. Falls back to the
+    # normal pacing if set lower. Set TB_TALLY_PACING_HEAVY_MS=0 to disable.
+    TALLY_PACING_HEAVY_MS = max(0, int(os.environ.get("TB_TALLY_PACING_HEAVY_MS", "300") or "300"))
+except ValueError:
+    TALLY_PACING_HEAVY_MS = 300
 try:
     # Max days per voucher export window. Smaller windows = smaller per-request
     # Tally compute = shorter UI freezes (the single engine serializes reads with
@@ -202,11 +214,15 @@ if not 0 < VOUCHER_WIPE_GUARD_MIN_RATIO <= 1:
     VOUCHER_WIPE_GUARD_MIN_RATIO = 0.5
 
 
-def pace_tally() -> None:
+def pace_tally(heavy: bool = False) -> None:
     """Briefly yield Tally's single-threaded engine between requests so its UI
-    stays responsive during a sync. Disable/tune via TB_TALLY_PACING_MS (0 = off)."""
-    if TALLY_PACING_MS > 0:
-        time.sleep(TALLY_PACING_MS / 1000)
+    stays responsive during a sync. Pass heavy=True before the compute-bound
+    sections (stock valuation / outstanding / reports) to use the larger
+    TB_TALLY_PACING_HEAVY_MS gap. Disable/tune via TB_TALLY_PACING_MS /
+    TB_TALLY_PACING_HEAVY_MS (0 = off)."""
+    delay_ms = max(TALLY_PACING_HEAVY_MS, TALLY_PACING_MS) if heavy else TALLY_PACING_MS
+    if delay_ms > 0:
+        time.sleep(delay_ms / 1000)
 
 
 def resolve_cache_file() -> str:
@@ -2223,7 +2239,7 @@ def main() -> int:
                 record_updates.pop("vouchers", None)
 
         if sync_plan.get("need_stock"):
-            pace_tally()
+            pace_tally(heavy=True)  # stock valuation (CLOSINGVALUE/RATE) is compute-heavy
             stock_started_at = time.perf_counter()
             print("[Tally] Fetching stock items...")
             used_odbc = False
@@ -2289,7 +2305,7 @@ def main() -> int:
                 record_updates.pop("stock", None)
 
         if sync_plan.get("need_outstanding") and not voucher_family_skipped:
-            pace_tally()
+            pace_tally(heavy=True)  # outstanding bills compute is heavy
             outstanding_started_at = time.perf_counter()
             print("[Tally] Fetching outstanding...")
             outstanding = None
@@ -2329,7 +2345,7 @@ def main() -> int:
                 print(f"[Tally] Got {len(outstanding)} outstanding entries")
 
         if sync_plan.get("need_reports") and not voucher_family_skipped:
-            pace_tally()
+            pace_tally(heavy=True)  # full-year P&L compute is heavy
             profit_loss_started_at = time.perf_counter()
             print("[Tally] Fetching Profit & Loss...")
             profit_loss = None
@@ -2369,7 +2385,7 @@ def main() -> int:
                 log_section_metric("profit_loss", section_metrics["profit_loss"])
                 print(f"[Tally] Got {len(profit_loss)} P&L line items")
 
-            pace_tally()
+            pace_tally(heavy=True)  # full-year Balance Sheet compute is heavy
             balance_sheet_started_at = time.perf_counter()
             print("[Tally] Fetching Balance Sheet...")
             balance_sheet = None
@@ -2407,7 +2423,7 @@ def main() -> int:
                 log_section_metric("balance_sheet", section_metrics["balance_sheet"])
                 print(f"[Tally] Got {len(balance_sheet)} Balance Sheet items")
 
-            pace_tally()
+            pace_tally(heavy=True)  # full-year Trial Balance compute is heavy
             trial_balance_started_at = time.perf_counter()
             print("[Tally] Fetching Trial Balance...")
             trial_balance = None
