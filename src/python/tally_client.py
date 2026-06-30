@@ -342,6 +342,47 @@ def get_company_alter_ids() -> str:
     </ENVELOPE>""")
 
 
+def get_loaded_company_list() -> str:
+    """List the companies currently LOADED/open in Tally (NAME + GUID).
+
+    Deliberately omits SVCURRENTCOMPANY so it does NOT set/touch the
+    current-company context. get_company_info()'s SVCURRENTCOMPANY directive,
+    issued while Tally is still loading a company (the few-second window right
+    after TallyPrime starts), can crash TallyPrime — so this safe, context-free
+    company enumeration is used as a readiness gate BEFORE any SVCURRENTCOMPANY
+    request. Mirrors the desktop status-bar probe (which runs this shape every
+    10s without crashing). A Collection of Company returns the loaded companies,
+    so an empty result means no company is loaded yet."""
+    return _fetch("""
+    <ENVELOPE>
+      <HEADER>
+        <VERSION>1</VERSION>
+        <TALLYREQUEST>Export</TALLYREQUEST>
+        <TYPE>Collection</TYPE>
+        <ID>TBLoadedCompanies</ID>
+      </HEADER>
+      <BODY>
+        <DESC>
+          <STATICVARIABLES>
+            <SVFROMDATE TYPE="Date">01-Jan-1970</SVFROMDATE>
+            <SVTODATE TYPE="Date">01-Jan-1970</SVTODATE>
+            <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+          </STATICVARIABLES>
+          <TDL>
+            <TDLMESSAGE>
+              <COLLECTION NAME="TBLoadedCompanies" ISMODIFY="No">
+                <TYPE>Company</TYPE>
+                <FETCH>NAME, GUID</FETCH>
+                <FILTERS>TBNonAggrFilter</FILTERS>
+              </COLLECTION>
+              <SYSTEM TYPE="FORMULAE" NAME="TBNonAggrFilter">$isaggregate = "No"</SYSTEM>
+            </TDLMESSAGE>
+          </TDL>
+        </DESC>
+      </BODY>
+    </ENVELOPE>""")
+
+
 # ── Groups ───────────────────────────────────────────────────────
 
 def get_groups() -> str:

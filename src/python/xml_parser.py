@@ -107,6 +107,27 @@ def _ensure_list(val) -> list:
 
 # ── company info ─────────────────────────────────────────────────
 
+
+def parse_loaded_companies(xml_text: str) -> list:
+    """Parse the loaded-company list (NAME, GUID) returned by
+    get_loaded_company_list(). Returns [] on any parse failure or when no
+    company is loaded (an empty Collection of Company)."""
+    try:
+        raw = xmltodict.parse(clean_xml(xml_text))
+        body = raw.get("ENVELOPE", {}).get("BODY", {}).get("DATA", {})
+        collection = body.get("COLLECTION", {}) or {}
+        result = []
+        for company in _ensure_list(collection.get("COMPANY")):
+            if not isinstance(company, dict):
+                continue
+            name = safe_str(company.get("NAME"))
+            guid = safe_str(company.get("GUID"))
+            if name or guid:
+                result.append({"name": name, "guid": guid})
+        return result
+    except Exception:
+        return []
+
 def parse_company_info(xml_text: str) -> dict:
     """Extract company metadata: FY dates, address, GSTIN, etc."""
     try:

@@ -44,6 +44,7 @@ from tally_client import (
     get_balance_sheet,
     get_company_alter_ids,
     get_company_info,
+    get_loaded_company_list,
     get_groups,
     get_ledgers,
     get_outstanding_payables,
@@ -64,6 +65,7 @@ from xml_parser import (
     parse_company_info,
     parse_groups,
     parse_ledgers,
+    parse_loaded_companies,
     parse_outstanding,
     parse_profit_and_loss,
     parse_stock,
@@ -75,6 +77,12 @@ from xml_parser import (
 COMPANY = os.environ.get("TALLY_COMPANY", "")
 COMPANY_GUID = os.environ.get("TALLY_COMPANY_GUID", "").strip()
 COMPANY_CACHE_KEY = COMPANY_GUID or COMPANY
+# Gate the first SVCURRENTCOMPANY-scoped request behind a safe loaded-company
+# check so a sync fired during TallyPrime's startup window (gateway up, company
+# still loading) can't crash it. Kill-switch: TB_REQUIRE_LOADED_COMPANY=0.
+REQUIRE_LOADED_COMPANY = os.environ.get(
+    "TB_REQUIRE_LOADED_COMPANY", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
 FORCE_FULL_SYNC = os.environ.get("TB_FORCE_FULL_SYNC", "").strip().lower() in {
     "1", "true", "yes", "on",
 }
@@ -1920,6 +1928,52 @@ def main() -> int:
                 print(f"[ODBC] Probe succeeded via {probe.get('dsn')}. Supported sections: {supported or 'none'}")
             else:
                 print(f"[ODBC] Probe status: {probe.get('state')} ({probe.get('message') or 'no DSN detected'})")
+
+        # READINESS GATE (TallyPrime startup window): the sync's first
+        # company-scoped request (get_company_info) carries SVCURRENTCOMPANY, which
+        # CRASHES TallyPrime if it lands in the few-second window after Tally opens
+        # but before the company finishes loading. Before sending it, run ONLY a
+        # context-free company enumeration (no SVCURRENTCOMPANY — the exact safe
+        # shape the status bar probes with every 10s without crashing). A
+        # Collection of Company is EMPTY during that window. Skip ONLY on a clean
+        # empty result. On any probe error, OR when a company is loaded, proceed
+        # exactly as before — so a normal, healthy sync is never affected by this
+        # gate (no company-name/GUID matching, no skip-on-error).
+        if REQUIRE_LOADED_COMPANY:
+            probe_ran = True
+            loaded_companies: list = []
+            try:
+                loaded_companies = parse_loaded_companies(get_loaded_company_list())
+            except Exception as gate_error:
+                probe_ran = False
+                print(f"[Tally] Loaded-company readiness probe could not run ({gate_error}); proceeding as usual.")
+
+            if probe_ran and not loaded_companies:
+                message = (
+                    "No company is loaded in TallyPrime yet (it may still be opening "
+                    "after startup). Open the company in TallyPrime and re-sync. Sync skipped."
+                )
+                print(f"[TallyBridge] {message}")
+                print(json.dumps({
+                    "status": "skipped",
+                    "reason": "company_not_loaded",
+                    "records": {},
+                    "warnings": [message],
+                    "sync_meta": {
+                        "change_detection_mode": SYNC_TRIGGER,
+                        "manual_backfill_pending": MANUAL_BACKFILL_PENDING,
+                        "observability": {
+                            "transport": {
+                                "control_plane_url": CONTROL_PLANE_URL,
+                                "ingest_mode": SYNC_INGEST_MODE,
+                                "ingest_url": SYNC_INGEST_URL if SYNC_INGEST_MODE in {"hybrid", "direct"} else "",
+                                "contract_version": SYNC_CONTRACT_VERSION,
+                            },
+                            "total_sync_ms": round((time.perf_counter() - total_sync_started_at) * 1000, 2),
+                        },
+                    },
+                }))
+                return 0
 
         company_info, default_from_date, default_to_date = fetch_company_info_with_fallback()
 
