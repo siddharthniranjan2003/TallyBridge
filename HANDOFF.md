@@ -93,6 +93,9 @@ Full reasoning is in each commit message and in `../tallybridge-rereview-report.
 
 ## 6. Known follow-ups (NOT done on this branch)
 
+**⚠️ P0 voucher-wipe fix shipped — recovery note for affected installs.** AlterID-incremental sync was stamping a full-financial-year reconciliation range onto a delta-only payload, so the cloud marked every *unchanged* voucher stale and tried to delete it (~98% of the table). `tb_guard` (migration `20260619`) blocked it → the sync stuck in a retry loop and new vouchers never landed. **Pre-`tb_guard`, this silently wiped the voucher table.** Fixed (commit `9c4835c`) by suppressing the reconciliation range for alter-id-delta payloads. **The fix self-heals stuck installs on the next sync.** But any install that was **wiped before `tb_guard` existed** won't auto-restore — trigger a **forced full sync** (clear the alter-id cache `.alter_ids_cache.json`, or change the manual backfill range) to re-push the full voucher set.
+- **Voucher deletion reconciliation in incremental mode** — by design the fix no longer reconciles Tally-side *deletions* during alter-id-incremental (it never could correctly). Deletions only clear on a full sync. Follow-up: a periodic full voucher reconciliation, or an explicit deletion channel (needs backend = Option B).
+
 **Best done with the app RUNNABLE (risky to do blind, so left for the desktop env):**
 - **B-M10** — financial-year / timezone / clock date math (don't hard-clamp `books_to` to today; widen the FY fallback). Needs runtime + timezone testing.
 - **B-M11** — sleep/wake handling via Electron `powerMonitor` (re-arm timers / drop half-open sockets after resume).
