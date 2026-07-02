@@ -96,11 +96,20 @@ ENABLE_INCREMENTAL_VOUCHER_SYNC = os.environ.get(
 SYNC_FROM_DATE_OVERRIDE_RAW = os.environ.get("TB_SYNC_FROM_DATE", "").strip()
 SYNC_TO_DATE_OVERRIDE_RAW = os.environ.get("TB_SYNC_TO_DATE", "").strip()
 SYNC_TRIGGER = (os.environ.get("TB_SYNC_TRIGGER", "manual") or "manual").strip().lower()
-# Financial-statement reports (P&L / Balance Sheet / Trial Balance) force Tally to
-# compute full-year statements in a single request — the heaviest, most
-# freeze/crash-prone work in a sync. OFF by default (the product doesn't use
-# them). Set TB_SYNC_REPORTS=1 to re-enable.
+# WHY THESE ARE OFF: TallyPrime's gateway shares one thread with its UI and can
+# hard-freeze / crash (c0000005) when asked to COMPUTE heavy aggregates in a
+# single request. Deep-research (20 sources) found no safe way to make it compute
+# these, and the product does not use their output — so we no longer fetch them:
+#   * Financial-statement reports (P&L / Balance Sheet / Trial Balance) — each a
+#     full-year statement Tally computes in one request. Gated by SYNC_REPORTS.
+#   * Outstanding (bills receivable/payable aging) — a heavy report-like compute.
+#     Gated by SYNC_OUTSTANDING.
+#   * Stock valuation (CLOSINGVALUE / CLOSINGRATE per item) — dropped from every
+#     stock request (tally_client.get_stock_items, structured_sections.json,
+#     odbc_sections.json); stock still syncs name/parent/unit/closing-qty.
+# All default OFF. Re-enable a section with its env flag = 1 (e.g. TB_SYNC_REPORTS=1).
 SYNC_REPORTS = os.environ.get("TB_SYNC_REPORTS", "").strip().lower() in {"1", "true", "yes", "on"}
+SYNC_OUTSTANDING = os.environ.get("TB_SYNC_OUTSTANDING", "").strip().lower() in {"1", "true", "yes", "on"}
 if SYNC_TRIGGER not in {"startup", "manual", "heartbeat"}:
     SYNC_TRIGGER = "manual"
 MANUAL_BACKFILL_PENDING = os.environ.get(
@@ -1449,12 +1458,19 @@ def fetch_stock_xml() -> list[dict]:
             )
             stock = parse_stock(get_stock_items())
 
-        metrics_detected = any(item.get("closing_value") or item.get("rate") for item in stock)
-        if stock and metrics_detected:
+        # Stock valuation (closing value/rate) is intentionally no longer fetched —
+        # it forced Tally to compute per-item valuation, a major freeze/crash
+        # source, and the product doesn't use it. The old quality gate here
+        # ("metrics_detected") fell back to the HEAVY Stock Summary report whenever
+        # valuation was absent; now that valuation is ALWAYS absent, that gate
+        # would fire on every sync and reintroduce the exact heavy report we
+        # removed. So accept the structured/collection result whenever it returned
+        # items; fall back to Stock Summary only when stock is genuinely empty.
+        if stock:
             print(f"[Tally] Got {len(stock)} stock items via structured collection")
             return stock
 
-        print("[Tally] Structured stock export was sparse - falling back to Stock Summary report")
+        print("[Tally] Structured stock export returned no items - falling back to Stock Summary report")
         stock = parse_stock(get_stock_summary_report())
         print(f"[Tally] Got {len(stock)} stock items via Stock Summary report")
         return stock
@@ -2316,7 +2332,7 @@ def main() -> int:
                 record_updates.pop("vouchers", None)
 
         if sync_plan.get("need_stock"):
-            pace_tally(heavy=True)  # stock valuation (CLOSINGVALUE/RATE) is compute-heavy
+            pace_tally()  # valuation (the heavy part) is no longer fetched, so stock is now light
             stock_started_at = time.perf_counter()
             print("[Tally] Fetching stock items...")
             used_odbc = False
@@ -2381,7 +2397,7 @@ def main() -> int:
                 stock = None
                 record_updates.pop("stock", None)
 
-        if sync_plan.get("need_outstanding") and not voucher_family_skipped:
+        if SYNC_OUTSTANDING and sync_plan.get("need_outstanding") and not voucher_family_skipped:
             pace_tally(heavy=True)  # outstanding bills compute is heavy
             outstanding_started_at = time.perf_counter()
             print("[Tally] Fetching outstanding...")

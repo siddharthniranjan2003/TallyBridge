@@ -214,7 +214,7 @@
     }
   },
   "stock_items": {
-    "query": "Select $Name, $Parent, $BaseUnits, $ClosingBalance, $ClosingValue, $ClosingRate, $MailingName from StockItem",
+    "query": "Select $Name, $Parent, $BaseUnits, $ClosingBalance, $MailingName from StockItem",
     "required_field": "name",
     "fields": {
       "name": {

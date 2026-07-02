@@ -637,7 +637,13 @@ def get_voucher_details_erp9_batch(master_ids: list[int | str]) -> str:
 # ── Stock Items / Summary ────────────────────────────────────────
 
 def get_stock_items() -> str:
-    """Fetch stock details via a structured StockItem collection when available."""
+    """Fetch stock details via a structured StockItem collection when available.
+
+    NOTE: CLOSINGVALUE / CLOSINGRATE (valuation) are deliberately NOT fetched —
+    computing per-item valuation is a major TallyPrime freeze/crash source and the
+    product doesn't use it. Kept to name/parent/units/closing-qty. The same removal
+    is mirrored in structured_sections.json and odbc_sections.json. (See
+    TB_SYNC_REPORTS / TB_SYNC_OUTSTANDING in sync_main for the related report cuts.)"""
     return _fetch(f"""
     <ENVELOPE>
       <HEADER>
