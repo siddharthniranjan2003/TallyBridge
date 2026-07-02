@@ -96,18 +96,28 @@ ENABLE_INCREMENTAL_VOUCHER_SYNC = os.environ.get(
 SYNC_FROM_DATE_OVERRIDE_RAW = os.environ.get("TB_SYNC_FROM_DATE", "").strip()
 SYNC_TO_DATE_OVERRIDE_RAW = os.environ.get("TB_SYNC_TO_DATE", "").strip()
 SYNC_TRIGGER = (os.environ.get("TB_SYNC_TRIGGER", "manual") or "manual").strip().lower()
-# WHY THESE ARE OFF: TallyPrime's gateway shares one thread with its UI and can
+# TEMPORARILY STOPPED (code preserved, only gated) to test a TallyPrime FREEZE
+# hypothesis. TallyPrime's gateway shares one thread with its UI and can
 # hard-freeze / crash (c0000005) when asked to COMPUTE heavy aggregates in a
-# single request. Deep-research (20 sources) found no safe way to make it compute
-# these, and the product does not use their output — so we no longer fetch them:
-#   * Financial-statement reports (P&L / Balance Sheet / Trial Balance) — each a
-#     full-year statement Tally computes in one request. Gated by SYNC_REPORTS.
-#   * Outstanding (bills receivable/payable aging) — a heavy report-like compute.
+# single request; deep research (20 sources) pinned these as the heaviest such
+# requests with no documented safe way to make Tally compute them. So we stopped
+# FETCHING them to see whether the freeze goes away:
+#   * Reports — P&L / Balance Sheet / Trial Balance (full-year statements Tally
+#     computes in one request). Gated by SYNC_REPORTS.
+#   * Outstanding — bills receivable/payable aging (heavy report-like compute).
 #     Gated by SYNC_OUTSTANDING.
-#   * Stock valuation (CLOSINGVALUE / CLOSINGRATE per item) — dropped from every
-#     stock request (tally_client.get_stock_items, structured_sections.json,
-#     odbc_sections.json); stock still syncs name/parent/unit/closing-qty.
-# All default OFF. Re-enable a section with its env flag = 1 (e.g. TB_SYNC_REPORTS=1).
+#   * Stock valuation — CLOSINGVALUE/CLOSINGRATE per item, dropped from every stock
+#     request (get_stock_items, structured_sections.json, odbc_sections.json).
+#
+# THESE ARE NOT DEAD DATA — the backend serves them (GET /pnl, /balance-sheet,
+# /outstanding, /reorder-levels, /stock) and the web/app repo consumes them. This
+# is a REVERSIBLE experiment: if the freeze still happens with these OFF, they
+# aren't the cause — set the env flag = 1 (e.g. TB_SYNC_REPORTS=1) to re-enable.
+# Meanwhile the backend read endpoints keep serving each section's last-good
+# (stale) snapshot; new companies get empty until re-enabled or recomputed
+# cloud-side (outstanding from synced bill_allocations; stock value from
+# closing_qty x last-purchase-rate; P&L/BS would need a cloud report engine).
+# All default OFF.
 SYNC_REPORTS = os.environ.get("TB_SYNC_REPORTS", "").strip().lower() in {"1", "true", "yes", "on"}
 SYNC_OUTSTANDING = os.environ.get("TB_SYNC_OUTSTANDING", "").strip().lower() in {"1", "true", "yes", "on"}
 if SYNC_TRIGGER not in {"startup", "manual", "heartbeat"}:
