@@ -898,8 +898,6 @@
         "PARENT",
         "BASEUNITS",
         "CLOSINGBALANCE",
-        "CLOSINGVALUE",
-        "CLOSINGRATE",
         "MAILINGNAME"
       ]
     },

@@ -96,6 +96,11 @@ ENABLE_INCREMENTAL_VOUCHER_SYNC = os.environ.get(
 SYNC_FROM_DATE_OVERRIDE_RAW = os.environ.get("TB_SYNC_FROM_DATE", "").strip()
 SYNC_TO_DATE_OVERRIDE_RAW = os.environ.get("TB_SYNC_TO_DATE", "").strip()
 SYNC_TRIGGER = (os.environ.get("TB_SYNC_TRIGGER", "manual") or "manual").strip().lower()
+# Financial-statement reports (P&L / Balance Sheet / Trial Balance) force Tally to
+# compute full-year statements in a single request — the heaviest, most
+# freeze/crash-prone work in a sync. OFF by default (the product doesn't use
+# them). Set TB_SYNC_REPORTS=1 to re-enable.
+SYNC_REPORTS = os.environ.get("TB_SYNC_REPORTS", "").strip().lower() in {"1", "true", "yes", "on"}
 if SYNC_TRIGGER not in {"startup", "manual", "heartbeat"}:
     SYNC_TRIGGER = "manual"
 MANUAL_BACKFILL_PENDING = os.environ.get(
@@ -188,6 +193,16 @@ try:
     VOUCHER_MAX_SPLIT_DEPTH = max(1, int(os.environ.get("TB_VOUCHER_MAX_SPLIT_DEPTH", "5") or "5"))
 except ValueError:
     VOUCHER_MAX_SPLIT_DEPTH = 5
+try:
+    # Count-cap guardrail. A single voucher Collection that returns a very large
+    # number of rows can exhaust Tally's memory and hang it "indefinitely"
+    # (production Tally connectors cap voucher batches around 5000). Our
+    # date-windowing keeps per-request counts well under this, but if any one
+    # window/pass exceeds the cap we log a prominent warning so an oversized batch
+    # is diagnosable and the user can lower TB_VOUCHER_WINDOW_DAYS. 0 disables it.
+    VOUCHER_MAX_BATCH_COUNT = max(0, int(os.environ.get("TB_VOUCHER_MAX_BATCH_COUNT", "5000") or "5000"))
+except ValueError:
+    VOUCHER_MAX_BATCH_COUNT = 5000
 
 # Client-side wipe guard. A full-sync payload tells the cloud "these are all the
 # vouchers" and the backend reconciliation deletes anything else for the company.
@@ -1362,7 +1377,15 @@ def fetch_vouchers_with_batches(
             f"{incremental_alter_id} (skipping the full-year window scan)"
         )
     for window_from, window_to in initial_windows:
-        all_vouchers.extend(fetch_recursive(window_from, window_to))
+        window_rows = fetch_recursive(window_from, window_to)
+        if VOUCHER_MAX_BATCH_COUNT and len(window_rows) > VOUCHER_MAX_BATCH_COUNT:
+            print(
+                f"[Tally] WARNING: voucher batch {window_from}..{window_to} returned "
+                f"{len(window_rows)} vouchers (over the {VOUCHER_MAX_BATCH_COUNT} count cap). "
+                "Large single Collections can exhaust Tally's memory and hang it — "
+                "lower TB_VOUCHER_WINDOW_DAYS to shrink batches."
+            )
+        all_vouchers.extend(window_rows)
 
     if transport_sources == {"xml_collection"}:
         voucher_source = "xml_collection"
@@ -2398,7 +2421,7 @@ def main() -> int:
                 log_section_metric("outstanding", section_metrics["outstanding"])
                 print(f"[Tally] Got {len(outstanding)} outstanding entries")
 
-        if sync_plan.get("need_reports") and not voucher_family_skipped:
+        if SYNC_REPORTS and sync_plan.get("need_reports") and not voucher_family_skipped:
             pace_tally(heavy=True)  # full-year P&L compute is heavy
             profit_loss_started_at = time.perf_counter()
             print("[Tally] Fetching Profit & Loss...")
