@@ -1447,9 +1447,16 @@ async function buildInventoryIntelligenceReport(
     const salesAmountRaw = purchaseRateRaw == null ? null : avgSaleQuantity6mRaw * purchaseRateRaw;
     const purchaseAmountRaw = purchaseRateRaw == null ? null : purchaseQuantity1mRaw * purchaseRateRaw;
     const closingStockAmountRaw = purchaseRateRaw == null ? null : closingQuantityRaw * purchaseRateRaw;
+    // Tally stock valuation (closing_value) is no longer synced from the desktop —
+    // computing it per item was a major TallyPrime freeze source. So closingStockRaw
+    // is now 0. Fall back to the voucher-derived value (closing_qty x last-purchase-
+    // rate) so the scenario classifier and the reported stock value stay meaningful
+    // without valuation. If valuation is ever re-synced, closingStockRaw is > 0 and
+    // is preferred. Null (item has no purchase history) -> 0.
+    const effectiveClosingStockRaw = closingStockRaw > 0 ? closingStockRaw : (closingStockAmountRaw ?? 0);
     const avgSale6mPaise = toPaise(avgSale6mRaw);
     const lastMonthPurchasePaise = toPaise(lastMonthPurchaseRaw);
-    const closingStockPaise = toPaise(closingStockRaw);
+    const closingStockPaise = toPaise(effectiveClosingStockRaw);
 
     const scenario = classifyInventoryScenarioV2(
       avgSale6mPaise,
@@ -1478,7 +1485,7 @@ async function buildInventoryIntelligenceReport(
       report_names: reportNames,
       avg_sale_6m: toMoney(avgSale6mRaw),
       last_month_purchase: toMoney(lastMonthPurchaseRaw),
-      closing_stock_value: toMoney(closingStockRaw),
+      closing_stock_value: toMoney(effectiveClosingStockRaw),
       sales_qty_6m_avg: toMoney(avgSaleQuantity6mRaw),
       purchase_qty_1m: toMoney(purchaseQuantity1mRaw),
       closing_stock_qty: toMoney(closingQuantityRaw),
