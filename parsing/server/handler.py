@@ -1094,6 +1094,77 @@ def delete_scan_job(job_id: str | None) -> None:
         pass
 
 
+def fail_scan_job(job_id: str | None, reason: str, page_count: int = 0) -> None:
+    """Mark this scan's shared scan_jobs row as failed (status='failed') instead
+    of deleting it, so the app surfaces a "Garbage invoice" row the user can see
+    and dismiss — rather than the scan silently expiring at the 300s badge TTL.
+    Best-effort; the same UUID guard + Supabase auth as delete_scan_job. No-op
+    when the request carried no job_id (older app build, or a direct/manual call).
+    Pair with post_scan_image so the failed row's scanned pages are viewable."""
+    if not (job_id and SUPABASE_URL and SUPABASE_KEY):
+        return
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", job_id):
+        return
+    try:
+        url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/scan_jobs?id=eq.{job_id}"
+        _supabase_session().patch(
+            url,
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            json={"status": "failed", "reason": (reason or "")[:500], "page_count": page_count},
+            timeout=PUSH_QUEUE_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        pass
+
+
+def scan_image_url(job_id: str) -> str:
+    """Backend endpoint that stores a failed scan's page images, derived from
+    PUSH_QUEUE_URL (same host + base path) and keyed by the scan_jobs row id.
+    The app reads them back via GET /push-queue/{id}/image/{page}."""
+    parts = urlsplit(PUSH_QUEUE_URL)
+    base_path = parts.path.rstrip("/")
+    return urlunsplit((parts.scheme, parts.netloc, f"{base_path}/scan-image/{job_id}", "", ""))
+
+
+def post_scan_image(job_id: str | None, pages_b64: list[str]) -> None:
+    """Forward a failed scan's rendered page images to the backend (GCS, keyed by
+    the scan_jobs id) so the app's garbage-invoice sheet can show them. Best-effort;
+    never blocks the response. No-op without a job_id, images, or push-queue key."""
+    if not (job_id and pages_b64 and PUSH_QUEUE_API_KEY):
+        return
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", job_id):
+        return
+    try:
+        session = requests.Session()
+        session.trust_env = False
+        session.post(
+            scan_image_url(job_id),
+            headers={"Content-Type": "application/json", "x-api-key": PUSH_QUEUE_API_KEY},
+            json={"images_b64": pages_b64},
+            timeout=PUSH_QUEUE_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        pass
+
+
+def report_failed_scan(job_id: str | None, reason: str, image_bytes: bytes | None) -> None:
+    """Surface a scan that produced no voucher as a "Garbage invoice" in the app:
+    store its scanned pages (if any) then mark the scan_jobs row failed. Image
+    storage runs first so the pages exist by the time the failed-status realtime
+    event reaches the app. Entirely best-effort — a no-op job_id just falls back
+    to today's badge-TTL behavior."""
+    if not job_id:
+        return
+    pages_b64 = scanned_pages_b64(image_bytes) if image_bytes else []
+    post_scan_image(job_id, pages_b64)
+    fail_scan_job(job_id, reason, len(pages_b64))
+
+
 def fetch_latest_rates_for_party(party_name: str) -> dict[str, dict]:
     """RPC get_latest_rates_for_party -> {stock_item_name: {rate, source}} (same party)."""
     if not SUPABASE_URL or not SUPABASE_KEY or not party_name:
@@ -1857,6 +1928,10 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"ok": False, "error": "Not found"})
 
     def do_POST(self):
+        # Pre-init so the generic except below can safely reference them even if
+        # the request blows up before they are assigned in the try.
+        job_id = None
+        body = b""
         try:
             current_path = normalized_request_path(self.path)
             # The app tags each scan upload with ?job_id=<scan_jobs row id> so we
@@ -2052,13 +2127,18 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                             # Surface why the voucher could not be built instead of
                             # raising a bare error that hides vendor/warning context.
                             parse_warnings = payload.get("parsed", {}).get("warnings", []) or []
+                            reason = "push_queue_request_payload was not produced; no voucher to enqueue."
                             payload["queue_response"] = {
                                 "ok": False,
                                 "skipped": True,
-                                "reason": "push_queue_request_payload was not produced; no voucher to enqueue.",
+                                "reason": reason,
                                 "vendor": payload.get("vendor", ""),
                                 "warnings": parse_warnings,
                             }
+                            # No voucher was enqueued — surface the scan as a
+                            # "Garbage invoice" in the app instead of letting its
+                            # badge silently expire.
+                            report_failed_scan(job_id, reason, file_bytes)
                         else:
                             # Still push the voucher even if no invoice/document number
                             # was detected, but flag it clearly in the response.
@@ -2178,21 +2258,25 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                 if options["push_mode"] == "queue":
                     party_name = (payload.get("party_name") or "").strip()
                     if not party_name:
+                        reason = "No party_name matched in Supabase; cannot build a Sales voucher."
                         payload["queue_response"] = {
                             "ok": False,
                             "skipped": True,
-                            "reason": "No party_name matched in Supabase; cannot build a Sales voucher.",
+                            "reason": reason,
                         }
+                        report_failed_scan(job_id, reason, body)
                     else:
                         queue_request_payload, sale_items, sale_source_payload = build_sale_voucher_payload(
                             options["company_name"], party_name, payload.get("rows", [])
                         )
                         if not sale_items:
+                            reason = "No matched stock items to enqueue."
                             payload["queue_response"] = {
                                 "ok": False,
                                 "skipped": True,
-                                "reason": "No matched stock items to enqueue.",
+                                "reason": reason,
                             }
+                            report_failed_scan(job_id, reason, body)
                         else:
                             payload["sale_voucher_payload"] = queue_request_payload["voucher_payload"]
                             payload["sale_rate_items"] = sale_items
@@ -2207,6 +2291,20 @@ class MiniCPMHandler(BaseHTTPRequestHandler):
                             delete_scan_job(job_id)
             self._send_json(200, payload)
         except Exception as exc:
+            # A scan that carried a job_id but failed here (e.g. backend ingest
+            # down / 5xx, SCAN-27) still produced no voucher — surface it as a
+            # "Garbage invoice" instead of a silent drop.
+            #
+            # EXCEPTION: a ReadTimeout is ambiguous. The backend commits the
+            # push_queue row BEFORE its synchronous multi-page GCS image upload
+            # and only then responds; a slow upload can exceed our read timeout
+            # after the voucher already enqueued. Marking the (still-present)
+            # scan_jobs row failed there would show a bogus garbage row next to
+            # the real voucher. So on a read timeout we do nothing and let the
+            # badge fall through to its 300s TTL (pre-feature behavior). Connect
+            # failures / non-2xx are unambiguous (nothing enqueued) → surface.
+            if not isinstance(exc, requests.exceptions.ReadTimeout):
+                report_failed_scan(job_id, str(exc), body or None)
             self._send_json(
                 400 if isinstance(exc, ValueError) else 500,
                 {

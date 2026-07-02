@@ -2397,6 +2397,41 @@ router.get("/push-queue/:id/image/:page", requireApiKey, async (req, res) => {
   }
 });
 
+// Stores the scanned page images for a FAILED scan (a "garbage invoice" that
+// produced no voucher), keyed by the scan_jobs row id so the app can show them
+// in its garbage-invoice sheet via the id-agnostic GET /push-queue/:id/image/:page
+// route. Called best-effort by the parsing service on its failure branches; there
+// is no push_queue row for these scans. Auth via requireApiKey, same as the rest
+// of /api/sync. Body: { images_b64: string[] } (base64 JPEGs, one per page).
+router.post("/push-queue/scan-image/:id", requireApiKey, async (req, res) => {
+  if (!invoiceStorageEnabled) {
+    return res.status(200).json({ success: false, stored: 0, reason: "Invoice image storage is not configured" });
+  }
+  const id = normalizeTrimmedString(req.params.id);
+  // Validate as a UUID: the id becomes a GCS object-path prefix, so reject
+  // anything that isn't the scan_jobs row id shape.
+  if (!id || !/^[0-9a-fA-F-]{36}$/.test(id)) {
+    return res.status(400).json({ error: "Invalid id" });
+  }
+  const rawImages = (req.body && (req.body.images_b64 ?? req.body.scanned_images_b64)) as unknown;
+  const imagesB64 = Array.isArray(rawImages)
+    ? (rawImages as unknown[])
+        .filter((s): s is string => typeof s === "string" && s.length > 0)
+        .slice(0, 20)
+    : [];
+  if (imagesB64.length === 0) {
+    return res.json({ success: true, stored: 0, pages: 0 });
+  }
+  try {
+    const buffers = imagesB64.map((b64) => Buffer.from(b64, "base64"));
+    const stored = await uploadInvoicePages(id, buffers);
+    return res.json({ success: true, stored, pages: imagesB64.length });
+  } catch (err: any) {
+    console.error("[PushQueue] Scan image store failed:", err?.message || err);
+    return res.status(500).json({ error: err?.message || "Could not store scan image" });
+  }
+});
+
 router.post("/push-queue/activate", requireApiKey, async (req, res) => {
   const { job_id, company_id, company_guid, company_name } = req.body || {};
   const jobId = normalizeTrimmedString(job_id);
