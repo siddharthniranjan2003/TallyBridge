@@ -170,6 +170,30 @@ def parse_company_info(xml_text: str) -> dict:
         return {}
 
 
+def parse_company_period(xml_text: str) -> dict:
+    """Parse the loaded company's FY period from get_company_period(). Returns
+    {name, fy_start, fy_end} as ISO dates (from STARTINGFROM/ENDINGAT), or {} on
+    failure / when no company is present. Navigates BODY.DATA.COLLECTION so the
+    <CMPINFO> counter block is skipped."""
+    try:
+        raw = xmltodict.parse(clean_xml(xml_text))
+        body = raw.get("ENVELOPE", {}).get("BODY", {}).get("DATA", {})
+        collection = body.get("COLLECTION", {}) or {}
+        company = collection.get("COMPANY", {})
+        if isinstance(company, list):
+            company = company[0] if company else {}
+        if not isinstance(company, dict) or not company:
+            return {}
+        return {
+            "name":     safe_str(company.get("NAME")),
+            "fy_start": parse_tally_date(safe_str(company.get("STARTINGFROM"))),
+            "fy_end":   parse_tally_date(safe_str(company.get("ENDINGAT"))),
+        }
+    except Exception as e:
+        print(f"[Parser] company_period error: {e}")
+        return {}
+
+
 # ── change detection ─────────────────────────────────────────────
 
 def parse_alter_ids(xml_text: str) -> dict:

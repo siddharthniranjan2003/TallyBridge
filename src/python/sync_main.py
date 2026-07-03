@@ -44,6 +44,7 @@ from tally_client import (
     get_balance_sheet,
     get_company_alter_ids,
     get_company_info,
+    get_company_period,
     get_loaded_company_list,
     get_groups,
     get_ledgers,
@@ -63,6 +64,7 @@ from xml_parser import (
     parse_alter_ids,
     parse_balance_sheet,
     parse_company_info,
+    parse_company_period,
     parse_groups,
     parse_ledgers,
     parse_loaded_companies,
@@ -1640,6 +1642,71 @@ def should_skip_voucher_family(product_name: str | None) -> tuple[bool, str | No
     return False, None
 
 
+class PushCompanyMismatch(RuntimeError):
+    """A voucher's date falls outside the financial year of the company loaded in
+    TallyPrime (e.g. a current voucher while last year's same-named company is
+    open). Raised by the push guard to refuse writing into the wrong year's
+    books; the voucher stays queued so it flushes once the correct company is
+    active."""
+
+
+def _parse_iso_or_compact_date(value: str):
+    """Parse an ISO (2024-04-01) or Tally-compact (20240401) date string to a
+    date, else None."""
+    digits = "".join(ch for ch in (value or "") if ch.isdigit())
+    if len(digits) < 8:
+        return None
+    try:
+        return date(int(digits[:4]), int(digits[4:6]), int(digits[6:8]))
+    except ValueError:
+        return None
+
+
+def _financial_year_end(day) -> date:
+    """End of the Indian financial year (31 Mar) that `day` falls in. Used as a
+    lenient upper bound so a voucher in the loaded company's current FY isn't
+    blocked just because it post-dates the last recorded entry."""
+    return date(day.year + 1, 3, 31) if day.month >= 4 else date(day.year, 3, 31)
+
+
+def read_loaded_company_period():
+    """Read the loaded company's FY period (as date objects) via the same
+    SVCURRENTCOMPANY context a push uses. Returns (fy_start, fy_end) or None if it
+    can't be read — the caller treats None as 'cannot verify' and blocks."""
+    try:
+        period = parse_company_period(get_company_period())
+    except Exception as error:
+        print(f"[Push] Could not read the loaded company's financial year: {error}")
+        return None
+    fy_start = _parse_iso_or_compact_date(period.get("fy_start", ""))
+    fy_end = _parse_iso_or_compact_date(period.get("fy_end", ""))
+    if not fy_start or not fy_end:
+        return None
+    return fy_start, fy_end
+
+
+def assert_voucher_in_loaded_fy(voucher: dict, period) -> None:
+    """Refuse a voucher whose date is outside the loaded company's financial year
+    [fy_start .. end-of-FY(fy_end)]. Raises PushCompanyMismatch to block; the
+    caller leaves the voucher queued (nothing is written)."""
+    fy_start, fy_end = period
+    upper = _financial_year_end(fy_end)
+    voucher_date = _parse_iso_or_compact_date(str(voucher.get("date") or ""))
+    if not voucher_date:
+        raise PushCompanyMismatch(
+            "voucher is missing a valid date; refusing to push until it can be "
+            "checked against the loaded company's financial year."
+        )
+    if voucher_date < fy_start or voucher_date > upper:
+        raise PushCompanyMismatch(
+            f"voucher dated {voucher_date.isoformat()} is outside the loaded "
+            f"company's financial year ({fy_start.isoformat()} to "
+            f"{fy_end.isoformat()}). A different year's company with the same "
+            "name may be open in TallyPrime - refusing to push. Open the correct "
+            "financial year's company and the queued voucher will import."
+        )
+
+
 def run_pending_push_cycle(
     warnings: list[str],
     quiet_no_jobs: bool = False,
@@ -1673,6 +1740,20 @@ def run_pending_push_cycle(
         return
 
     print(f"[Push] Found {len(pending_jobs)} pending job(s).")
+
+    # Financial-year guard: read the loaded company's FY period ONCE, then refuse
+    # (per voucher, below) any voucher whose date falls outside it. If the period
+    # can't be read we cannot verify, so block the WHOLE cycle (leave every job
+    # pending) rather than risk writing into the wrong year's books.
+    company_period = read_loaded_company_period()
+    if company_period is None:
+        warning = (
+            "Push blocked - could not read the loaded company's financial year; "
+            "leaving all jobs queued. Make sure the correct company is open in TallyPrime."
+        )
+        warnings.append(warning)
+        print(f"[Push] {warning}")
+        return
 
     def _ack(job_result: dict) -> bool:
         # Acknowledge ONE job (with a short, bounded retry) immediately after its
@@ -1715,6 +1796,18 @@ def run_pending_push_cycle(
             f"{voucher_payload.get('voucher_type', 'Voucher')} "
             f"{voucher_payload.get('voucher_number', '').strip()}".strip()
         )
+
+        # FY guard: don't write a voucher whose date isn't in the loaded
+        # company's financial year — leave it pending (no push, no ack) so it
+        # imports once the correct year's company is open.
+        try:
+            assert_voucher_in_loaded_fy(voucher_payload, company_period)
+        except PushCompanyMismatch as mismatch:
+            warning = f"Push blocked - {voucher_label or 'voucher'}: {mismatch}"
+            warnings.append(warning)
+            print(f"[Push] {warning}")
+            continue
+
         print(f"[Push] Importing {voucher_label or 'voucher'}...")
 
         try:
@@ -1812,6 +1905,34 @@ def run_single_push_command() -> int:
         ).strip()
         if not company_name:
             raise ValueError("company_name is required for direct push mode")
+
+        # Financial-year guard: refuse to write a voucher whose date isn't in the
+        # loaded company's financial year. A block is a retriable HOLD, not a
+        # failure — deferred:true maps to HTTP 503 in local-push-server.ts so the
+        # backend keeps the voucher queued and redelivers it once the correct
+        # financial year's company is active. A period we can't read blocks too.
+        company_period = read_loaded_company_period()
+        fy_error = None
+        if company_period is None:
+            fy_error = (
+                "Could not read the loaded company's financial year; refusing to "
+                "push until the correct company is confirmed open in TallyPrime."
+            )
+        else:
+            try:
+                assert_voucher_in_loaded_fy(payload, company_period)
+            except PushCompanyMismatch as mismatch:
+                fy_error = str(mismatch)
+        if fy_error:
+            print(json.dumps({
+                "ok": False,
+                "deferred": True,
+                "blocked": True,
+                "reason": "voucher_outside_loaded_financial_year",
+                "company_name": company_name,
+                "error": fy_error,
+            }))
+            return 0
 
         result = push_vouchers([payload], company_name)
         ok = bool(result.get("created") or result.get("altered")) and not result.get("errors")

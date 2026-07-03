@@ -307,6 +307,44 @@ def get_company_info() -> str:
     </ENVELOPE>""")
 
 
+def get_company_period() -> str:
+    """Fetch the loaded company's financial-year period (STARTINGFROM/ENDINGAT).
+
+    Scoped by SVCURRENTCOMPANY — the same context a push uses — so the period
+    returned is the period of the company a push would actually write to.
+    STARTINGFROM/ENDINGAT are the reliable FY-range fields (BOOKSFROM can come
+    back anomalous on some data sets). Used by the push guard to refuse a voucher
+    whose date falls outside the loaded company's financial year (e.g. a current
+    voucher while last year's same-named company is open)."""
+    return _fetch(f"""
+    <ENVELOPE>
+      <HEADER>
+        <VERSION>1</VERSION>
+        <TALLYREQUEST>Export</TALLYREQUEST>
+        <TYPE>Collection</TYPE>
+        <ID>CompanyPeriod</ID>
+      </HEADER>
+      <BODY>
+        <DESC>
+          <STATICVARIABLES>
+            <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+            <SVCURRENTCOMPANY>{_xml_escape(TALLY_COMPANY)}</SVCURRENTCOMPANY>
+          </STATICVARIABLES>
+          <TDL>
+            <TDLMESSAGE>
+              <COLLECTION NAME="CompanyPeriod" ISMODIFY="No">
+                <TYPE>Company</TYPE>
+                <FETCH>NAME, STARTINGFROM, ENDINGAT</FETCH>
+                <FILTERS>NonAggrFilter</FILTERS>
+              </COLLECTION>
+              <SYSTEM TYPE="FORMULAE" NAME="NonAggrFilter">$isaggregate = "No"</SYSTEM>
+            </TDLMESSAGE>
+          </TDL>
+        </DESC>
+      </BODY>
+    </ENVELOPE>""")
+
+
 # ── Change Detection ─────────────────────────────────────────────
 
 def get_company_alter_ids() -> str:
