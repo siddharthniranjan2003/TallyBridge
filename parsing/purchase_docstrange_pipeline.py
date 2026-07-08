@@ -24,6 +24,10 @@ DEFAULT_COMPANY_NAME = (
     or "K V ENTERPRISES"
 )
 DEFAULT_MATCH_THRESHOLD = float(_env("MINICPM_PURCHASE_MIN_MATCH_SCORE", "56") or "56")
+# Vendor-neutral (alien) matching uses a text-forward scorer on a different scale than
+# the vendor rule engine, so it gets its own, more conservative threshold: only a
+# confident text match replaces the plain OCR description (the user edits the rest).
+DEFAULT_ALIEN_MATCH_THRESHOLD = float(_env("MINICPM_ALIEN_MIN_MATCH_SCORE", "72") or "72")
 
 
 def _default_header_data() -> dict[str, Any]:
@@ -186,30 +190,54 @@ def run_docstrange_purchase_all_pipeline(
     }
 
     if is_alien:
-        # Unrecognized supplier: skip the rule engine entirely and return the items
-        # exactly as OCR'd inside a passthrough voucher flagged alien:true. The user
-        # edits the items in the cloud before the voucher is activated and pushed.
+        # Unrecognized supplier: no vendor rule engine. Extract items generically, then
+        # match each plain OCR description VENDOR-NEUTRALLY against this company's live
+        # stock catalog (when available); unmatched items keep their raw text. The
+        # voucher is flagged alien:true so the user edits it before activation/push.
         if not raw_items:
             warnings.append("Alien invoice: no usable purchase item rows could be parsed.")
             return base_payload
-        build_result = build_alien_voucher_payload(company_name, header_data, raw_items)
+        stock_rows: list[dict[str, Any]] = []
+        exact_map = None
+        if SUPABASE_URL and SUPABASE_KEY:
+            try:
+                context = resolve_supabase_company_context(company_name)
+                stock_rows = context["stock_items"]
+                exact_map = context.get("purchase_matching_exact_map")
+            except Exception as exc:  # noqa: BLE001 - matching is best-effort for aliens
+                warnings.append(f"Alien matching skipped: could not load live Supabase catalog: {exc}")
+        else:
+            warnings.append("Alien matching skipped: Supabase not configured; items kept as plain OCR text.")
+        build_result = build_alien_voucher_payload(
+            company_name,
+            header_data,
+            raw_items,
+            stock_rows=stock_rows,
+            min_score=DEFAULT_ALIEN_MATCH_THRESHOLD,
+            purchase_matching_exact_map=exact_map,
+        )
         push_queue_payload = build_purchase_queue_payload(
             company_name,
             build_result["voucher_payload"],
             build_result.get("source_payload"),
         )
         request_payload = _queue_request_payload(company_name, build_result)
+        matching_mode = "alien_generic_stock_match" if stock_rows else "alien_passthrough"
         return {
             **base_payload,
             "status": "success",
-            "master_source": "alien_passthrough",
+            "master_source": matching_mode,
             "summary": {
                 **base_payload["summary"],
+                "weak_match_count": len(build_result["weak_matches"]),
                 "inference_seconds": round(time.time() - started_at, 2),
-                "master_source": "alien_passthrough",
-                "matching_mode": "alien_passthrough",
+                "master_source": matching_mode,
+                "matching_mode": matching_mode,
             },
             "party_name": build_result["party_name"],
+            "matched_items": build_result["matched_items"],
+            "fuzzy_items": build_result["matched_items"],
+            "weak_matches": build_result["weak_matches"],
             "voucher_payload": build_result["voucher_payload"],
             "push_queue_payload": push_queue_payload,
             "push_queue_request_payload": request_payload,
@@ -224,6 +252,8 @@ def run_docstrange_purchase_all_pipeline(
                 "push_queue_payload": push_queue_payload,
                 "push_queue_request_payload": request_payload,
                 "source_payload": build_result.get("source_payload", {"items": []}),
+                "matched_items": build_result["matched_items"],
+                "weak_matches": build_result["weak_matches"],
                 "parsed_header": header_data,
             },
         }

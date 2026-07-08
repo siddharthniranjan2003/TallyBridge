@@ -1246,6 +1246,103 @@ def match_item_to_live_stock(raw_item: PurchaseRawItem, vendor: str, stock_rows:
     )
 
 
+def generic_text_score(query: str, candidate: str, invoice_rate: Decimal, stock_rate: Decimal) -> float:
+    """Text-forward similarity for vendor-neutral (alien) matching.
+
+    similarity_score() is tuned for the vendor rule engine (numeric tokens weighted
+    heavily, queries pre-engineered into canonical form), so it under-scores raw OCR
+    text — a near-identical name can land in the 50s. Here plain string similarity
+    (token-set / weighted ratio) dominates, with only a light rate-agreement nudge.
+    """
+    normalized_query = normalize_stock_name(query)
+    normalized_candidate = normalize_stock_name(candidate)
+    if not normalized_query or not normalized_candidate:
+        return 0.0
+    if normalized_query == normalized_candidate:
+        return 100.0
+    # Tokenize on non-alphanumeric boundaries so "TYPE-A" == "TYPE A" (OCR punctuation
+    # should not split a shared token and depress the overlap score).
+    query_tokens = set(re.findall(r"[A-Za-z0-9]+", normalized_query))
+    candidate_tokens = set(re.findall(r"[A-Za-z0-9]+", normalized_candidate))
+    if not query_tokens or not candidate_tokens:
+        return 0.0
+    # Token overlap from BOTH sides: how much of the OCR text the candidate explains AND
+    # how much of the candidate the OCR text covers. Averaging both punishes a candidate
+    # that merely shares one incidental common word (e.g. a colour) with the OCR line —
+    # which is what makes token_set_ratio over-match. Blended 50/50 with an order-aware
+    # full-string ratio so a true match (mostly-shared tokens) still scores high.
+    shared = len(query_tokens & candidate_tokens)
+    query_coverage = shared / len(query_tokens)
+    candidate_coverage = shared / len(candidate_tokens)
+    overlap_score = (query_coverage + candidate_coverage) / 2.0 * 100.0
+    if fuzz is not None:
+        ratio_score = float(fuzz.token_sort_ratio(normalized_query, normalized_candidate))
+    else:
+        ratio_score = SequenceMatcher(None, normalized_query, normalized_candidate).ratio() * 100.0
+    text_score = 0.5 * ratio_score + 0.5 * overlap_score
+    # Light rate-agreement nudge to break ties between textually similar names.
+    if invoice_rate > 0 and stock_rate > 0:
+        gap = abs(float(stock_rate - invoice_rate)) / max(float(invoice_rate), 1.0)
+        if gap <= 0.15:
+            text_score = min(100.0, text_score + 3.0)
+    return round(text_score, 2)
+
+
+def match_item_to_live_stock_generic(raw_item: PurchaseRawItem, stock_rows: list[dict[str, Any]]) -> StockMatch:
+    """Vendor-neutral catalog match for alien invoices.
+
+    Pure text similarity of the plain OCR description against every stock row — NO
+    vendor query rules, group/token filters, or match_preference. Used to suggest an
+    existing stock item; the caller keeps the raw OCR text when the best score is below
+    threshold. Party ledger is never inferred here (alien party stays the header name).
+    """
+    query = raw_item.raw_description
+    best_score = -1.0
+    best_row: dict[str, Any] | None = None
+    candidate_scores: list[dict[str, Any]] = []
+    for row in stock_rows:
+        score = generic_text_score(query, row.get("name", ""), raw_item.rate, decimal_value(row.get("rate", "0")))
+        candidate_scores.append(
+            {
+                "candidate_name": row.get("name", ""),
+                "score": round(score, 2),
+                "group_name": normalize_space(row.get("group_name", "")),
+                "unit": clean_numeric_unit(row.get("unit", "")),
+                "rate": float(round2(decimal_value(row.get("rate", "0")))),
+            }
+        )
+        if score > best_score:
+            best_score = score
+            best_row = row
+    candidate_scores.sort(key=lambda item: item["score"], reverse=True)
+    top_candidates = candidate_scores[:3]
+
+    if best_row is None:
+        return StockMatch(
+            stock_item_name=raw_item.raw_description,
+            unit=raw_item.unit or "NOS",
+            score=0.0,
+            group_name="",
+            stock_rate=Decimal("0"),
+            canonical_query=query,
+            trace={"reason": "no_candidate_found", "candidate_pool_size": 0, "top_candidates": []},
+        )
+    rounded_score = round(best_score, 2)
+    return StockMatch(
+        stock_item_name=best_row["name"],
+        unit=clean_numeric_unit(best_row.get("unit", "")) or raw_item.unit,
+        score=rounded_score,
+        group_name=normalize_space(best_row.get("group_name", "")),
+        stock_rate=decimal_value(best_row.get("rate", "0")),
+        canonical_query=query,
+        trace={
+            "reason": classify_match_reason(query, best_row.get("name", ""), rounded_score),
+            "candidate_pool_size": len(stock_rows),
+            "top_candidates": top_candidates,
+        },
+    )
+
+
 def stock_row_for_name(stock_item_name: str, stock_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     normalized_target = normalize_space(stock_item_name)
     if not normalized_target:
@@ -1723,14 +1820,19 @@ def build_alien_voucher_payload(
     company_name: str,
     header_data: dict[str, Any],
     raw_items: list[PurchaseRawItem],
+    stock_rows: list[dict[str, Any]] | None = None,
+    min_score: float = 0.0,
+    purchase_matching_exact_map: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Passthrough voucher for an unrecognized ("alien") supplier.
+    """Voucher for an unrecognized ("alien") supplier.
 
-    No stock matching and no description repair: each item's stock_item_name is the
-    plain OCR description. Party + purchase ledgers fall back to best-effort names
-    read from the invoice header, so no Supabase master data is required. The voucher
-    is flagged ``alien: True`` so the cloud/app marks it for manual review (the user
-    edits the items) before it is activated and pushed to Tally.
+    No vendor rule engine. When a live stock catalog is supplied, each plain OCR
+    description is matched VENDOR-NEUTRALLY against it (exact prior match, then pure
+    fuzzy similarity — no vendor query rules, group filters, or party assumptions); a
+    match at/above ``min_score`` becomes the canonical stock_item_name, otherwise the
+    raw OCR text is kept. With no catalog it is a plain passthrough. Party + purchase
+    ledgers fall back to header/default names (never a vendor ledger). Flagged
+    ``alien: True`` so the app marks it for review (the user edits) before push.
     """
     # Party + date must still satisfy the backend's voucher-level guards (which are not
     # relaxed for aliens), so fall back to visible placeholders the user corrects in the
@@ -1738,20 +1840,63 @@ def build_alien_voucher_payload(
     party_name = best_effort_party_ledger_name("", header_data) or "Unknown Supplier"
     inventory_ledger_name = best_effort_purchase_ledger_name()
     tax_entries = normalize_tax_entries(header_data.get("tax_entries", []))
+    stock_rows = stock_rows or []
 
     voucher_items: list[dict[str, Any]] = []
+    matched_items: list[dict[str, Any]] = []
+    weak_matches: list[dict[str, Any]] = []
     for item in raw_items:
         amount = round2(decimal_value(item.amount))
         rate = round2(decimal_value(item.rate))
         if rate <= 0 and item.quantity > 0 and amount > 0:
             rate = round2(amount / decimal_value(item.quantity))
-        voucher_items.append(
+
+        # Vendor-neutral catalog match: exact prior match first, then pure fuzzy. A
+        # below-threshold match leaves the plain OCR text in place for the user to edit.
+        stock_item_name = item.raw_description
+        unit = item.unit or "NOS"
+        match_score = 0.0
+        match_trace: dict[str, Any] | None = None
+        matched = False
+        if stock_rows:
+            stock_match = match_item_via_purchase_matching(item, stock_rows, purchase_matching_exact_map)
+            if stock_match is None:
+                stock_match = match_item_to_live_stock_generic(item, stock_rows)
+            match_score = stock_match.score
+            match_trace = stock_match.trace
+            if stock_match.score >= min_score:
+                stock_item_name = stock_match.stock_item_name
+                unit = stock_match.unit or unit
+                matched = True
+            else:
+                weak_matches.append(
+                    {
+                        "raw_description": item.raw_description,
+                        "matched_name": stock_match.stock_item_name,
+                        "score": stock_match.score,
+                        "match_trace": stock_match.trace,
+                    }
+                )
+        matched_items.append(
             {
-                "stock_item_name": item.raw_description,
+                "raw_description": item.raw_description,
+                "stock_item_name": stock_item_name,
                 "quantity": float(item.quantity),
                 "rate": float(rate),
                 "amount": float(amount),
-                "unit": item.unit or "NOS",
+                "unit": unit,
+                "match_score": match_score,
+                "matched": matched,
+                "match_trace": match_trace,
+            }
+        )
+        voucher_items.append(
+            {
+                "stock_item_name": stock_item_name,
+                "quantity": float(item.quantity),
+                "rate": float(rate),
+                "amount": float(amount),
+                "unit": unit,
                 "discount": 0.0,
                 "discount_pct": 0.0,
                 "godown_name": "Main Location",
@@ -1792,15 +1937,22 @@ def build_alien_voucher_payload(
         "ledger_entries": ledger_entries,
         "items": voucher_items,
     }
-    source_items = [{**it, "source": "Alien_Passthrough", "score": ""} for it in voucher_items]
+    source_items = [
+        {
+            **it,
+            "source": "Alien_Matched" if mi["matched"] else "Alien_Passthrough",
+            "score": format_match_score_percent(mi["match_score"]) if mi["match_score"] else "",
+        }
+        for it, mi in zip(voucher_items, matched_items)
+    ]
     return {
         "company_name": company_name,
         "vendor": "",
         "party_name": party_name,
         "voucher_payload": voucher_payload,
         "source_payload": {"items": source_items, "alien": True},
-        "matched_items": [],
-        "weak_matches": [],
+        "matched_items": matched_items,
+        "weak_matches": weak_matches,
         "subtotal": float(subtotal),
         "invoice_total": float(invoice_total),
         "tax_total": float(tax_total),

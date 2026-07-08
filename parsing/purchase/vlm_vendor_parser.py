@@ -1130,23 +1130,21 @@ def _parse_vendor_items(vendor: str, lines: list[OcrLine]) -> tuple[list[dict[st
 # matching column headers instead of a vendor-specific row regex. No description
 # repair, no stock matching: descriptions are returned as plain OCR text.
 
-_GENERIC_COL_KEYWORDS: dict[str, tuple[str, ...]] = {
-    # Order matters: each column is claimed by the first field (in this order) whose
-    # keyword it contains. rate/amount are resolved BEFORE unit so a "Unit Price" or
-    # "Rate Per Unit" header is taken as the rate, not the unit. "description" is last
-    # so the specific columns claim their cells first.
-    "hsn": ("HSN", "SAC"),
-    "item_code": ("ITEM CODE", "PART NO", "PART NUMBER", "PRODUCT CODE", "MATERIAL CODE", "SKU", "CAT NO", "CATALOGUE NO"),
-    "qty": ("QTY", "QUANTITY", "QNTY", "QNT"),
-    "rate": ("RATE", "PRICE"),
-    "amount": ("AMOUNT", "TAXABLE VALUE", "TAXABLE", "NET VALUE", "NET AMOUNT", "VALUE", "TOTAL"),
-    "unit": ("UOM", "U.O.M", "UNIT", "PER"),
-    "description": (
-        "DESCRIPTION", "PARTICULARS", "NATURE OF GOODS", "GOODS DESCRIPTION", "GOODS",
-        "PRODUCT NAME", "PRODUCT", "ITEM NAME", "ITEM DESCRIPTION", "MATERIAL DESCRIPTION",
-        "COMMODITY", "ITEM", "MATERIAL",
-    ),
-}
+# Each column header is classified to the FIRST field it matches in this priority. A
+# strong description noun ("DESCRIPTION"/"PARTICULARS"/"GOODS"...) is resolved BEFORE the
+# item-code token, so a combined header like "PART NUMBER AND PRODUCT DESCRIPTION" (used
+# by Grindwell-Norton / Saint-Gobain) reads as the description rather than being stolen by
+# "PART NUMBER" — while a pure "Item Code" still maps to item_code. rate/amount beat unit
+# so "Unit Price" is the rate. The weak description tokens (bare ITEM/PRODUCT/MATERIAL/
+# NAME) are tried LAST so they don't hijack a "... Code" or numeric column.
+_COL_HSN = ("HSN", "SAC")
+_COL_DESC_STRONG = ("DESC", "PARTICULARS", "GOODS", "COMMODITY", "NATURE OF GOODS")
+_COL_ITEMCODE = ("ITEM CODE", "PART NO", "PART NUMBER", "PRODUCT CODE", "MATERIAL CODE", "SKU", "CAT NO", "CATALOGUE NO", "CODE")
+_COL_QTY = ("QTY", "QUANTITY", "QNTY", "QNT")
+_COL_RATE = ("RATE", "PRICE")
+_COL_AMOUNT = ("AMOUNT", "TAXABLE VALUE", "TAXABLE", "NET VALUE", "NET AMOUNT", "VALUE", "TOTAL")
+_COL_UNIT = ("UOM", "U.O.M", "UNIT", "PER")
+_COL_DESC_WEAK = ("ITEM NAME", "ITEM DESCRIPTION", "PRODUCT NAME", "PRODUCT", "MATERIAL DESCRIPTION", "MATERIAL", "ITEM", "NAME")
 _GENERIC_ROW_SKIP = (
     "TOTAL", "SUBTOTAL", "SUB TOTAL", "GRAND", "CGST", "SGST", "IGST", "ROUND",
     "DISCOUNT", "FREIGHT", "CARRIAGE", "PACKING", "INSURANCE", "IN WORDS",
@@ -1173,18 +1171,34 @@ def _matches_skip_token(text: str) -> bool:
     return False
 
 
+def _classify_generic_column(cell_upper: str) -> str | None:
+    if not cell_upper:
+        return None
+    if any(k in cell_upper for k in _COL_HSN):
+        return "hsn"
+    if any(k in cell_upper for k in _COL_DESC_STRONG):
+        return "description"
+    if any(k in cell_upper for k in _COL_ITEMCODE):
+        return "item_code"
+    if any(k in cell_upper for k in _COL_QTY):
+        return "qty"
+    if any(k in cell_upper for k in _COL_RATE):
+        return "rate"
+    if any(k in cell_upper for k in _COL_AMOUNT):
+        return "amount"
+    if any(k in cell_upper for k in _COL_UNIT):
+        return "unit"
+    if any(k in cell_upper for k in _COL_DESC_WEAK):
+        return "description"
+    return None
+
+
 def _match_generic_columns(header_cells: list[str]) -> dict[str, int]:
-    uppers = [normalize_space(cell).upper() for cell in header_cells]
     mapping: dict[str, int] = {}
-    taken: set[int] = set()
-    for field, keywords in _GENERIC_COL_KEYWORDS.items():
-        for index, cell in enumerate(uppers):
-            if index in taken or not cell:
-                continue
-            if any(keyword in cell for keyword in keywords):
-                mapping[field] = index
-                taken.add(index)
-                break
+    for index, cell in enumerate(header_cells):
+        field = _classify_generic_column(normalize_space(cell).upper())
+        if field and field not in mapping:
+            mapping[field] = index
     return mapping
 
 
@@ -1813,6 +1827,23 @@ def parse_vlm_invoice(vlm_result: dict[str, Any]) -> dict[str, Any]:
             description_rows, numeric_rows = _parse_generic_items(vlm_result)
     except Exception as exc:
         warnings.append(str(exc))
+
+    # A recognized vendor whose layout-specific parser found nothing still gets a generic
+    # table-extraction attempt, so an unusual layout variant (e.g. a GNL bill with a
+    # multi-line description or dual gross/net price columns) is not dropped to "garbage".
+    # The vendor code is preserved so the downstream conversion keeps using its rule
+    # engine (e.g. GNL's "N BELT" -> EMERY BELT queries) for matching.
+    if vendor and not description_rows:
+        try:
+            fallback_desc, fallback_num = _parse_generic_items(vlm_result)
+        except Exception as exc:
+            warnings.append(f"Generic fallback extraction also failed: {exc}")
+        else:
+            if fallback_desc:
+                description_rows, numeric_rows = fallback_desc, fallback_num
+                warnings.append(
+                    f"{vendor} parser found no rows; recovered {len(fallback_desc)} via generic table extraction."
+                )
 
     discount_percent, discount_amount = _extract_discount_fields(lines)
     # Structured GST summary table (e.g. CP/RR/TOTEM page-2 bottom) is the reliable
