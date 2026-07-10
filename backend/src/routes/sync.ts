@@ -308,6 +308,59 @@ function normalizePushVoucherPayload(value: unknown) {
   };
 }
 
+// Stock-item master push (create item in Tally). Discriminated by kind:"stock_item"
+// inside voucher_payload so it rides the existing queue with no schema change; the
+// desktop engine branches on the same field (tally_pusher.is_stock_item_payload).
+const STOCK_ITEM_PUSH_KIND = "stock_item";
+const ALLOWED_STOCK_ITEM_GST_RATES = new Set([5, 12, 18, 28]);
+
+function isStockItemPushPayload(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const kind = normalizeTrimmedString((value as Record<string, unknown>).kind);
+  return kind?.toLowerCase() === STOCK_ITEM_PUSH_KIND;
+}
+
+function normalizePushStockItemPayload(value: unknown) {
+  const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+  if (!raw) {
+    return { error: "voucher_payload must be an object" };
+  }
+
+  const name = normalizeTrimmedString(raw.name);
+  if (!name) {
+    return { error: "voucher_payload.name is required for a stock item" };
+  }
+
+  const gstApplicable = normalizeBoolean(raw.gst_applicable) ?? true;
+  let gstRate: number | null = null;
+  if (gstApplicable) {
+    gstRate = normalizeFiniteNumber(raw.gst_rate) ?? 18;
+    if (!ALLOWED_STOCK_ITEM_GST_RATES.has(gstRate)) {
+      return { error: "voucher_payload.gst_rate must be one of: 5, 12, 18, 28" };
+    }
+  }
+
+  const openingQty = normalizeFiniteNumber(raw.opening_qty) ?? 0;
+  if (openingQty < 0) {
+    return { error: "voucher_payload.opening_qty must not be negative" };
+  }
+
+  return {
+    voucher: {
+      kind: STOCK_ITEM_PUSH_KIND,
+      name,
+      stock_group: normalizeTrimmedString(raw.stock_group),
+      unit: normalizeTrimmedString(raw.unit) || "NOS",
+      gst_applicable: gstApplicable,
+      ...(gstApplicable ? { gst_rate: gstRate } : {}),
+      hsn_code: normalizeTrimmedString(raw.hsn_code),
+      opening_qty: openingQty,
+    },
+  };
+}
+
 function normalizeSyncMeta(value: unknown): SyncMeta {
   const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   const rawMode = raw.voucher_sync_mode;
@@ -2305,7 +2358,9 @@ router.post("/push-queue", requireApiKey, async (req, res) => {
     return res.status(companyLookup.status).json({ error: companyLookup.error });
   }
 
-  const normalizedVoucher = normalizePushVoucherPayload(voucher_payload);
+  const normalizedVoucher = isStockItemPushPayload(voucher_payload)
+    ? normalizePushStockItemPayload(voucher_payload)
+    : normalizePushVoucherPayload(voucher_payload);
   if (normalizedVoucher.error) {
     return res.status(400).json({ error: normalizedVoucher.error });
   }
@@ -2542,6 +2597,7 @@ router.get("/push-queue", requireApiKey, async (req, res) => {
     }
 
     const jobs = (data || []).filter((row: any) =>
+      isStockItemPushPayload(row?.voucher_payload) ||
       isAllowedPushVoucherType(row?.voucher_payload?.voucher_type)
     );
     return res.json({ jobs });
@@ -2551,6 +2607,53 @@ router.get("/push-queue", requireApiKey, async (req, res) => {
     return res.status(500).json({ error: errorMessage });
   }
 });
+
+// The desktop has just created this stock item in TallyPrime, but `stock_items`
+// only learns about it on the next sync — up to a full sync interval away. Every
+// client reads `stock_items` straight from Supabase, so until then the item is
+// invisible to any device that reloads, and the app's pre-push validation blocks
+// the very invoice the item was created for.
+//
+// Write the row now, keyed exactly the way the sync upsert keys it
+// (company_id, name), so the next sync overwrites this placeholder IN PLACE with
+// Tally's authoritative values (real rate, part_code, closing_qty) rather than
+// creating a second row. Only columns the sync also writes are set here.
+//
+// Insert-only (ignoreDuplicates): an ack can be retried after a sync has already
+// written the row. That row is authoritative and must not be clobbered with our
+// zeros, so a conflict is a no-op.
+//
+// Best-effort: this must NEVER fail the ack. An un-acked job is re-offered every
+// 5s and re-imported into Tally, so throwing here would be far worse than a
+// missing row the next sync fills in regardless.
+async function seedCreatedStockItem(companyId: string, payload: any) {
+  try {
+    // Must match tb_ingest_masters' TRIM(name) and the case we sent to Tally,
+    // or the unique key won't collide and the sync would insert a second row.
+    const name = normalizeTrimmedString(payload?.name);
+    if (!companyId || !name) return;
+
+    const { error } = await supabase.from("stock_items").upsert(
+      {
+        company_id: companyId,
+        name,
+        group_name: normalizeTrimmedString(payload.stock_group),
+        unit: normalizeTrimmedString(payload.unit) || "NOS",
+        closing_qty: normalizeFiniteNumber(payload.opening_qty) ?? 0,
+        closing_value: 0,
+        rate: 0,
+        synced_at: new Date().toISOString(),
+      },
+      { onConflict: "company_id,name", ignoreDuplicates: true }
+    );
+
+    if (error) {
+      console.error("[PushQueue] Stock item seed failed:", error.message);
+    }
+  } catch (err: any) {
+    console.error("[PushQueue] Stock item seed failed:", err?.message || err);
+  }
+}
 
 router.post("/push-results", requireApiKey, async (req, res) => {
   const rawResults = Array.isArray(req.body) ? req.body : req.body?.results;
@@ -2584,13 +2687,25 @@ router.post("/push-results", requireApiKey, async (req, res) => {
         pushed_at: status === "pushed" ? new Date().toISOString() : null,
       };
 
-      const { error } = await supabase
+      const { data: updatedRow, error } = await supabase
         .from("push_queue")
         .update(updatePayload)
-        .eq("id", id);
+        .eq("id", id)
+        .select("company_id, voucher_payload")
+        .maybeSingle();
 
       if (error) {
         throw new Error(`Push result update failed for ${id}: ${error.message}`);
+      }
+
+      // A stock-item master just landed in Tally: publish it to the cloud now so
+      // every client sees it immediately, instead of after the next sync.
+      if (
+        status === "pushed" &&
+        updatedRow &&
+        isStockItemPushPayload(updatedRow.voucher_payload)
+      ) {
+        await seedCreatedStockItem(updatedRow.company_id, updatedRow.voucher_payload);
       }
     }
 

@@ -1713,7 +1713,7 @@ def run_pending_push_cycle(
 ) -> None:
     # PUSH PHASE 1: outbound Tally import is optional and must never break the
     # already-stable inbound sync path.
-    from tally_pusher import push_vouchers
+    from tally_pusher import is_stock_item_payload, push_stock_items, push_vouchers
 
     if not quiet_no_jobs:
         print("[Push] Checking backend queue for pending Sales/Purchase vouchers...")
@@ -1792,26 +1792,38 @@ def run_pending_push_cycle(
             print("[Push] Skipping malformed push job from backend queue.")
             continue
 
+        stock_item_job = is_stock_item_payload(voucher_payload)
         voucher_label = (
-            f"{voucher_payload.get('voucher_type', 'Voucher')} "
-            f"{voucher_payload.get('voucher_number', '').strip()}".strip()
+            f"Stock item {voucher_payload.get('name', '')}".strip()
+            if stock_item_job
+            else (
+                f"{voucher_payload.get('voucher_type', 'Voucher')} "
+                f"{voucher_payload.get('voucher_number', '').strip()}".strip()
+            )
         )
 
         # FY guard: don't write a voucher whose date isn't in the loaded
         # company's financial year — leave it pending (no push, no ack) so it
-        # imports once the correct year's company is open.
-        try:
-            assert_voucher_in_loaded_fy(voucher_payload, company_period)
-        except PushCompanyMismatch as mismatch:
-            warning = f"Push blocked - {voucher_label or 'voucher'}: {mismatch}"
-            warnings.append(warning)
-            print(f"[Push] {warning}")
-            continue
+        # imports once the correct year's company is open. Stock-item masters
+        # have no date, so the date check is skipped for them; the cycle-level
+        # company-period read above (fail-closed) remains their loaded-company
+        # protection.
+        if not stock_item_job:
+            try:
+                assert_voucher_in_loaded_fy(voucher_payload, company_period)
+            except PushCompanyMismatch as mismatch:
+                warning = f"Push blocked - {voucher_label or 'voucher'}: {mismatch}"
+                warnings.append(warning)
+                print(f"[Push] {warning}")
+                continue
 
         print(f"[Push] Importing {voucher_label or 'voucher'}...")
 
         try:
-            result = push_vouchers([voucher_payload], company=COMPANY)
+            if stock_item_job:
+                result = push_stock_items([voucher_payload], company=COMPANY)
+            else:
+                result = push_vouchers([voucher_payload], company=COMPANY)
             # Treat a push as successful ONLY if Tally actually created or altered
             # a voucher and reported no errors — mirroring run_single_push_command.
             # A busy/locked Tally that returns created=0/altered=0/errors=0 (e.g. an
@@ -1886,7 +1898,7 @@ def run_poll_push_queue_command() -> int:
 def run_single_push_command() -> int:
     # PUSH LOCAL API: reuse the existing engine entrypoint for one direct
     # voucher push so the local backend can hand work to TallyBridge cleanly.
-    from tally_pusher import push_vouchers
+    from tally_pusher import is_stock_item_payload, push_stock_items, push_vouchers
 
     try:
         raw_payload = sys.stdin.read().strip()
@@ -1911,6 +1923,7 @@ def run_single_push_command() -> int:
         # failure — deferred:true maps to HTTP 503 in local-push-server.ts so the
         # backend keeps the voucher queued and redelivers it once the correct
         # financial year's company is active. A period we can't read blocks too.
+        stock_item_job = is_stock_item_payload(payload)
         company_period = read_loaded_company_period()
         fy_error = None
         if company_period is None:
@@ -1918,7 +1931,9 @@ def run_single_push_command() -> int:
                 "Could not read the loaded company's financial year; refusing to "
                 "push until the correct company is confirmed open in TallyPrime."
             )
-        else:
+        elif not stock_item_job:
+            # Stock-item masters have no date; the readable-period check above is
+            # their loaded-company protection, the date-range check is skipped.
             try:
                 assert_voucher_in_loaded_fy(payload, company_period)
             except PushCompanyMismatch as mismatch:
@@ -1934,7 +1949,10 @@ def run_single_push_command() -> int:
             }))
             return 0
 
-        result = push_vouchers([payload], company_name)
+        if stock_item_job:
+            result = push_stock_items([payload], company_name)
+        else:
+            result = push_vouchers([payload], company_name)
         ok = bool(result.get("created") or result.get("altered")) and not result.get("errors")
         print(json.dumps({
             "ok": ok,

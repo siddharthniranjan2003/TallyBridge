@@ -532,3 +532,159 @@ def push_vouchers(vouchers: list[dict], company: str = TALLY_COMPANY) -> dict:
     # could mistake it for a (no-op) success and ack/drop the voucher (push-02).
     response_xml = _assert_data_response(_post(envelope))
     return parse_push_response(response_xml)
+
+
+# ── Stock item master push ──────────────────────────────────────
+
+STOCK_ITEM_KIND = "stock_item"
+ALLOWED_STOCK_ITEM_GST_RATES = (5, 12, 18, 28)
+# GST rollout date; safe constant lower bound for APPLICABLEFROM on new items.
+_GST_APPLICABLE_FROM = "20170701"
+
+
+def is_stock_item_payload(payload) -> bool:
+    """True if a queue payload is a stock-item master create (kind discriminator)
+    rather than a voucher. Callers branch on this to pick the right pusher and
+    to skip the voucher-date FY guard (masters have no date)."""
+    return (
+        isinstance(payload, dict)
+        and str(payload.get("kind") or "").strip().lower() == STOCK_ITEM_KIND
+    )
+
+
+def _xml_attr_escape(value: str) -> str:
+    # _xml_escape (saxutils escape) covers element text but leaves double quotes
+    # alone; inside a NAME="..." attribute a literal quote (e.g. BOLT 1/2") would
+    # terminate the attribute and corrupt the envelope.
+    return _xml_escape(value).replace('"', "&quot;")
+
+
+def _build_stock_item_gst_xml(gst_rate: int, hsn_code: str) -> str:
+    half_rate = Decimal(gst_rate) / 2
+    rate_details = "".join(
+        "<RATEDETAILS.LIST>"
+        f"<GSTRATEDUTYHEAD>{duty_head}</GSTRATEDUTYHEAD>"
+        "<GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE>"
+        f"<GSTRATE>{_format_discount(Decimal(rate))}</GSTRATE>"
+        "</RATEDETAILS.LIST>"
+        for duty_head, rate in (
+            ("CGST", half_rate),
+            ("SGST/UTGST", half_rate),
+            ("IGST", Decimal(gst_rate)),
+        )
+    )
+    hsn_tag = f"<HSNCODE>{_xml_escape(hsn_code)}</HSNCODE>" if hsn_code else ""
+    hsn_details = (
+        "<HSNDETAILS.LIST>"
+        f"<APPLICABLEFROM>{_GST_APPLICABLE_FROM}</APPLICABLEFROM>"
+        f"<HSNCODE>{_xml_escape(hsn_code)}</HSNCODE>"
+        "<SRCOFHSNDETAILS>Specify Details Here</SRCOFHSNDETAILS>"
+        "</HSNDETAILS.LIST>"
+        if hsn_code
+        else ""
+    )
+    return (
+        "<GSTAPPLICABLE>&#4; Applicable</GSTAPPLICABLE>"
+        "<GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>"
+        "<GSTDETAILS.LIST>"
+        f"<APPLICABLEFROM>{_GST_APPLICABLE_FROM}</APPLICABLEFROM>"
+        f"{hsn_tag}"
+        "<CALCULATIONTYPE>On Value</CALCULATIONTYPE>"
+        "<TAXABILITY>Taxable</TAXABILITY>"
+        "<STATEWISEDETAILS.LIST>"
+        "<STATENAME>&#4; Any</STATENAME>"
+        f"{rate_details}"
+        "</STATEWISEDETAILS.LIST>"
+        "</GSTDETAILS.LIST>"
+        f"{hsn_details}"
+    )
+
+
+def _build_stock_item_xml_block(item: dict) -> str:
+    name = str(item.get("name") or "").strip()
+    if not name:
+        raise ValueError("stock item name is required")
+    unit = str(item.get("unit") or "NOS").strip() or "NOS"
+    stock_group = str(item.get("stock_group") or "").strip()
+    hsn_code = str(item.get("hsn_code") or "").strip()
+    gst_applicable = bool(item.get("gst_applicable", True))
+
+    if gst_applicable:
+        try:
+            gst_rate = int(item.get("gst_rate", 18))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("gst_rate must be a number") from exc
+        if gst_rate not in ALLOWED_STOCK_ITEM_GST_RATES:
+            raise ValueError(
+                f"gst_rate must be one of {ALLOWED_STOCK_ITEM_GST_RATES}, got {gst_rate}"
+            )
+        gst_xml = _build_stock_item_gst_xml(gst_rate, hsn_code)
+    else:
+        gst_xml = "<GSTAPPLICABLE>&#4; Not Applicable</GSTAPPLICABLE>"
+
+    opening_qty = _decimal_from_value(item.get("opening_qty", 0), "opening_qty")
+    if opening_qty < 0:
+        raise ValueError("opening_qty must not be negative")
+    opening_xml = (
+        f"<OPENINGBALANCE>{_format_quantity(opening_qty)} {_xml_escape(unit)}</OPENINGBALANCE>"
+        if opening_qty > 0
+        else "<OPENINGBALANCE>0</OPENINGBALANCE>"
+    )
+
+    parent_xml = (
+        f"<PARENT>{_xml_escape(stock_group)}</PARENT>" if stock_group else "<PARENT/>"
+    )
+    # Tally treats master ACTION="Create" as an upsert (live-verified: a repeat
+    # Create on an existing name reports ALTERED=1, not an error), so a queue
+    # job re-offered after a lost ack is safe to send again.
+    return (
+        f'<STOCKITEM NAME="{_xml_attr_escape(name)}" ACTION="Create">'
+        f"<NAME.LIST><NAME>{_xml_escape(name)}</NAME></NAME.LIST>"
+        f"{parent_xml}"
+        f"<BASEUNITS>{_xml_escape(unit)}</BASEUNITS>"
+        f"{gst_xml}"
+        f"{opening_xml}"
+        "</STOCKITEM>"
+    )
+
+
+def _build_masters_import_envelope(items: list[dict], company: str) -> str:
+    if not items:
+        raise ValueError("push_stock_items received no items")
+
+    tally_messages = "".join(
+        f'<TALLYMESSAGE xmlns:UDF="TallyUDF">{_build_stock_item_xml_block(item)}</TALLYMESSAGE>'
+        for item in items
+    )
+    static_variables = (
+        f"<STATICVARIABLES><SVCURRENTCOMPANY>{_xml_escape(company)}</SVCURRENTCOMPANY></STATICVARIABLES>"
+        if (company or "").strip()
+        else ""
+    )
+    return (
+        "<ENVELOPE>"
+        "<HEADER>"
+        "<VERSION>1</VERSION>"
+        "<TALLYREQUEST>Import</TALLYREQUEST>"
+        "<TYPE>Data</TYPE>"
+        "<ID>All Masters</ID>"
+        "</HEADER>"
+        "<BODY>"
+        "<DESC>"
+        f"{static_variables}"
+        "</DESC>"
+        "<DATA>"
+        f"{tally_messages}"
+        "</DATA>"
+        "</BODY>"
+        "</ENVELOPE>"
+    )
+
+
+def push_stock_items(items: list[dict], company: str = TALLY_COMPANY) -> dict:
+    """Create stock item masters in the loaded Tally company via an Import Data
+    'All Masters' envelope. Same transport, response parsing, and success
+    semantics (created||altered && !errors) as push_vouchers."""
+    envelope = _build_masters_import_envelope(items, company)
+    response_xml = _assert_data_response(_post(envelope))
+    return parse_push_response(response_xml)
