@@ -199,11 +199,13 @@ def run_docstrange_purchase_all_pipeline(
             return base_payload
         stock_rows: list[dict[str, Any]] = []
         exact_map = None
+        audit_trail_map = None
         if SUPABASE_URL and SUPABASE_KEY:
             try:
                 context = resolve_supabase_company_context(company_name)
                 stock_rows = context["stock_items"]
                 exact_map = context.get("purchase_matching_exact_map")
+                audit_trail_map = context.get("audit_trail_map")
             except Exception as exc:  # noqa: BLE001 - matching is best-effort for aliens
                 warnings.append(f"Alien matching skipped: could not load live Supabase catalog: {exc}")
         else:
@@ -215,6 +217,7 @@ def run_docstrange_purchase_all_pipeline(
             stock_rows=stock_rows,
             min_score=DEFAULT_ALIEN_MATCH_THRESHOLD,
             purchase_matching_exact_map=exact_map,
+            audit_trail_map=audit_trail_map,
         )
         push_queue_payload = build_purchase_queue_payload(
             company_name,
@@ -280,6 +283,7 @@ def run_docstrange_purchase_all_pipeline(
         context["ledgers"],
         min_match_score,
         context.get("purchase_matching_exact_map"),
+        context.get("audit_trail_map"),
     )
 
     push_queue_payload = build_purchase_queue_payload(

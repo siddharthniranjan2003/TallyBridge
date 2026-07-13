@@ -857,6 +857,7 @@ def run_purchase_vl_pipeline(
             context["ledgers"],
             min_match_score,
             context.get("purchase_matching_exact_map"),
+            context.get("audit_trail_map"),
         )
     except Exception as exc:  # noqa: BLE001 - mirror the soft-failure behavior expected by the endpoint
         warnings.append(f"Matching skipped: {exc}")

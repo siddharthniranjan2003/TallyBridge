@@ -14,8 +14,12 @@ except Exception:  # pragma: no cover - optional acceleration
 
 from lib.env import make_env_loader
 from lib.numeric import decimal_value, normalize_decimal_token, parse_date_to_iso, pretty_number, round2
-from lib.text import normalize_space
+from lib.text import audit_trail_key, normalize_space
 from purchase.models import PurchaseRawItem, StockMatch
+
+# match_trace reasons for the two exact-lookup tables, in the order they are tried.
+AUDIT_TRAIL_REASON = "audit_trail_exact_lookup"
+PURCHASE_MATCHING_REASON = "purchase_matching_exact_lookup"
 
 _env = make_env_loader(Path(__file__).resolve().parents[1] / ".env")
 DEFAULT_PURCHASE_LEDGER = _env("MINICPM_PURCHASE_LEDGER", "PURCHASE GST") or "PURCHASE GST"
@@ -1381,9 +1385,47 @@ def match_item_via_purchase_matching(
         stock_rate=decimal_value(stock_row.get("rate", "0")) if stock_row else Decimal("0"),
         canonical_query=raw_item.raw_description,
         trace={
-            "reason": "purchase_matching_exact_lookup",
+            "reason": PURCHASE_MATCHING_REASON,
             "lookup_table": "Purchase_Matching",
             "invoice_item_description": invoice_description,
+            "matched_name": tally_item_name,
+            "stock_row_found": bool(stock_row),
+        },
+    )
+
+
+def match_item_via_audit_trail(
+    raw_item: PurchaseRawItem,
+    stock_rows: list[dict[str, Any]],
+    audit_trail_map: dict[str, str] | None,
+) -> StockMatch | None:
+    """Resolve a line from Audit_Trail_Purchase, the trail of corrections users
+    actually pushed to Tally. Tried before every other matcher, so a human decision
+    always outranks the vendor rules. Keyed case-insensitively (see audit_trail_key)
+    because raw_description's casing differs between the vendor and alien paths."""
+    if not audit_trail_map:
+        return None
+
+    lookup_key = audit_trail_key(raw_item.raw_description)
+    if not lookup_key:
+        return None
+
+    tally_item_name = audit_trail_map.get(lookup_key)
+    if not tally_item_name:
+        return None
+
+    stock_row = stock_row_for_name(tally_item_name, stock_rows)
+    return StockMatch(
+        stock_item_name=tally_item_name,
+        unit=clean_numeric_unit(stock_row.get("unit", "")) if stock_row else (raw_item.unit or "NOS"),
+        score=100.0,
+        group_name=normalize_space(stock_row.get("group_name", "")) if stock_row else "",
+        stock_rate=decimal_value(stock_row.get("rate", "0")) if stock_row else Decimal("0"),
+        canonical_query=raw_item.raw_description,
+        trace={
+            "reason": AUDIT_TRAIL_REASON,
+            "lookup_table": "Audit_Trail_Purchase",
+            "raw_ocr": lookup_key,
             "matched_name": tally_item_name,
             "stock_row_found": bool(stock_row),
         },
@@ -1504,6 +1546,21 @@ def format_match_score_percent(score: float) -> str:
     return f"{rounded:.2f}%"
 
 
+def source_label_for_reason(reason: str) -> str:
+    if reason == AUDIT_TRAIL_REASON:
+        return "Audit_Trail"
+    if reason == PURCHASE_MATCHING_REASON:
+        return "Purchase_Matching"
+    return "Matching_Algorithem"
+
+
+def alien_source_label(matched_item: dict[str, Any]) -> str:
+    reason = str((matched_item.get("match_trace") or {}).get("reason", ""))
+    if reason == AUDIT_TRAIL_REASON:
+        return "Audit_Trail"
+    return "Alien_Matched" if matched_item.get("matched") else "Alien_Passthrough"
+
+
 def build_source_payload_items(
     voucher_items: list[dict[str, Any]],
     matched_items: list[dict[str, Any]],
@@ -1515,7 +1572,11 @@ def build_source_payload_items(
         source_items.append(
             {
                 **voucher_item,
-                "source": "Purchase_Matching" if reason == "purchase_matching_exact_lookup" else "Matching_Algorithem",
+                # The line's OCR text. voucher_item carries only the resolved name, so
+                # take it from the index-aligned matched_item; the app reads it back to
+                # record (raw_ocr -> the item the user committed) into Audit_Trail_Purchase.
+                "raw_ocr": str(matched_item.get("raw_description", "") or ""),
+                "source": source_label_for_reason(reason),
                 "score": format_match_score_percent(float(matched_item.get("match_score", 0) or 0)),
             }
         )
@@ -1583,6 +1644,7 @@ def build_voucher_payload(
     ledgers: list[dict[str, Any]],
     min_score: float,
     purchase_matching_exact_map: dict[str, str] | None = None,
+    audit_trail_map: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     tax_entries = normalize_tax_entries(header_data.get("tax_entries", []))
     tax_total = round2(sum((decimal_value(entry["amount"]) for entry in tax_entries), Decimal("0")))
@@ -1609,7 +1671,11 @@ def build_voucher_payload(
     matched_items: list[dict[str, Any]] = []
     weak_matches: list[dict[str, Any]] = []
     for raw_item in items:
-        stock_match = match_item_via_purchase_matching(raw_item, stock_rows, purchase_matching_exact_map)
+        # A user's committed correction outranks the curated table, which outranks the
+        # vendor rule engine.
+        stock_match = match_item_via_audit_trail(raw_item, stock_rows, audit_trail_map)
+        if stock_match is None:
+            stock_match = match_item_via_purchase_matching(raw_item, stock_rows, purchase_matching_exact_map)
         if stock_match is None:
             stock_match = match_item_to_live_stock(raw_item, vendor, stock_rows)
         if stock_match.score < min_score:
@@ -1823,6 +1889,7 @@ def build_alien_voucher_payload(
     stock_rows: list[dict[str, Any]] | None = None,
     min_score: float = 0.0,
     purchase_matching_exact_map: dict[str, str] | None = None,
+    audit_trail_map: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Voucher for an unrecognized ("alien") supplier.
 
@@ -1859,7 +1926,9 @@ def build_alien_voucher_payload(
         match_trace: dict[str, Any] | None = None
         matched = False
         if stock_rows:
-            stock_match = match_item_via_purchase_matching(item, stock_rows, purchase_matching_exact_map)
+            stock_match = match_item_via_audit_trail(item, stock_rows, audit_trail_map)
+            if stock_match is None:
+                stock_match = match_item_via_purchase_matching(item, stock_rows, purchase_matching_exact_map)
             if stock_match is None:
                 stock_match = match_item_to_live_stock_generic(item, stock_rows)
             match_score = stock_match.score
@@ -1940,7 +2009,8 @@ def build_alien_voucher_payload(
     source_items = [
         {
             **it,
-            "source": "Alien_Matched" if mi["matched"] else "Alien_Passthrough",
+            "raw_ocr": str(mi.get("raw_description", "") or ""),
+            "source": alien_source_label(mi),
             "score": format_match_score_percent(mi["match_score"]) if mi["match_score"] else "",
         }
         for it, mi in zip(voucher_items, matched_items)

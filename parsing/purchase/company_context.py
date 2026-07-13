@@ -7,7 +7,7 @@ from typing import Any
 import requests
 
 from lib.env import make_env_loader
-from lib.text import normalize_space
+from lib.text import audit_trail_key, normalize_space
 
 _env = make_env_loader(Path(__file__).resolve().parents[1] / ".env")
 SUPABASE_URL = _env("SUPABASE_URL", "")
@@ -16,11 +16,16 @@ CONTEXT_CACHE_TTL_SECONDS = max(
     30,
     int(_env("MINICPM_SUPABASE_CACHE_SECONDS", _env("MINICPM_TALLY_CACHE_SECONDS", "300")) or "300"),
 )
+# The audit trail is a learning loop: a correction a user just pushed must be
+# visible on the very next scan, so it refreshes far more often than the heavy,
+# slow-changing stock/ledger catalog (which keeps the longer TTL above).
+AUDIT_TRAIL_CACHE_TTL_SECONDS = max(5, int(_env("AUDIT_TRAIL_CACHE_SECONDS", "30") or "30"))
 SUPABASE_PAGE_SIZE = max(100, int(_env("MINICPM_SUPABASE_PAGE_SIZE", "1000") or "1000"))
 SUPABASE_MAX_PAGES = max(1, int(_env("MINICPM_SUPABASE_MAX_PAGES", "20") or "20"))
 SUPABASE_TIMEOUT_SECONDS = max(5, int(_env("MINICPM_SUPABASE_TIMEOUT_SECONDS", "20") or "20"))
 _CONTEXT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _PURCHASE_MATCHING_EXACT_CACHE: tuple[float, dict[str, str]] | None = None
+_AUDIT_TRAIL_CACHE: tuple[float, dict[str, str]] | None = None
 
 
 def supabase_headers() -> dict[str, str]:
@@ -225,11 +230,51 @@ def resolve_purchase_matching_exact_map() -> dict[str, str]:
     return exact_map
 
 
+def fetch_audit_trail_rows() -> list[dict[str, Any]]:
+    return fetch_supabase_table_rows("Audit_Trail_Purchase", select="raw_ocr,actual_item")
+
+
+def resolve_audit_trail_map() -> dict[str, str]:
+    """raw OCR text -> the stock item a human actually committed to Tally.
+
+    Rows arrive ordered by id ascending, so a later correction of the same OCR text
+    simply overwrites the earlier one: newest row wins, while every row is kept in
+    the table as the audit history. An unreachable or absent table yields an empty
+    map, which makes the audit lookup a no-op and leaves existing matching untouched.
+    """
+    global _AUDIT_TRAIL_CACHE
+
+    now = time.time()
+    if _AUDIT_TRAIL_CACHE and now - _AUDIT_TRAIL_CACHE[0] < AUDIT_TRAIL_CACHE_TTL_SECONDS:
+        return _AUDIT_TRAIL_CACHE[1]
+
+    try:
+        rows = fetch_audit_trail_rows()
+    except (RuntimeError, ValueError):
+        _AUDIT_TRAIL_CACHE = (now, {})
+        return {}
+
+    audit_map: dict[str, str] = {}
+    for row in rows:
+        lookup_key = audit_trail_key(row.get("raw_ocr", ""))
+        actual_item = normalize_space(row.get("actual_item", ""))
+        if not lookup_key or not actual_item:
+            continue
+        audit_map[lookup_key] = actual_item
+
+    _AUDIT_TRAIL_CACHE = (now, audit_map)
+    return audit_map
+
+
 def resolve_supabase_company_context(company_name: str) -> dict[str, Any]:
     cached = _CONTEXT_CACHE.get(company_name)
     now = time.time()
     if cached and now - cached[0] < CONTEXT_CACHE_TTL_SECONDS:
-        return cached[1]
+        context = cached[1]
+        # Refresh only the audit map on a catalog-cache hit, on its own short TTL, so a
+        # just-taught correction is picked up within seconds rather than minutes.
+        context["audit_trail_map"] = resolve_audit_trail_map()
+        return context
 
     company = fetch_supabase_company_record(company_name)
     ledgers = fetch_supabase_company_rows(
@@ -249,6 +294,7 @@ def resolve_supabase_company_context(company_name: str) -> dict[str, Any]:
         "ledgers": ledgers,
         "stock_items": stock_items,
         "purchase_matching_exact_map": resolve_purchase_matching_exact_map(),
+        "audit_trail_map": resolve_audit_trail_map(),
     }
     _CONTEXT_CACHE[company_name] = (now, context)
     return context
