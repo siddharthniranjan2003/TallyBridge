@@ -1,0 +1,20 @@
+  npm run build:python          # ← rebuilds the engine into python-dist\
+  $env:GH_TOKEN = (gh auth token)
+  npm run build                 # UI + main
+  npx electron-builder --publish always
+
+
+  
+  gh release edit v1.2.5 --repo siddharthniranjan2003/TallyBridge --draft=false
+
+
+
+  testing.riplara (tally-bridge-testing-env, 828647628834):
+  gcloud config configurations activate testing-riplara
+  gcloud run deploy tallybridge-backend --source backend --region asia-south1 --project tally-bridge-testing-env
+  gcloud run deploy tallybridge-parsing --source parsing --region asia-south1 --project tally-bridge-testing-env
+
+  deployment.riplara (tally-bridge-deployment-env, 822222628942):
+  gcloud config configurations activate deployment-riplara
+  gcloud run deploy tallybridge-backend --source backend --region asia-south1 --project tally-bridge-deployment-env
+  gcloud run deploy tallybridge-parsing --source parsing --region asia-south1 --project tally-bridge-deployment-env
