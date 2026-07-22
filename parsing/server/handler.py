@@ -1222,21 +1222,14 @@ def fetch_party_state(party_name: str) -> str:
 
 
 def fetch_fallback_rate_for_item(party_name: str, item_name: str) -> dict | None:
-    """Most recent SALE rate for this item from a DIFFERENT party.
-
-    Sale-scoped on purpose: this feeds build_sale_rate_map, so borrowing a
-    purchase line would stamp a cost price onto a sale invoice. voucher_type is
-    read off the parent voucher — the copy on voucher_items is unmaintained and
-    NULL on everything synced since 2026-07-20.
-    """
+    """Most recent rate for this item from a DIFFERENT party."""
     if not SUPABASE_URL or not SUPABASE_KEY or not item_name:
         return None
     url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/voucher_items"
     params = {
-        "select": "stock_item_name,rate,created_at,vouchers!inner(party_name,voucher_type)",
+        "select": "stock_item_name,rate,created_at,vouchers!inner(party_name)",
         "stock_item_name": f"eq.{item_name}",
         "vouchers.party_name": f"neq.{party_name}",
-        "vouchers.voucher_type": "ilike.*sale*",
         "order": "created_at.desc",
         "limit": "1",
     }
