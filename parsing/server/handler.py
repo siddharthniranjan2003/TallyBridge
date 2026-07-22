@@ -1222,7 +1222,13 @@ def fetch_party_state(party_name: str) -> str:
 
 
 def fetch_fallback_rate_for_item(party_name: str, item_name: str) -> dict | None:
-    """Most recent rate for this item from a DIFFERENT party."""
+    """Most recent GST SALE rate for this item from a DIFFERENT party.
+
+    Sale-scoped: this feeds build_sale_rate_map, so an unfiltered lookup can
+    return a purchase line and stamp a supplier cost price onto a sale invoice.
+    voucher_type is read off the parent voucher because the copy on
+    voucher_items is unmaintained and NULL on rows synced since 2026-07-20.
+    """
     if not SUPABASE_URL or not SUPABASE_KEY or not item_name:
         return None
     url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/voucher_items"
@@ -1230,6 +1236,7 @@ def fetch_fallback_rate_for_item(party_name: str, item_name: str) -> dict | None
         "select": "stock_item_name,rate,created_at,vouchers!inner(party_name)",
         "stock_item_name": f"eq.{item_name}",
         "vouchers.party_name": f"neq.{party_name}",
+        "vouchers.voucher_type": "eq.GST SALE",
         "order": "created_at.desc",
         "limit": "1",
     }
