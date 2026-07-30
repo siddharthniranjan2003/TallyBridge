@@ -4,17 +4,21 @@
     "type": "split",
     "children": [
       {
-        "id": "53661be195a6ef4f",
+        "id": "cc1fddc743bed9bb",
         "type": "tabs",
         "children": [
           {
-            "id": "c83086e2dec17eba",
+            "id": "95974d0e418419b8",
             "type": "leaf",
             "state": {
-              "type": "graph",
-              "state": {},
-              "icon": "lucide-git-fork",
-              "title": "Graph view"
+              "type": "markdown",
+              "state": {
+                "file": "md_files/SaleFlowTestCases.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "SaleFlowTestCases"
             }
           }
         ]
@@ -74,7 +78,8 @@
       }
     ],
     "direction": "horizontal",
-    "width": 300
+    "width": 380.5,
+    "collapsed": true
   },
   "right": {
     "id": "734089bb4ec0a630",
@@ -179,14 +184,31 @@
       "bases:Create new base": false
     }
   },
-  "active": "c83086e2dec17eba",
+  "active": "95974d0e418419b8",
   "lastOpenFiles": [
+    "md_files/sale_flow_consumer_breakage_test_cases_2026-07-13.md",
+    "Untitled 2.md",
+    "md_files/session_handout_discount_push_to_tally.md",
+    "md_files/session_handout_2026-07-01_manual_wipe_guard_testing.md",
+    "2026-07-01.md",
+    "md_files/tallyprime_interaction_map_and_manual_test_plan_2026-06-30.md",
+    "Untitled 1.md",
+    "Untitled.md",
+    "md_files/session_handout_2026-07-01_manual_wipe_guard_testing.md.tmp.33804.386a2e553611",
+    "md_files/tc_results.md.tmp.33804.9e0c9834813c",
+    "md_files/tc_results.md.tmp.33804.640748d59917",
+    "md_files/tc_results.md.tmp.33804.24c432848e9f",
+    "md_files/tc_results.md.tmp.33804.8b78d9ac3b2d",
+    "md_files/tc_results.md.tmp.33804.9f6fdf7aa68b",
+    "md_files/tc_results.md.tmp.33804.b02fadeb455d",
+    "md_files/tc_results.md.tmp.33804.f5404a9cdb7e",
+    "md_files/tc_results.md",
+    "md_files/tc_results.md.tmp.33804.4e2c22026a27",
+    "md_files/Tally Prime data fetching resources and integration guides.md",
+    "md_files/session_handout_partcode_postgrest_voucher_guard.md",
     "md_files/reorder_level/reorder_level_issues_and_fixes.md",
     "md_files/reorder_level/reorder_level_issues_and_fixes.md.tmp.22332.1776091474538",
     "md_files/reorder_level/reorder_level_code_changes_summary.md",
-    "n8n/challan-to-invoice.json",
-    "n8n/challan-to-invoice (1).json",
-    "n8n",
     "md_files/reorder_level/reorder_level_final_execution_plan.md",
     "md_files/reorder_level/reorder_levels_implementation_plan.md",
     "md_files/purchaseheaderadd.md",
@@ -201,19 +223,7 @@
     "Untitled 2.canvas",
     "2026-04-10.md",
     "node_modules/@malept/cross-spawn-promise/README.md",
-    "md_files/bizanalystobserve.md",
     "Untitled 1.canvas",
-    "Untitled.canvas",
-    "md_files/walkthrough.md",
-    "md_files/odbcquery.md",
-    "md_files/odbcimplementaion_1_0.md",
-    "md_files/endpoint_workbook.md",
-    "md_files/claudefindings1.md",
-    "node_modules/concurrently/docs/README.md",
-    "node_modules/postject/node_modules/commander/Readme.md",
-    "md_files/walkthrough1.md",
-    "md_files/tally_fetch_audit.md",
-    "md_files/TALLY_COMPATIBILITY.md",
-    "md_files"
+    "Untitled.canvas"
   ]
 }

@@ -22,7 +22,8 @@
       "Bash(netstat -ano)",
       "PowerShell(Invoke-RestMethod -Uri \"http://localhost:3001/health\" -Method Get)",
       "mcp__claude_ai_Supabase__execute_sql",
-      "mcp__miro__diagram_get_dsl"
+      "mcp__miro__diagram_get_dsl",
+      "mcp__runpod__endpoint-health"
     ]
   }
 }
