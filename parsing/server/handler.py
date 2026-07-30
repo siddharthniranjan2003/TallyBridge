@@ -1194,11 +1194,16 @@ def fetch_latest_rates_for_party(party_name: str) -> dict[str, dict]:
 
 
 def fetch_party_state(party_name: str) -> str:
-    """Look up the debtor's state from the Supabase ledgers row.
+    """Look up the party's state from the Supabase ledgers row.
 
-    Filters ledgers by name + group_name (Sundry Debtors) and returns the `state`
-    column. Used to choose intra-state (CGST+SGST) vs inter-state (IGST) GST.
-    Returns "" when not configured / not found so callers can fall back to default.
+    Matches on name alone and returns the `state` column. Used to choose intra-state
+    (CGST+SGST) vs inter-state (IGST) GST. Deliberately NOT filtered by group_name:
+    the party matcher draws its candidates from `vouchers.party_name` (any party, any
+    group), so a genuine customer filed under some other group — TRADERS,
+    Unregistered — resolved to "" here and fell into the inter-state branch, billing
+    IGST on a local sale. `ledgers.name` is unique, so the name identifies the row.
+    Returns "" when not configured / not found; note the caller reads that as
+    non-home-state, i.e. IGST.
     """
     if not SUPABASE_URL or not SUPABASE_KEY or not party_name:
         return ""
@@ -1209,7 +1214,6 @@ def fetch_party_state(party_name: str) -> str:
             {
                 "select": "state",
                 "name": f"eq.{party_name}",
-                "group_name": f"eq.{SALE_DEBTOR_GROUP}",
                 "limit": "1",
             },
         )
