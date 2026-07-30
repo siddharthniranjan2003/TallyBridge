@@ -17,6 +17,7 @@ graphify-out/
 
 # secrets (never commit)
 .env
+.env.*
 .env_clinet
 .env_client
 *.env.yaml
