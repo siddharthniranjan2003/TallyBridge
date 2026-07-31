@@ -97,7 +97,11 @@ PUSH_QUEUE_API_KEY = (
     env_value("MINICPM_PUSH_QUEUE_API_KEY", "")
     or BACKEND_ENV_VALUES.get("API_KEY", "")
 )
-PUSH_QUEUE_TIMEOUT_SECONDS = int(env_value("MINICPM_PUSH_QUEUE_TIMEOUT_SECONDS", "30"))
+# Shared by every Supabase/backend call on the scan path: the push_queue POST, the
+# three scan_jobs calls, and the sale rate/discount lookups. Raised 30 -> 180 because
+# the batch rate RPC scans voucher_items (~216k rows, no index on stock_item_name) and
+# a timeout there prices the whole invoice at 0.
+PUSH_QUEUE_TIMEOUT_SECONDS = int(env_value("MINICPM_PUSH_QUEUE_TIMEOUT_SECONDS", "180"))
 RUNPOD_POD_URL = env_value("RUNPOD_POD_URL", "https://e1a2h1u5vujgun-8000.proxy.runpod.net").rstrip("/")
 RUNPOD_POD_API_KEY = env_value("RUNPOD_POD_API_KEY", "sk-e1a2h1u5vujgun")
 RUNPOD_MODEL = env_value("RUNPOD_MODEL", "nanonets/Nanonets-OCR2-3B")
@@ -1279,6 +1283,114 @@ def build_sale_rate_map(party_name: str, item_names: list[str]) -> dict[str, dic
     return rate_map
 
 
+# ── Sale pricing: global-latest rate + party-scoped discount ────────────────────
+# Supersedes the build_sale_rate_map waterfall above, which is kept (uncalled) so a
+# revert is a one-line change at the build_sale_voucher_payload call site.
+#
+# The waterfall tied rate and discount to one voucher row, which had two costs. Party
+# history acted as a stale anchor: once an item had been sold to a party, tier 1
+# pinned them to their own last rate forever, even when a newer and more
+# representative sale existed elsewhere. And tier 1 carried no voucher_type filter, so
+# a party who is both customer and supplier could have a sale priced off their last
+# PURCHASE — the bug 5bcbc80 fixed for tier 2 but never for tier 1.
+#
+# Rate and discount are now independent and routinely come from different vouchers:
+# the rate tracks what the item currently sells for to anyone, the discount tracks the
+# terms this particular customer last got.
+
+
+def fetch_latest_sale_rates(item_names: list[str]) -> dict[str, dict]:
+    """RPC get_latest_sale_rates_for_items -> {stock_item_name: {rate, party_name}}.
+
+    Latest GST SALE of each item to ANY party — one round-trip for the whole invoice,
+    replacing the old per-item fan-out. party_name comes back only so the caller can
+    label rate_source; it is never pushed. Any failure degrades to {} rather than
+    raising: every line then prices at 0, the voucher still enqueues, and the reviewer
+    fills the rates in the app.
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY or not item_names:
+        return {}
+    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/rpc/get_latest_sale_rates_for_items"
+    try:
+        resp = _supabase_session().post(
+            url,
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"},
+            json={"p_item_names": item_names},
+            timeout=PUSH_QUEUE_TIMEOUT_SECONDS,
+        )
+        rows = resp.json() if resp.ok and resp.text else []
+    except Exception:
+        return {}
+    rate_map: dict[str, dict] = {}
+    if isinstance(rows, list):
+        for row in rows:
+            name = str(row.get("stock_item_name", "") or "").strip()
+            if name:
+                rate_map[name] = {
+                    "rate": float(row.get("rate") or 0),
+                    "party_name": str(row.get("party_name", "") or "").strip(),
+                }
+    return rate_map
+
+
+def fetch_latest_party_discounts(party_name: str, item_names: list[str]) -> dict[str, float]:
+    """RPC get_latest_party_discounts_for_items -> {stock_item_name: discount_pct}.
+
+    Latest GST SALE of each item to THIS party. An item missing from the result means
+    this party has never been sold it — the caller stamps 0%. A 0 that IS in the result
+    is a real 0%: the party's most recent sale of that item carried no discount, and a
+    newer 0% deliberately beats an older 45%.
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY or not party_name or not item_names:
+        return {}
+    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/rpc/get_latest_party_discounts_for_items"
+    try:
+        resp = _supabase_session().post(
+            url,
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"},
+            json={"p_party_name": party_name, "p_item_names": item_names},
+            timeout=PUSH_QUEUE_TIMEOUT_SECONDS,
+        )
+        rows = resp.json() if resp.ok and resp.text else []
+    except Exception:
+        return {}
+    discount_map: dict[str, float] = {}
+    if isinstance(rows, list):
+        for row in rows:
+            name = str(row.get("stock_item_name", "") or "").strip()
+            if name:
+                discount_map[name] = float(row.get("discount_pct") or 0)
+    return discount_map
+
+
+def build_sale_rate_map_global(party_name: str, item_names: list[str]) -> dict[str, dict]:
+    """{stock_item_name: {rate, discount_pct, source, discount_source}} for one invoice.
+
+    Two batch RPCs, no per-item fan-out. An item absent from the rate lookup is left out
+    of the map entirely, which the caller reads as rate 0 / rate_source "none".
+
+    The discount result is always a subset of the rate result (same item + GST SALE, plus
+    a party filter), so a discount can never arrive without its rate — except when the
+    rate RPC failed and the discount one did not, which yields an empty map and prices
+    the invoice at 0. That is the intended degradation.
+    """
+    names = sorted({n for n in item_names if n})
+    if not names:
+        return {}
+    rates = fetch_latest_sale_rates(names)
+    discounts = fetch_latest_party_discounts(party_name, names)
+    party_key = party_name.strip().casefold()
+    rate_map: dict[str, dict] = {}
+    for name, info in rates.items():
+        rate_map[name] = {
+            "rate": info["rate"],
+            "discount_pct": discounts.get(name, 0.0),
+            "source": "same_party" if info["party_name"].casefold() == party_key else "different_party",
+            "discount_source": "same_party" if name in discounts else "none",
+        }
+    return rate_map
+
+
 def parse_sale_quantity(qty_text: str) -> float:
     match = re.match(r"^\s*(\d+(?:\.\d+)?)", str(qty_text or ""))
     return float(match.group(1)) if match else 0.0
@@ -1304,7 +1416,7 @@ def build_sale_voucher_payload(company_name: str, party_name: str, rows: list[di
         for r in rows
         if str(r.get("stock_matched", "") or "").strip() and str(r.get("stock_matched", "") or "").strip() != "NO MATCH"
     ]
-    rate_map = build_sale_rate_map(party_name, item_names)
+    rate_map = build_sale_rate_map_global(party_name, item_names)
 
     priced_items: list[dict] = []
     source_items: list[dict] = []
@@ -1322,6 +1434,7 @@ def build_sale_voucher_payload(company_name: str, party_name: str, rows: list[di
         gross = round(quantity * rate, 2)
         amount = round(gross * (1 - discount_pct / 100.0), 2)
         rate_source = info["source"] if info else "none"
+        discount_source = info["discount_source"] if info else "none"
         voucher_item = {
             "stock_item_name": name,
             "quantity": quantity,
@@ -1331,13 +1444,16 @@ def build_sale_voucher_payload(company_name: str, party_name: str, rows: list[di
             "unit": str(row.get("unit") or "").strip() or SALE_DEFAULT_UNIT,
             "godown_name": "Main Location",
         }
-        priced_items.append({**voucher_item, "rate_source": rate_source})
+        priced_items.append(
+            {**voucher_item, "rate_source": rate_source, "discount_source": discount_source}
+        )
         source_items.append(
             {
                 **voucher_item,
                 "source": "Matching_Algorithem",
                 "score": format_sale_match_score(row.get("match_score")),
                 "rate_source": rate_source,
+                "discount_source": discount_source,
             }
         )
 
@@ -1387,7 +1503,12 @@ def build_sale_voucher_payload(company_name: str, party_name: str, rows: list[di
         "voucher_type": SALE_VOUCHER_TYPE,
         "inventory_ledger_name": SALE_LEDGER_NAME,
         "ledger_entries": ledger_entries,
-        "items": [{k: v for k, v in item.items() if k != "rate_source"} for item in priced_items],
+        # Provenance is push_queue.source_payload metadata only — the backend's
+        # normalizePushVoucherPayload whitelist would drop these anyway.
+        "items": [
+            {k: v for k, v in item.items() if k not in {"rate_source", "discount_source"}}
+            for item in priced_items
+        ],
     }
     source_payload = {"items": source_items}
     return (
