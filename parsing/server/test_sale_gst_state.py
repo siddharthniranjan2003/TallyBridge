@@ -79,8 +79,16 @@ handler.supabase_get = fake_supabase_get
 handler.SUPABASE_URL = "https://stub.supabase.co"
 handler.SUPABASE_KEY = "stub-key"
 # Keep the payload builder off the network; the GST branch is what's under test.
-handler.build_sale_rate_map = lambda party_name, item_names: {
-    "HSS DRILL 5.1": {"rate": 100.0, "discount_pct": 0.0, "source": "same_party"}
+# Must stub the function build_sale_voucher_payload actually calls -- the old
+# build_sale_rate_map is still in handler.py but is no longer wired to anything, so
+# stubbing that name would leave the real lookup running.
+handler.build_sale_rate_map_global = lambda party_name, item_names: {
+    "HSS DRILL 5.1": {
+        "rate": 100.0,
+        "discount_pct": 0.0,
+        "source": "same_party",
+        "discount_source": "same_party",
+    }
 }
 
 SALE_ROWS = [{"stock_matched": "HSS DRILL 5.1", "qty_text": "10", "unit": "NOS", "match_score": 100.0}]
