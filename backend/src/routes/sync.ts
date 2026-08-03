@@ -2568,6 +2568,104 @@ router.post("/push-queue/activate", requireApiKey, async (req, res) => {
   }
 });
 
+// Tally rejects a voucher whose debits and credits don't match, and for a
+// sub-rupee difference it reports a bare EXCEPTIONS=1 with NO LINEERROR — an
+// import failure that states no reason at all.
+//
+// That happens because the app's edit path stores charges at full float
+// precision (CGST 8171.1663339012075) and tally_pusher._format_amount quantizes
+// every line to 2dp INDEPENDENTLY on the way into the XML:
+//
+//     90790.70 + 8171.17 + 8171.17 = 107133.04
+//     party 107133.0326678024      ->  107133.03      off by one paisa, rejected
+//
+// Each value rounds correctly alone; the sum doesn't survive it. Measured over
+// 20k simulated edited vouchers, ~50% land on an imbalance — a coin flip on
+// every edited invoice, confirmed live in both directions.
+//
+// Round on the way OUT to the poller so the numbers Tally receives are the
+// numbers we balanced. This endpoint is the one place that covers every
+// producer: the app writes push_queue directly and never passes through
+// normalizePushVoucherPayload, but everything — app, n8n, parsing service —
+// funnels through here before Tally.
+//
+// Read-path only: the stored row keeps its original values, so the app can still
+// display a total one paisa below what posts. Fixing that needs the app-side
+// rounding, which is deliberately not done here.
+function balancePushVoucherAmounts(voucher: any) {
+  if (!voucher || typeof voucher !== "object") return voucher;
+  const items = voucher.items;
+  const ledgerEntries = voucher.ledger_entries;
+  if (!Array.isArray(items) || !Array.isArray(ledgerEntries) || ledgerEntries.length === 0) {
+    return voucher;
+  }
+
+  // Round each item BEFORE summing, mirroring the order handler.py builds a
+  // voucher in. tally_pusher separately checks inventory-ledger vs sum-of-items
+  // with a 0.05 tolerance; rounding per item is what stops sum(round(x)) drifting
+  // from round(sum(x)), which on a 20-line invoice can reach 0.10 and trip that
+  // check instead. rate/quantity are left alone — rate is a unit price Tally
+  // formats separately, and changing it would break its tie to the amount.
+  const balancedItems = items.map((item: any) =>
+    item && typeof item === "object" ? { ...item, amount: toMoney(item.amount) } : item,
+  );
+  const itemsTotal = toMoney(
+    balancedItems.reduce(
+      (sum: number, item: any) => sum + (item && typeof item === "object" ? toMoney(item.amount) : 0),
+      0,
+    ),
+  );
+
+  // The party line is matched by ledger_name == party_name (the same rule the app
+  // and tally_pusher use); largest magnitude is the fallback for older payloads
+  // whose party row was renamed.
+  const partyName = normalizeTrimmedString(voucher.party_name);
+  const inventoryName = normalizeTrimmedString(voucher.inventory_ledger_name);
+  let partyIndex = ledgerEntries.findIndex(
+    (entry: any) => entry && normalizeTrimmedString(entry.ledger_name) === partyName,
+  );
+  if (partyIndex < 0) {
+    let widest = -1;
+    ledgerEntries.forEach((entry: any, index: number) => {
+      const magnitude = Math.abs(normalizeFiniteNumber(entry?.amount) ?? 0);
+      if (magnitude > widest) {
+        widest = magnitude;
+        partyIndex = index;
+      }
+    });
+  }
+
+  // Direction is carried by is_deemed_positive and observed payloads store
+  // positive magnitudes — but don't assume it. Work in magnitudes, reapply sign.
+  let creditTotal = 0;
+  const balancedLedgers = ledgerEntries.map((entry: any, index: number) => {
+    if (!entry || typeof entry !== "object" || index === partyIndex) return entry;
+    const original = normalizeFiniteNumber(entry.amount) ?? 0;
+    const sign = original < 0 ? -1 : 1;
+    const isInventory =
+      inventoryName != null && normalizeTrimmedString(entry.ledger_name) === inventoryName;
+    const magnitude = isInventory ? itemsTotal : toMoney(Math.abs(original));
+    creditTotal = toMoney(creditTotal + magnitude);
+    return { ...entry, amount: magnitude * sign };
+  });
+
+  const partyEntry = balancedLedgers[partyIndex];
+  if (partyEntry && typeof partyEntry === "object") {
+    const original = normalizeFiniteNumber(partyEntry.amount) ?? 0;
+    balancedLedgers[partyIndex] = {
+      ...partyEntry,
+      amount: creditTotal * (original < 0 ? -1 : 1),
+    };
+  }
+
+  return {
+    ...voucher,
+    items: balancedItems,
+    ledger_entries: balancedLedgers,
+    ...(voucher.discount_total != null ? { discount_total: toMoney(voucher.discount_total) } : {}),
+  };
+}
+
 router.get("/push-queue", requireApiKey, async (req, res) => {
   const companyLookup = await resolveCompanyLookup({
     companyId: req.query.company_id,
@@ -2599,6 +2697,12 @@ router.get("/push-queue", requireApiKey, async (req, res) => {
     const jobs = (data || []).filter((row: any) =>
       isStockItemPushPayload(row?.voucher_payload) ||
       isAllowedPushVoucherType(row?.voucher_payload?.voucher_type)
+    ).map((row: any) =>
+      // Stock-item jobs ride the same endpoint with a completely different shape
+      // (kind: "stock_item", no items or ledger entries) — leave them alone.
+      isStockItemPushPayload(row?.voucher_payload)
+        ? row
+        : { ...row, voucher_payload: balancePushVoucherAmounts(row?.voucher_payload) },
     );
     return res.json({ jobs });
   } catch (err: any) {
