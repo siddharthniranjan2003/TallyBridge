@@ -226,10 +226,12 @@ class FakePagedResponse:
         return self._payload
 
 
+original_supabase_get = handler.supabase_get
 with_session([FakeResponse([], ok=False)])
 handler.supabase_get = lambda endpoint, params: FakePagedResponse(paged.pop(0) if paged else [])
 candidates = handler.fetch_supabase_party_candidates("MUNDHRA AGENCIES")
 check("falls back to paging when the RPC is absent", candidates, ["BALAJI H/W AGENCIES", "AMBEY TOOLS"])
+handler.supabase_get = original_supabase_get
 
 
 # ── Candidate strings must be identical whichever route produced them ──────────

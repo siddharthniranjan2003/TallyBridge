@@ -257,6 +257,15 @@ def normalize_party_name(value: str) -> str:
     text = re.sub(r"\bHLW\b", " HARDWARE ", text)
     text = re.sub(r"\bHARDW\b", " HARDWARE ", text)
     text = re.sub(r"\bAGENCIES\b", " AGENCY ", text)
+    # Same idiom as HARDW -> HARDWARE, for the abbreviations that actually appear.
+    # A challan reading 'P. T ENT.' scored 54.56 against a 78 threshold even though
+    # 'P. T. ENTERPRISES' is a 90% string match, because strong_party_tokens drops
+    # tokens under 3 characters -- P and T vanish and only the generic ENTERPRISES
+    # is left, so nothing identifying survives to score on. Expanding instead of
+    # discarding puts the similarity back: 54.56 -> 86.0.
+    text = re.sub(r"\bENTP?R?\b", " ENTERPRISES ", text)
+    text = re.sub(r"\bAGY\b", " AGENCY ", text)
+    text = re.sub(r"\bCORP\b", " CORPORATION ", text)
     text = text.replace("&", " AND ")
     text = re.sub(r"[^A-Z0-9 ]+", " ", text)
     return collapse_spaces(text)
