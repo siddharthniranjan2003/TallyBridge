@@ -136,6 +136,10 @@ PARTY_COLUMN = env_value("MINICPM_PARTY_COLUMN", "party_name")
 PARTY_QUERY_LIMIT = int(env_value("MINICPM_PARTY_QUERY_LIMIT", "100"))
 PARTY_FETCH_PAGE_SIZE = int(env_value("MINICPM_PARTY_FETCH_PAGE_SIZE", "1000"))
 PARTY_FETCH_MAX_PAGES = int(env_value("MINICPM_PARTY_FETCH_MAX_PAGES", "6"))
+# The RPC returns one row per customer, but PostgREST still caps a response at
+# its own max-rows (1000 on Supabase), so the DISTINCT list has to be paged too.
+PARTY_RPC_PAGE_SIZE = int(env_value("MINICPM_PARTY_RPC_PAGE_SIZE", "1000"))
+PARTY_RPC_MAX_PAGES = int(env_value("MINICPM_PARTY_RPC_MAX_PAGES", "25"))
 PARTY_MATCH_THRESHOLD = float(env_value("MINICPM_PARTY_MATCH_THRESHOLD", "78"))
 PARTY_STRONG_TOKEN_THRESHOLD = int(env_value("MINICPM_PARTY_STRONG_TOKEN_THRESHOLD", "82"))
 PARTY_WEAK_TOKEN_THRESHOLD = int(env_value("MINICPM_PARTY_WEAK_TOKEN_THRESHOLD", "90"))
@@ -366,6 +370,145 @@ def fetch_targeted_party_rows(endpoint: str, query_terms: list[str]) -> list[dic
     return rows
 
 
+def _content_range_total(header: str) -> int | None:
+    """Total row count out of a PostgREST Content-Range ("0-999/1376" -> 1376).
+
+    Returns None when the total is unknown ("0-999/*"), which is the signal to
+    fall back to short-page detection rather than trust a count we don't have.
+    """
+    if not header or "/" not in header:
+        return None
+    total = header.rsplit("/", 1)[1].strip()
+    return int(total) if total.isdigit() else None
+
+
+def fetch_distinct_party_names() -> list[str] | None:
+    """RPC get_distinct_party_names -> every party name, once each.
+
+    DISTINCT is what this lookup actually wants, and PostgREST cannot express it
+    — which is why the fallback below pages the vouchers table instead and only
+    ever reached 211 of 1376 customers (see _party_candidates_by_paging).
+
+    The RPC collapses 6000 invoices to 1376 customers, but that is still more
+    than PostgREST will return in one response: unpaged it answers 206 with
+    Content-Range 0-999/1376, silently dropping everything from
+    'S K ENTERPRISES (MANESAR)' to the end of the alphabet — so S LAL TOOLS
+    through Z stayed unmatchable even with the migration applied. Hence the
+    paging below: same bug as the fallback's, higher ceiling, just as invisible.
+
+    Returns None on ANY failure, deliberately distinct from [] (a real empty
+    result): the caller reads None as "fall back to paging", so this is safe to
+    ship before the migration is applied to a project.
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return None
+    url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/rpc/get_distinct_party_names"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+    candidates: list[str] = []
+    seen: set[str] = set()
+    fetched_any_row = False
+    offset = 0
+    total: int | None = None
+
+    for _ in range(PARTY_RPC_MAX_PAGES):
+        # limit/offset as query params, NOT a Range header: PostgREST ignores
+        # Range on an RPC POST and hands back page one every time -- silently, so
+        # a Range-based loop reads as working while it re-fetches 0-999 forever.
+        # count=exact on the first page only, to learn the total to page toward.
+        page_headers = dict(headers) if fetched_any_row else dict(headers, Prefer="count=exact")
+        try:
+            resp = _supabase_session().post(
+                url,
+                headers=page_headers,
+                params={"limit": str(PARTY_RPC_PAGE_SIZE), "offset": str(offset)},
+                json={},
+                timeout=PUSH_QUEUE_TIMEOUT_SECONDS,
+            )
+            if not resp.ok:
+                break
+            rows = resp.json() if resp.text else []
+        except Exception:
+            break
+        if not isinstance(rows, list):
+            break
+        # Only the first page decides RPC-vs-fallback. Once real names are in
+        # hand, a later failure leaves us with a short list -- still far better
+        # than abandoning it for the fallback's 211.
+        if not fetched_any_row:
+            total = _content_range_total(resp.headers.get("content-range", ""))
+        if not rows:
+            break
+        fetched_any_row = True
+        # Same collapse_spaces + de-dup the paging path uses, so candidate
+        # strings are byte-identical whichever route produced them.
+        append_unique_party_candidates(candidates, seen, rows)
+        offset += len(rows)
+        if total is not None:
+            if offset >= total:
+                break
+        elif len(rows) < PARTY_RPC_PAGE_SIZE:
+            # No total to steer by: a short page is the only end-of-data signal.
+            # Never applied when total is known, because PostgREST caps a page at
+            # its own max-rows and a short page then means "capped", not "done".
+            break
+
+    if not fetched_any_row:
+        # Nothing came back at all -- RPC missing (PGRST202), broken, or
+        # genuinely empty. Fall back rather than cache an empty candidate list.
+        return None
+    # The function hardcodes its output column as party_name; if PARTY_COLUMN was
+    # overridden the keys won't line up and every row silently yields nothing.
+    # Rows in but no names out means something is wrong — fall back rather than
+    # cache an empty list and match against nobody.
+    if fetched_any_row and not candidates:
+        return None
+    return candidates
+
+
+def _party_candidates_by_paging(endpoint: str) -> list[str]:
+    """Pre-RPC fallback: page the vouchers table for party_name.
+
+    Kept because a project without the migration returns PGRST202, and a 404 that
+    wiped the candidate list would turn EVERY scan into a garbage invoice — far
+    worse than the partial coverage this gives. Its limitation is the bug that
+    motivated the RPC: vouchers has one row per invoice, so PARTY_FETCH_MAX_PAGES
+    x PARTY_FETCH_PAGE_SIZE rows is that many INVOICES, and the busiest
+    early-alphabet customers exhaust it long before Z.
+    """
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    for page_idx in range(PARTY_FETCH_MAX_PAGES):
+        try:
+            response = supabase_get(
+                endpoint,
+                {
+                    "select": PARTY_COLUMN,
+                    "order": f"{PARTY_COLUMN}.asc",
+                    "limit": str(PARTY_FETCH_PAGE_SIZE),
+                    "offset": str(page_idx * PARTY_FETCH_PAGE_SIZE),
+                },
+            )
+            response.raise_for_status()
+            rows = response.json()
+        except requests.RequestException:
+            break
+
+        if not rows:
+            break
+
+        append_unique_party_candidates(candidates, seen, rows)
+
+        if len(rows) < PARTY_FETCH_PAGE_SIZE:
+            break
+
+    return candidates
+
+
 def fetch_supabase_party_candidates(ocr_party_name: str = "") -> list[str]:
     global PARTY_NAME_CACHE
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -373,34 +516,8 @@ def fetch_supabase_party_candidates(ocr_party_name: str = "") -> list[str]:
 
     endpoint = urljoin(SUPABASE_URL.rstrip("/") + "/", f"rest/v1/{PARTY_TABLE}")
     if PARTY_NAME_CACHE is None:
-        candidates: list[str] = []
-        seen: set[str] = set()
-
-        for page_idx in range(PARTY_FETCH_MAX_PAGES):
-            try:
-                response = supabase_get(
-                    endpoint,
-                    {
-                        "select": PARTY_COLUMN,
-                        "order": f"{PARTY_COLUMN}.asc",
-                        "limit": str(PARTY_FETCH_PAGE_SIZE),
-                        "offset": str(page_idx * PARTY_FETCH_PAGE_SIZE),
-                    },
-                )
-                response.raise_for_status()
-                rows = response.json()
-            except requests.RequestException:
-                break
-
-            if not rows:
-                break
-
-            append_unique_party_candidates(candidates, seen, rows)
-
-            if len(rows) < PARTY_FETCH_PAGE_SIZE:
-                break
-
-        PARTY_NAME_CACHE = candidates
+        names = fetch_distinct_party_names()
+        PARTY_NAME_CACHE = names if names is not None else _party_candidates_by_paging(endpoint)
 
     candidates = list(PARTY_NAME_CACHE or [])
     seen = set(candidates)
