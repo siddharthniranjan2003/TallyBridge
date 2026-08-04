@@ -31,3 +31,6 @@ _*.xml
 *.canvas
 .tmp-userdata/
 .tmp-restore/
+
+# macOS Finder metadata
+.DS_Store
