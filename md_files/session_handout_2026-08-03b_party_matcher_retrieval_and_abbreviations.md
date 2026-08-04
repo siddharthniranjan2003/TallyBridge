@@ -1,7 +1,7 @@
 # TallyBridge — Party Matcher: Retrieval Truncation & Abbreviation Expansion
 
 Context-transfer doc. Continues `session_handout_2026-08-03_sale_pricing_balance_and_party_matcher.md`,
-which left workstream 4 half-finished.
+which left workstream 4 half-finished. §7 covers a second day (2026-08-04) on the same thread.
 
 ---
 
@@ -13,10 +13,12 @@ which left workstream 4 half-finished.
 | 2 | **RPC returned only 1000 of 1376 names** — new bug, found and fixed | ✅ committed `8720c6f` |
 | 3 | `P. T ENT.` abbreviation expansion | ✅ committed `5b95a95` |
 | 4 | `tallybridge-parsing` on testing | ✅ `00019-ktv`, verified byte-identical to HEAD |
-| 5 | `get_distinct_party_names` SQL on **client** | ❌ **pending — `PGRST202` today** |
-| 6 | Parsing on client | ❌ not deployed |
+| 5 | **Candidates now come from the customer master, not invoice history** (§7) | ✅ committed `3854f0c`, SQL applied to testing |
+| 6 | SQL + parsing on **client** | ❌ **both pending** |
 
-Branch `update/absolute-latest-rate-etc`, 2 commits, **not pushed** (deliberate).
+Branch `update/absolute-latest-rate-etc`, 4 commits, **not pushed** (deliberate).
+
+**Read §7 first if you are picking this up** — it supersedes the migration in §1.
 
 ---
 
@@ -222,3 +224,131 @@ and the deliberate singular/plural non-collapse.
 
 Both are standalone scripts in the existing style: `python server/test_*.py`, no network.
 All four parsing suites pass.
+
+---
+
+## 7. 2026-08-04 — the list itself was wrong
+
+§1–§6 fixed how **much** of the voucher party list the matcher received. They did not fix
+**which** list. Prompted by the question "are all sundry debtors matched for sale OCR?" —
+the answer was **no, 38%**.
+
+### What was actually happening
+
+Candidates came from `PARTY_TABLE = "vouchers"` — transaction history — never from the
+customer master. Measured on the client:
+
+| | count |
+|---|---:|
+| Sundry Debtors in `ledgers` | **3,578** |
+| reachable by the matcher | 1,371 |
+| **invisible — could never match** | **2,207 (61.7%)** |
+
+Not a truncated sync: `vouchers` holds 46,479 rows over 2025-04-01 → today. Those 2,207 are
+real customers with no voucher in 16 months. Scan one and it is a garbage invoice, forever.
+
+Two more consequences of the same design: **101 Sundry Creditors were candidates on a sale
+scan** (because `vouchers` also holds 6,218 Purchase and 2,498 Payment rows), along with
+`Cash`, `BHARTI AIRTEL` and 21 other non-party ledgers.
+
+### Why not just filter by voucher_type
+
+Measured and rejected. A `GST SALE` filter would remove 79 of the 101 suppliers but **lose 53
+real customers** who appear only on Receipt or Credit Note vouchers, **still leave 22
+suppliers**, and drop master coverage 38.3% → 36.8%. Voucher type is a proxy;
+`ledgers.group_name` is the answer.
+
+### The fix — `3854f0c`, one SQL file, zero code changes
+
+`supabase/migrations/20260804_party_names_from_customer_master.sql` replaces the function body
+with `SELECT DISTINCT btrim(l.name) FROM ledgers l WHERE l.group_name = 'Sundry Debtors'`.
+
+**It supersedes `20260803_distinct_party_names.sql`** — `CREATE OR REPLACE` works whether the
+function exists (testing) or not (client), so this one file is all either project needs and
+both land in the same state. Do **not** apply 20260803 to the client.
+
+No application change: same function name, same `RETURNS TABLE(party_name text)`, and the
+paging from `8720c6f` already covers 3,578 rows past PostgREST's 1000-row cap.
+
+Applied to testing and verified: **2,346 rows, `3S DESIGN` … `ZODIAC ENGINEERS`**, no
+duplicates, `MUNDHARA AGENCIES` retained.
+
+**Fails safe.** An empty table or renamed group yields zero rows → `fetch_distinct_party_names`
+returns `None` (not `[]`) → the caller falls back to `_party_candidates_by_paging`. A wrong
+migration degrades to the old behaviour rather than wiping the candidate list.
+
+### The app was already right
+
+`AiAccountant/lib/data/customers_cache.dart` has always selected `ledgers` where
+`group_name = 'Sundry Debtors'` and paged with `range()` — its comment at line 41 calls out the
+same 1000-row cap, discovered independently in Dart. `vendors_cache.dart` mirrors it for
+Sundry Creditors. The divergence was even documented at
+`voucher_detail_sheet.dart:790`: *"the cache holds only 'Sundry Debtors', but the parser matches
+parties from vouchers.party_name in any group"*. The app was compensating for the parser.
+
+`SALE_DEBTOR_GROUP = "Sundry Debtors"` has existed in `handler.py:133` all along, **defined and
+never referenced** — the intent was there and never wired up.
+
+### Accepted cost
+
+Parties with sale history filed under other groups leave the main list — on testing 13 Sundry
+Creditors and 116 under `TRADERS` (49), `MANUFACTURER_*` (55), `Service Provider` (9),
+`Unregistered` (1). On the client that number is only 7 plus 22 creditors.
+
+They stay reachable because `fetch_targeted_party_rows` still `ILIKE`s `vouchers` for terms
+from the read. **Leaving that path on `vouchers` is deliberate, not an oversight** — it is the
+safety net for exactly these.
+
+### ⚠ Operational gotcha: SQL alone does not take effect
+
+`PARTY_NAME_CACHE` is a module global held for the container's lifetime. After applying the
+SQL, the running revision kept serving the **pre-change list** — proven, not guessed:
+
+```
+probe 'MUNDHRA AGENCIES'
+  old voucher list -> #2 'Industrial Sales Agency' (32.31)   <- voucher-only name
+  new debtors list -> #2 'R.R. AGENCIES'           (39.27)   <- Debtors-only name
+served after the SQL: 'Industrial Sales Agency'   => still cached
+```
+
+`MUNDHARA AGENCIES` matches under **both** lists, so a naive "did it match?" check passes while
+the change is not live. **Any SQL-only change to the candidate list needs a container recycle.**
+Fixed by redeploying (no code change) → `00020-2zh`, then confirmed by replaying the same image:
+
+```
+MUNDHARA AGENCIES        122.87   in both
+R.R. AGENCIES             39.27   DEBTORS-ONLY   <- new list is live
+GURUKRIPA SALES AGENCIES   32.0   DEBTORS-ONLY
+```
+
+`Industrial Sales Agency` is gone from the ranking. Reuse this fingerprint on the client.
+
+### Still open, measured but not fixed
+
+A single generic word confidently matches an arbitrary customer — `SALES` → `JAYA SALES`
+(113.53, via the `strong_ratio >= 0.99` bypass), and `TOOLS`/`AGENCIES`/`ENTERPRISES`/`TRADERS`
+via a second route: they *are* generic, so `strong_tokens` is empty, both penalties gate off
+(`:444-445`), and raw fuzzy clears 78 unaided. A partial read files a **wrong** invoice, not a
+garbage one, so nothing surfaces it.
+
+Third option, measured this session and better than the two the previous session rejected:
+**reject probes whose tokens are *all* generic**, with no length filter. Adding `SALES` to
+`PARTY_GENERIC_TOKENS` changes nothing; requiring a strong token rejects 63 customers (because
+`strong_party_tokens` drops tokens under 3 chars, killing `A K TOOLS`). The all-generic guard
+rejects all 7 test probes and costs **2 of 1,490** — `INDUSTRIAL TRADING CORPORATION` and
+`Industrial Sales Agency`, both genuinely all-generic names.
+
+**Data quality:** the client master holds **130 duplicate customer groups / 261 ledger rows**
+(`A K ENTERPRISES` vs `A.K. ENTERPRISES`). Outstanding balances and sale history are split
+across both, so the pricing rule's "latest sale to this party" can silently read the wrong half.
+
+### Retrieving a scan image for replay
+
+The original JPEG of any queued scan can be pulled — no need to ask for a fresh photo:
+
+```bash
+curl -H "x-api-key: $API_KEY" \
+  "$BACKEND_URL/api/sync/push-queue/<push_queue.id>/image/0" -o scan.jpg
+```
+
+Pages are **0-indexed** (`/image/1` returns 404 for a single-page scan).
