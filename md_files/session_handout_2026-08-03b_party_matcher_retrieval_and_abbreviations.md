@@ -13,10 +13,15 @@ which left workstream 4 half-finished. §7 covers a second day (2026-08-04) on t
 | 2 | **RPC returned only 1000 of 1376 names** — new bug, found and fixed | ✅ committed `8720c6f` |
 | 3 | `P. T ENT.` abbreviation expansion | ✅ committed `5b95a95` |
 | 4 | `tallybridge-parsing` on testing | ✅ `00019-ktv`, verified byte-identical to HEAD |
-| 5 | **Candidates now come from the customer master, not invoice history** (§7) | ✅ committed `3854f0c`, SQL applied to testing |
-| 6 | SQL + parsing on **client** | ❌ **both pending** |
+| 5 | **Candidates now come from the customer master, not invoice history** (§7) | ✅ committed `3854f0c` |
+| 6 | SQL + parsing on **client** | ✅ **both shipped & verified** — `00013-xps`, 3,577 names |
 
-Branch `update/absolute-latest-rate-etc`, 4 commits, **not pushed** (deliberate).
+Branch `update/absolute-latest-rate-etc`, 7 commits, **not pushed** (deliberate).
+
+**Everything is deployed.** Both Supabase projects carry the customer-master RPC; both
+parsing services run HEAD (testing `00020-2zh`, client `00013-xps`); the Express backend needed
+no deploy — client, testing and HEAD are byte-identical. The Flutter app remains the only
+undeployed component, as it has been since 2026-08-03.
 
 **Read §7 first if you are picking this up** — it supersedes the migration in §1.
 
@@ -270,8 +275,18 @@ both land in the same state. Do **not** apply 20260803 to the client.
 No application change: same function name, same `RETURNS TABLE(party_name text)`, and the
 paging from `8720c6f` already covers 3,578 rows past PostgREST's 1000-row cap.
 
-Applied to testing and verified: **2,346 rows, `3S DESIGN` … `ZODIAC ENGINEERS`**, no
-duplicates, `MUNDHARA AGENCIES` retained.
+Applied and verified on **both** projects:
+
+| | testing | client |
+|---|---|---|
+| before | 1,368 | 1,495 |
+| after | **2,346** | **3,577** |
+| range | `3S DESIGN` … `ZODIAC ENGINEERS` | `3D MARKETING & SERVICES` … `ZODIAC ENGINEERS` |
+| parsing revision | `00020-2zh` | `00013-xps` (handler.py byte-identical to HEAD) |
+
+The client's SQL reports 3,578 but the code path yields 3,577: the master holds both
+`BALAJI  TRADERS` and `BALAJI TRADERS`. `btrim` keeps them distinct, `collapse_spaces` merges
+them — correct, and one more instance of the 130 duplicate-ledger groups below.
 
 **Fails safe.** An empty table or renamed group yields zero rows → `fetch_distinct_party_names`
 returns `None` (not `[]`) → the caller falls back to `_party_candidates_by_paging`. A wrong
