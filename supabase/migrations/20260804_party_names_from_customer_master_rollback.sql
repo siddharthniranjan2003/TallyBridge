@@ -1,0 +1,21 @@
+-- ROLLBACK of 20260804_party_names_from_customer_master.sql
+--
+-- Dropping the function is the one statement that works on BOTH projects whatever
+-- state they are in -- testing (where 20260803 was applied first) and client
+-- (where no version of this function ever existed). Same principle as the
+-- migration itself: one file, both projects, same end state.
+--
+-- This is a downgrade, not an outage. fetch_distinct_party_names treats PGRST202
+-- as "fall back to paging", so _party_candidates_by_paging takes over and party
+-- matching keeps working at its pre-fix reach (211 distinct customers, '3S DESIGN'
+-- .. 'Cash'). That fallback is load-bearing and deliberately kept.
+--
+-- What reverting costs, measured on the client:
+--   * the 2,207 Sundry Debtors with no voucher history become unmatchable again
+--   * the 79 pure-purchase suppliers, `Cash` and `BHARTI AIRTEL` are re-admitted
+--     to the sale candidate list
+--
+-- To go back to the intermediate 20260803 behaviour instead of all the way to the
+-- fallback, re-apply 20260803_distinct_party_names.sql after this.
+
+DROP FUNCTION IF EXISTS public.get_distinct_party_names();
