@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Guard v2 Rollout &amp; the ODBC Hang — 2026-07-28</title>
+<style>
+  :root{
+    --bg:#0f1419; --panel:#161b22; --panel2:#1c2330; --ink:#e6edf3; --muted:#9aa7b4;
+    --line:#2a323d; --accent:#4f9cf9; --danger:#ff6b6b; --warn:#ffb454; --ok:#5ad19a;
+    --code:#161b22; --codeink:#d7e0ea; --chip:#222b38; --purple:#b78cf7;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  .wrap{max-width:1040px;margin:0 auto;padding:48px 28px 96px}
+  header.doc{border-bottom:1px solid var(--line);padding-bottom:24px;margin-bottom:8px}
+  h1{font-size:30px;margin:0 0 8px;letter-spacing:.2px}
+  h2{font-size:22px;margin:46px 0 12px;padding-top:12px;border-top:1px solid var(--line);scroll-margin-top:20px}
+  h3{font-size:17px;margin:28px 0 8px;color:#cdd8e3}
+  h4{font-size:14.5px;margin:20px 0 6px;color:#b9c6d3}
+  p{margin:10px 0}
+  .sub{color:var(--muted);font-size:14px}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
+  .chip{background:var(--chip);border:1px solid var(--line);border-radius:999px;
+    padding:4px 12px;font-size:12.5px;color:#c4d0dc}
+  .chip b{color:var(--ink)}
+  code{background:var(--code);border:1px solid var(--line);border-radius:5px;
+    padding:1px 6px;font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-size:12.8px;color:#a8d0ff}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:10px;
+    padding:18px;overflow-x:auto;font-family:ui-monospace,Consolas,"SF Mono",monospace;
+    font-size:12.4px;line-height:1.55;color:var(--codeink);white-space:pre}
+  pre code{background:none;border:none;padding:0;color:inherit;font-size:inherit}
+  pre.sql{border-left:4px solid var(--ok)}
+  pre.bug{border-left:4px solid var(--danger)}
+  .callout{border-radius:10px;padding:14px 16px;margin:16px 0;border:1px solid var(--line);background:var(--panel)}
+  .callout .tag{font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.8px;display:block;margin-bottom:6px}
+  .callout p:last-child{margin-bottom:0}
+  .danger{border-left:4px solid var(--danger)} .danger .tag{color:var(--danger)}
+  .warn{border-left:4px solid var(--warn)} .warn .tag{color:var(--warn)}
+  .ok{border-left:4px solid var(--ok)} .ok .tag{color:var(--ok)}
+  .info{border-left:4px solid var(--accent)} .info .tag{color:var(--accent)}
+  .note{border-left:4px solid var(--purple)} .note .tag{color:var(--purple)}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--line);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#cdd8e3;font-weight:600}
+  .scroll{overflow-x:auto}
+  .v{font-weight:700;font-size:11.5px;letter-spacing:.4px;padding:2px 8px;border-radius:4px;white-space:nowrap}
+  .v-ok{background:rgba(90,209,154,.14);color:var(--ok);border:1px solid rgba(90,209,154,.35)}
+  .v-no{background:rgba(255,107,107,.14);color:var(--danger);border:1px solid rgba(255,107,107,.35)}
+  .v-part{background:rgba(255,180,84,.14);color:var(--warn);border:1px solid rgba(255,180,84,.35)}
+  .toc{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 22px;margin:24px 0}
+  .toc ol{margin:6px 0 0;padding-left:22px;columns:2;column-gap:34px}
+  .toc li{margin:3px 0;break-inside:avoid}
+  .toc a{color:var(--accent);text-decoration:none}
+  .toc a:hover{text-decoration:underline}
+  ul,ol{margin:10px 0;padding-left:24px} li{margin:5px 0}
+  blockquote{margin:16px 0;padding:12px 18px;border-left:3px solid var(--line);
+    background:var(--panel);border-radius:0 8px 8px 0;color:#cfdae5}
+  blockquote p:first-child{margin-top:0} blockquote p:last-child{margin-bottom:0}
+  .kv{font-family:ui-monospace,Consolas,monospace;font-size:12.6px;color:#a8d0ff}
+  footer{margin-top:64px;padding-top:20px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+  .hl{background:rgba(79,156,249,.13);border-radius:3px;padding:0 3px}
+  .strike{color:var(--muted);text-decoration:line-through}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <h1>RCA Verification, Guard v2 Rollout, and the ODBC Hang</h1>
+  <p class="sub">Session handout — 2026-07-28. Successor to <code>session_handout_2026-07-27_stock_unit_corruption_rca.md</code> (referred to throughout as “the RCA doc”).</p>
+  <div class="meta">
+    <span class="chip"><b>14</b> claims tested</span>
+    <span class="chip"><b>40</b> agents · 580,708 tokens · 0 errors</span>
+    <span class="chip"><b>2</b> RCA claims refuted</span>
+    <span class="chip">Guard v2 live on <b>yynuu + ztugw</b></span>
+    <span class="chip">Sync outage root cause <b>found</b></span>
+  </div>
+</header>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#s1">Executive summary</a></li>
+    <li><a href="#s2">What was verified, and how</a></li>
+    <li><a href="#s3">Where the RCA doc is wrong</a></li>
+    <li><a href="#s4">New findings</a></li>
+    <li><a href="#s5">macOS vs Windows</a></li>
+    <li><a href="#s6">The v2 guard (client SQL)</a></li>
+    <li><a href="#s7">Safety record</a></li>
+    <li><a href="#s8">The sync outage — second RCA</a></li>
+    <li><a href="#s9">Revised remediation order</a></li>
+    <li><a href="#s10">Reference</a></li>
+    <li><a href="#s11">Still open</a></li>
+  </ol>
+</div>
+
+<h2 id="s1">1. Executive summary</h2>
+
+<p>Three outcomes.</p>
+
+<div class="callout ok">
+  <span class="tag">Holds</span>
+  <p><strong>The RCA's causal chain was reproduced end-to-end on macOS.</strong> A mock TallyPrime on <code>127.0.0.1:9111</code> drove the real, unmodified <code>sync_main.fetch_stock_xml()</code> → <code>cloud_pusher</code> → Supabase, and landed <code>unit='Nos', group_name=NULL</code> exactly as described. No Windows machine was required for any part of the chain that determines the fix.</p>
+</div>
+
+<div class="callout danger">
+  <span class="tag">Refuted</span>
+  <p><strong>Two of the RCA's claims are wrong</strong> and should be corrected in place: §3.2's payload byte-delta evidence is statistical noise, and §7.1 #4's stated mechanism for the stranded junk rows is a non-sequitur. Several other claims are directionally right but materially imprecise — most consequentially, the fabrication sites number <strong>five, not two</strong>.</p>
+</div>
+
+<div class="callout warn">
+  <span class="tag">New — and urgent</span>
+  <p><strong>The client's sync has been dead since 2026-07-27 02:43 UTC, and the cause is a bug in our own code</strong>: <code>odbc_bridge.probe()</code> contains <strong>three unguarded blocking calls</strong>, any of which turns a wedged ODBC helper into a permanent, silent hang. The hang's <em>location</em> is established by evidence; <em>which</em> of the three blocked is not — see §8.3. The same subsystem — degrading differently — is what forced the XML fallback that produced the original corruption on 07-24. One unhealthy component, two incidents.</p>
+</div>
+
+<div class="callout note">
+  <span class="tag">Do not conflate these</span>
+  <p><strong>Nothing at all reached BetterStack on 2026-07-28.</strong> That is an absence of evidence, not evidence of a hang — the 07-27 hang is evidenced by logs, today is evidenced by nothing. See §8.1.</p>
+</div>
+
+<p>A hardened guard (<strong>v2</strong>) is now live on both yynuu and ztugw, verified by behavioural test in both. It exists in no repository; that remains open.</p>
+
+<h2 id="s2">2. What was verified, and how</h2>
+
+<p>A 40-agent workflow tested <strong>14 independent claims</strong> drawn from the RCA doc. Each was tested empirically, then adversarially reviewed through three lenses (fixture fidelity, logical sufficiency, hidden confound).</p>
+
+<div class="scroll">
+<table>
+  <tr><th style="width:52px">#</th><th>Claim</th><th style="width:112px">Result</th></tr>
+  <tr><td>C1</td><td><code>xml_parser.py:523</code> fabricates <code>"Nos"</code> on absent <code>BASEUNITS</code></td><td><span class="v v-ok">CONFIRMED</span></td></tr>
+  <tr><td>C2</td><td>Definition-driven path fabricates via <code>"default": "Nos"</code></td><td><span class="v v-ok">CONFIRMED</span></td></tr>
+  <tr><td>C3</td><td>Healthy XML round-trips untouched (the control)</td><td><span class="v v-ok">CONFIRMED</span></td></tr>
+  <tr><td>C4</td><td>ODBC definition has no default → <code>NULL</code>, never <code>'Nos'</code></td><td><span class="v v-ok">CONFIRMED</span></td></tr>
+  <tr><td>C5</td><td>Voucher inventory lines fabricate too</td><td><span class="v v-ok">CONFIRMED</span></td></tr>
+  <tr><td>C6</td><td><code>NULLIF(TRIM(unit),'')</code> — the DB rendered damage visible</td><td><span class="v v-ok">CONFIRMED</span></td></tr>
+  <tr><td>C7</td><td>Guard case 1 — degraded update rejected</td><td><span class="v v-ok">CONFIRMED</span></td></tr>
+  <tr><td>C8</td><td>Guard cases 2+3 — legit change applies, freeze is surgical</td><td><span class="v v-ok">CONFIRMED</span></td></tr>
+  <tr><td>C9</td><td>Guard case 4 — the INSERT gap is real</td><td><span class="v v-ok">CONFIRMED</span></td></tr>
+  <tr><td>C10</td><td>§7.1 #4 — “the guard freezes the 22 junk rows”</td><td><span class="v v-no">REFUTED</span></td></tr>
+  <tr><td>C11</td><td>Full chain reproduces on macOS via mock Tally</td><td><span class="v v-ok">CONFIRMED</span></td></tr>
+  <tr><td>C12</td><td>§3.2 — payload byte-delta proves a missing group name</td><td><span class="v v-no">REFUTED</span></td></tr>
+  <tr><td>C13</td><td>§7.3 repo-drift claims</td><td><span class="v v-part">PARTIAL</span></td></tr>
+  <tr><td>C14</td><td>What genuinely needs Windows</td><td><span class="v v-part">PARTIAL</span></td></tr>
+</table>
+</div>
+
+<p>No finding was overturned by a reviewer. <code>QUALIFIED</code> dominated the review verdicts — reviewers consistently narrowed claims rather than rubber-stamping them, which is the intended behaviour.</p>
+
+<h3>2.1 Reproduced end-to-end on macOS</h3>
+<p>A stdlib HTTP server served degraded <code>&lt;STOCKITEM&gt;</code> elements (name present, <code>PARENT</code>/<code>BASEUNITS</code> absent) to the real engine. <code>TALLY_URL</code> is a bare env var (<code>tally_client.py:10</code>), so nothing in the read path can tell the mock from TallyPrime. It printed the exact log lines quoted in RCA §3.2, landed 5 rows as <code>unit='Nos', group_name=NULL</code>, then <strong>repaired</strong> to <code>PAIR/TOTEM</code>, <code>NOS/ADDISON</code>, <code>BOTTLE/PIDILITE</code> when flipped to healthy — reproducing the doc's “11:17 ⇒ master repaired” transition locally.</p>
+
+<h3>2.2 A narrowing the RCA does not state</h3>
+<p>The 07-24 read used the <strong>definition-driven</strong> path, whose unit sources are <code>[BASEUNITS, CLOSINGBALANCE, STKCLOSINGBALANCE, STKCLBALANCE, CLOSINGQTY]</code>. Verified: a degraded response that <em>kept</em> a unit-bearing <code>CLOSINGBALANCE</code> (e.g. <code>"5 PAIR"</code>) recovers <code>PAIR</code> and causes no corruption at all. So the true degraded shape must have lost <code>PARENT</code>, <code>BASEUNITS</code> <strong>and every quantity field's unit token</strong> — genuinely name-only objects. Stronger and more specific than §3.2 claims.</p>
+
+<h2 id="s3">3. Where the RCA doc is wrong — correct these</h2>
+
+<h3>3.1 §3.2's byte-delta evidence is noise. Delete the paragraph.</h3>
+<p>The doc argues: <em>“the same 14,459 rows are 1,881,045 bytes via XML vs 2,003,151 via ODBC — ~122KB lighter, ≈8 bytes/row, consistent with a missing group name per row.”</em> The arithmetic is right (<code>122,106 / 14,459 = 8.44</code>) and the inference is worthless:</p>
+<ul>
+  <li><strong><code>bytes=</code> is not a wire size.</strong> <code>estimate_payload_bytes()</code> (<code>sync_main.py:1980</code>) serialises only the <strong>first <code>_BYTES_SAMPLE_SIZE = 200</code> rows</strong> (constant at <code>:1977</code>) of 14,459 and extrapolates: <code>per_row = (sample_bytes - 2) / len(sample)</code>. Deliberately observability-only, to avoid a full-serialisation OOM.</li>
+  <li>XML and ODBC return rows in <strong>different, unspecified orders</strong>, so the two numbers extrapolate from non-comparable samples.</li>
+  <li><strong>Measured noise floor:</strong> sliding which 200 rows are sampled — over <em>identical, unmodified</em> production rows — swings the total by <strong>415,624 bytes (20.34%)</strong>. The claimed signal is 122,106 bytes (6.1%). <strong>The noise is 3.4× larger than the effect.</strong></li>
+  <li>The number fits no mechanism: blanking <code>group_name</code> costs <strong>5.05 B/row</strong>; omitting the key costs <strong>21.05 B/row</strong>. And <code>_parse_row</code> never omits a key, so the ~21 B/row mechanism is impossible in this codebase.</li>
+</ul>
+<div class="callout warn">
+  <span class="tag">Consequence</span>
+  <p>This does not touch §3.1 or §3.3, which stand on independent evidence. But it means <strong>the 18/18 <code>synced_at</code> correlation (§3.3) is now carrying weight the byte delta was falsely carrying</strong> — and it was never re-verified in this session. It needs a read against ztugw.</p>
+</div>
+
+<h3>3.2 §7.1 #4's mechanism is backwards. <span class="v v-no">REFUTED</span></h3>
+<p>The doc says the guard <em>“now freezes [the 22 junk rows] at <code>Nos</code> (since <code>OLD.unit</code> is already bad)”</em>. It does not. A row in the exact junk state (<code>unit='Nos'</code>, <code>group_name=NULL</code>) that receives a healthy payload <strong>repairs completely</strong> — the <code>WHEN</code> clause evaluates false and the trigger body never runs. §6 of the same doc says exactly this; §7.1 contradicts it. Two independent reviewers reproduced the repair, after finding the original test's control degenerate.</p>
+<p>The conclusion survives for the doc's own §4 reason: the 3 Group-B rows carry mangled <code>?</code> names so <code>ON CONFLICT (company_id, name)</code> never matches, and the 19 Group-A rows are brand names Tally never re-sends. They are stranded by <strong>key mismatch</strong>, not by the guard.</p>
+<blockquote><p><strong>Practical consequence, and it's the opposite of what the doc implies:</strong> you do <strong>not</strong> need to drop or work around the guard to repair those rows. A plain <code>UPDATE</code> setting a real unit and a non-null group passes the <code>WHEN</code> clause untouched. Verified live.</p></blockquote>
+
+<h3>3.3 §3.5 attributes the bug to one line. It is five sites, plus three in the backend.</h3>
+<div class="scroll">
+<table>
+  <tr><th>Site</th><th style="width:150px">In the doc?</th><th>Notes</th></tr>
+  <tr><td><code>xml_parser.py:351</code></td><td>yes</td><td>voucher inventory lines</td></tr>
+  <tr><td><code>xml_parser.py:523</code></td><td>yes</td><td>stock master, xmltodict branch</td></tr>
+  <tr><td><code>xml_parser.py:550</code></td><td><span class="v v-part">MISATTRIBUTED</span></td><td>doc calls it a voucher line. It is inside <code>parse_stock()</code> (def at 489) — a <strong>third stock-master fabricator</strong>, in the Stock Summary regex fallback. Hardcodes <code>group_name ""</code> <em>and</em> <code>unit "Nos"</code>, i.e. it produces the exact 22-row fingerprint from a <strong>perfectly healthy</strong> Tally</td></tr>
+  <tr><td><code>structured_sections.json:529</code></td><td><span class="v v-no">NOT MENTIONED</span></td><td>vouchers→items→unit</td></tr>
+  <tr><td><code>structured_sections.json:931</code></td><td>yes</td><td>doc says “around 927”; 927 is the <code>STKCLOSINGBALANCE</code> source entry</td></tr>
+  <tr><td><code>backend/src/routes/sync.ts:265, 355, 2641</code></td><td><span class="v v-no">NOT MENTIONED</span></td><td>uppercase <code>|| "NOS"</code> — see §4.12</td></tr>
+</table>
+</div>
+<p>§7.2 #6 as written (“drop <code>or "Nos"</code> at <code>:523</code> and <code>"default": "Nos"</code> (singular)”) would leave <strong>four fabricators live</strong>.</p>
+
+<h3>3.4 §3.5's <code>group_name</code> mechanism is wrong at the Python layer</h3>
+<p>The doc writes <code>"group_name": { "sources": ["PARENT"] } // no default → NULL</code>. The parser emits <code>''</code> (a <code>str</code>), never <code>None</code>. The <code>NULL</code> happens one layer later via <code>NULLIF(TRIM(...),'')</code> in Postgres.</p>
+<div class="callout danger">
+  <span class="tag">Directly affects §7.2 #7</span>
+  <p>A degradation detector written in Python as <code>if row["group_name"] is None</code> would <strong>never fire</strong>. Test against <code>""</code>.</p>
+</div>
+
+<h3>3.5 §3.6's “the database was doing the right thing” is about visibility, not protection</h3>
+<p>The same statement is <code>ON CONFLICT DO UPDATE SET unit = EXCLUDED.unit</code> with no value guard. A degraded read <strong>destroys</strong> a correct <code>NOS</code>; it does not merely fail to fill a gap. The honest counterfactual: <em>the good data would still have been wrecked; the wreckage would have been an obvious <code>NULL</code> instead of a plausible <code>'Nos'</code></em>. And “visible” is by convention only — <code>unit</code> has no <code>NOT NULL</code> constraint. Note the doc's own §4 undercuts the point: <code>group_name</code> <em>did</em> degrade to <code>NULL</code> on those rows, exactly as the doc says would have been noticed — and it wasn't, for three days.</p>
+
+<h3>3.6 Stale citations (all pre-date the doc; not drift since)</h3>
+<ul>
+  <li><code>parsing/server/handler.py</code>: <code>:124</code> and <code>:567</code> exact at HEAD. <code>:1312</code> is actually <strong>1327</strong>; <code>:1647</code> is actually <strong>1662</strong> — a consistent <strong>+15</strong> offset. File unchanged since commit <code>53014c9</code> (2026-07-24), so these were already off when the doc was written. <code>:1674</code> matches.</li>
+  <li>§3.6 cites <code>20260427…:142</code> / <code>20260619…:151</code>; in the tracked file the <code>INSERT</code> begins at <strong>150</strong> and <code>ON CONFLICT</code> at <strong>174</strong>. Substance correct, offsets stale.</li>
+  <li>§8's env table says <code>deployment → .env_clinet</code>. On this machine the file is <code>.env.deployment</code>.</li>
+</ul>
+
+<h2 id="s4">4. New findings not in the RCA at all</h2>
+
+<h4>About the parser</h4>
+<ol>
+  <li><strong>The definition-driven path fabricates identically</strong> — output byte-identical to <code>parse_stock()</code> across all 9 rows. Fixing <code>:523</code> alone leaves the production path bleeding: <code>sync_main.py:1464</code> tries <code>fetch_structured_section("stock_items")</code> <strong>first</strong>.</li>
+  <li><strong>The <code>CLOSINGBALANCE</code> unit-fallback is dead code in the shape that matters.</strong> <code>definition_extractor._is_empty()</code> treats a dict as empty only when <code>len == 0</code>, so <code>&lt;BASEUNITS TYPE="String"&gt;&lt;/BASEUNITS&gt;</code> — the shape real Tally emits — is <em>truthy</em>, wins the source race, stringifies to <code>''</code>, and falls to <code>"Nos"</code>. The rescue only fires when the tag is absent entirely, i.e. <strong>never in production</strong>.</li>
+  <li><strong><code>_quantity_unit()</code> silently truncates multi-word units to their second word.</strong> <code>BASEUNITS="Not Applicable"</code> → <strong><code>'Applicable'</code></strong>. RCA §4 records 2 ztugw rows saying <code>Not Applicable</code>; via the XML path those are stored corrupted. Separately <code>handler.py:610</code> maps <code>"NOS" → "Nos"</code>, downcasing a legitimate unit into exactly the pattern the RCA is chasing.</li>
+</ol>
+
+<h4>About the guard — much narrower than §6 implies</h4>
+<ol start="4">
+  <li><strong>v1 was exactly one 3-byte string wide.</strong> <code>unit='NOS'</code> and <code>'nos'</code> both sailed through and overwrote a <code>PAIR</code> row. One casing change in the parser default and the guard becomes a silent no-op while still reading “enabled”.</li>
+  <li><strong>v1's <code>group_name</code> half was bypassed by an empty string</strong> — precisely what <code>xml_parser.py:522</code> emits. <code>NEW.group_name IS NULL</code> is false for <code>''</code>.</li>
+  <li><strong>v1 was bypassed by whitespace.</strong> A direct PostgREST <code>PATCH</code> (no <code>TRIM</code>) wrote <code>'  Nos  '</code> straight over <code>'PAIR'</code>. Demonstrated, not theorised.</li>
+  <li><strong>v1 protected only two columns.</strong> In the mock run a degraded replay held <code>PAIR</code>/<code>TOTEM</code> but still set <strong><code>closing_qty 4.0 → 0.0</code></strong> and <strong><code>part_code → NULL</code></strong> on every row. <em>A degraded read still corrupted stock quantities and part codes.</em> Strongest argument for §7.2 #7; stated nowhere in the RCA.</li>
+  <li><strong>The guard is silent.</strong> Degraded calls return <code>HTTP 200 {"stock": 1}</code>. A caller cannot tell its write was rejected.</li>
+</ol>
+
+<h4>About the INSERT gap</h4>
+<ol start="9">
+  <li><strong>A wrongly-inserted row self-heals.</strong> Case 4 reads as a permanent hole; it is a <strong>one-sync exposure window</strong>. Verified twice; healing is per-field.</li>
+  <li><strong>But the window is event-bounded, not time-bounded.</strong> Four consecutive degraded syncs left the row at <code>'Nos'</code>/NULL — the guard copies <code>OLD.unit</code>, which is itself <code>'Nos'</code>, self-healing to the wrong value indefinitely.</li>
+  <li><strong>The parser fix does more than add detectability</strong> — which is why it stays high in the order. One verification argued it “buys detectability, nothing more”; both reviewers overturned it, and the code agrees: <code>sync.ts:262-264</code> <strong>rejects</strong> a voucher item with a missing unit, so a <code>NULL</code> <strong>fails closed</strong> at the voucher boundary while <code>'Nos'</code> sails through as a valid string. <code>push-invoice.ts:103</code> coerces a NULL to the correct majority unit while freezing a truthy <code>'Nos'</code> into <code>push_queue</code> verbatim.</li>
+  <li><strong>A third <code>stock_items</code> writer exists that §6's “confirmed non-interference” misses:</strong> <code>sync.ts:2629</code> <code>seedCreatedStockItem</code> upserts on push-ack with <code>unit: … || "NOS"</code>. §6's claim that “a newly created item reaches <code>stock_items</code> only via the next sync” is wrong at the backend layer. It uses <code>ignoreDuplicates: true</code> (INSERT-only), so it can seed a wrong unit for a new item but cannot corrupt an existing row.</li>
+</ol>
+
+<h4>Ingest-mode conditionality, absent from the RCA entirely</h4>
+<ol start="13">
+  <li>Everything verified on the DB side used the <strong>hybrid/direct</strong> RPC. In <code>render</code> mode <code>sync.ts:2137-2139</code> upserts the parser row <strong>verbatim</strong> — no <code>NULLIF</code>, no <code>TRIM</code>. A degraded <code>group_name</code> persists as <code>''</code>, which is invisible to every <code>IS NULL</code> check and <strong>does not arm the guard's null predicate</strong>. <code>store.ts:78</code> defaults hybrid, <code>index.ts:109</code> force-migrates render→hybrid, and the client's own logs confirm <code>ingest_mode=hybrid</code> — so this is a fan-out concern, not a live one for ztugw.</li>
+</ol>
+
+<h4>Repo drift</h4>
+<ol start="14">
+  <li><strong>The guard exists nowhere in this repository.</strong> Checked: working tree grep, <code>git log --all -S</code>, <code>git grep</code> over every commit, <code>git stash list</code>, <code>git reflog --all</code>, <code>git fsck --full --unreachable --dangling</code> with <code>cat-file -p</code> on every dangling object, <code>~/.Trash</code>, and a second clone. <strong>Zero hits.</strong></li>
+  <li><strong>The two untracked files §7.3 #9 describes are gone.</strong> <code>supabase/migrations/</code> holds 6 files, all dated 1 Jul. The live DDL exists only inside two Supabase dashboards.</li>
+  <li><strong><code>.claude/skills/</code> does not exist</strong> at project or user level; <code>check_units.js</code> is nowhere under <code>~</code>. The <code>voucher-unit-check</code> tool <strong>cannot be run</strong>.</li>
+  <li>All fabrication sites remain unfixed. The only commit since 2026-07-27 is <code>8f20809</code>, docs-only.</li>
+</ol>
+
+<h2 id="s5">5. macOS vs Windows — the boundary</h2>
+
+<p><strong>~80% of the doc's technical content was testable on macOS, and 100% of the part that determines the fix.</strong> The Python engine imports cleanly on Darwin, and <code>sync-engine.ts:353-356</code> deliberately falls back to <code>python3</code> on non-<code>win32</code>.</p>
+
+<div class="scroll">
+<table>
+  <tr><th>Item</th><th>Needs</th><th style="width:210px">Client machine specifically?</th></tr>
+  <tr><td>RCA §5 Q13 — why the 07-24 read lost <code>PARENT</code>/<code>BASEUNITS</code></td><td>Any TallyPrime</td><td><strong>Largely answered — see §8.4</strong></td></tr>
+  <tr><td>§5 H3 (4 FETCH variants), unit-master enumeration</td><td>Any TallyPrime</td><td>No</td></tr>
+  <tr><td>Live ODBC read path</td><td>Windows <strong>guest</strong>, engine running <em>inside</em> it</td><td>No</td></tr>
+  <tr><td>That machine's ODBC wedge</td><td>—</td><td><strong>Yes</strong></td></tr>
+  <tr><td>§7.4 #12 — which company is loaded (13,250 / 14,459 / 17,246)</td><td>—</td><td><strong>Yes</strong></td></tr>
+  <tr><td>TallyPrime release version (<code>Help &gt; About</code>) — never recorded</td><td>—</td><td><strong>Yes.</strong> One screenshot; should be step zero</td></tr>
+</table>
+</div>
+
+<p><code>odbc_bridge.available()</code> returns <code>os.name == "nt" and …</code>; on macOS <code>_powershell_candidates()</code> returns <code>[]</code>. Wine does not help — macOS-native Python still reports <code>posix</code>. This is an <strong>arm64</strong> Mac, so a Windows VM would be Windows-on-ARM emulating x64: fine for a semantic yes/no test, not for anything timing-sensitive.</p>
+
+<h3>The honest epistemic gap</h3>
+<div class="callout note">
+  <span class="tag">Unobserved antecedent</span>
+  <p><strong>Nobody has ever seen the XML TallyPrime returned at 11:06 on 2026-07-24.</strong> No capture exists, and the repo contains no real <code>StockItem</code> collection response at all — <code>tally-responses/05_stock_items_master.xml</code> is a <code>&lt;LINEERROR&gt;</code>. The mock proves <strong>IF degraded THEN <code>Nos</code></strong>. It does not prove <strong>Tally degraded</strong>. Those bytes are gone permanently; a Windows box can tell you whether it can be made to happen <em>again</em>, not what happened then.</p>
+</div>
+<p>What survives as support: the <code>source=xml</code> vs <code>source=odbc</code> metrics line — <strong>strengthened</strong>, since C4 proved the ODBC path is structurally incapable of emitting <code>'Nos'</code>, so the fingerprint can only originate in the XML path; the 18/18 <code>synced_at</code> correlation (untested here); the 07-27 re-scan control (untested here). The byte delta is <span class="strike">removed</span> from this list.</p>
+<p>Six alternative causes were tested. Five die. The survivor: <code>xml_parser.py:550</code> produces the identical fingerprint from a healthy Tally, and is excluded only by a log line quoted inside the doc — never by primary logs.</p>
+
+<blockquote><p><strong>Bottom line.</strong> You do <strong>not</strong> need Windows to prove that a degraded response makes our code write <code>unit='Nos', group_name=NULL</code>, to prove ODBC structurally cannot do it, to verify all four guard cases, or to build and regression-test the parser fix. You <strong>do</strong> need the client's Windows machine to fix the ODBC helper, to confirm which company is loaded, and to confirm that this company's Tally cannot legitimately hold a title-case <code>'Nos'</code>.</p></blockquote>
+
+<h2 id="s6">6. The v2 guard</h2>
+
+<h3>6.1 What changed and why</h3>
+<div class="scroll">
+<table>
+  <tr><th style="width:40px">#</th><th>Change</th><th>Justification</th></tr>
+  <tr><td>1</td><td><code>btrim()</code> on both fields</td><td>v1 matched the bare literal, so <code>'  Nos  '</code> bypassed it — demonstrated</td></tr>
+  <tr><td>2</td><td><code>''</code> treated as missing</td><td>render-mode ingest writes verbatim; <code>group_name</code> lands as <code>''</code> and v1's <code>IS NULL</code> never armed</td></tr>
+  <tr><td>3</td><td><strong>Whole-row rejection</strong> on the full degraded shape (<code>RETURN OLD</code>)</td><td>v1 protected only 2 columns; a degraded read still set <code>closing_qty → 0</code> and <code>part_code → NULL</code></td></tr>
+  <tr><td>4</td><td><strong><code>BEFORE INSERT</code> companion</strong></td><td>v1 was UPDATE-only. The RCA says a trigger “provably cannot” cover INSERT — true only of the <code>BEFORE UPDATE</code> trigger it describes</td></tr>
+</table>
+</div>
+<p>Deliberately <strong>case-sensitive</strong> on <code>'Nos'</code>: Tally's real unit is <code>'NOS'</code> and title case is the parser's signature. Matching case-insensitively would freeze legitimate writes. <code>RETURN OLD</code> leaves <code>synced_at</code> unadvanced — a deliberate detection signal.</p>
+<p><code>ON CONFLICT DO UPDATE</code> fires <code>BEFORE INSERT</code> first, then <code>BEFORE UPDATE</code>. On an upsert the INSERT trigger normalises <code>'Nos'</code> → <code>NULL</code>, <code>EXCLUDED.unit</code> becomes <code>NULL</code>, and the UPDATE trigger restores <code>OLD.unit</code>. The two compose correctly — traced deliberately, since this is the path every sync takes.</p>
+
+<h3>6.2 The client SQL — as applied to ztugw</h3>
+<div class="callout ok">
+  <span class="tag">Applied 2026-07-28</span>
+  <p>Applied to ztugw inside one transaction, verified immediately after. Idempotent — safe to re-run.</p>
+</div>
+
+<pre class="sql"><code>BEGIN;
+
+CREATE OR REPLACE FUNCTION public.tb_guard_stock_unit_group()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+  v_unit  text := btrim(COALESCE(NEW.unit, ''));
+  v_group text := btrim(COALESCE(NEW.group_name, ''));
+BEGIN
+  -- Fully degraded row (unit AND group both missing) = the 2026-07-24 fingerprint.
+  -- Reject the whole row so closing_qty / rate / part_code are protected too.
+  -- synced_at deliberately does not advance; that stale timestamp is the tell.
+  IF (v_unit = '' OR v_unit = 'Nos') AND v_group = '' THEN
+    RETURN OLD;
+  END IF;
+
+  -- Partial degradation: freeze only the affected column.
+  IF v_unit = '' OR v_unit = 'Nos' THEN
+    NEW.unit := OLD.unit;
+  END IF;
+  IF v_group = '' THEN
+    NEW.group_name := OLD.group_name;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.tb_guard_stock_unit_group_ins()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+  -- No OLD to restore from on INSERT, so normalise: fabricated value -&gt; honest NULL.
+  IF btrim(COALESCE(NEW.unit, '')) IN ('', 'Nos') THEN
+    NEW.unit := NULL;
+  END IF;
+  IF btrim(COALESCE(NEW.group_name, '')) = '' THEN
+    NEW.group_name := NULL;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tb_guard_stock_unit_group     ON public.stock_items;
+DROP TRIGGER IF EXISTS tb_guard_stock_unit_group_ins ON public.stock_items;
+
+-- The WHEN clause keeps the function un-entered on healthy syncs, so it costs
+-- nothing until a bad read actually arrives.
+CREATE TRIGGER tb_guard_stock_unit_group
+  BEFORE UPDATE ON public.stock_items
+  FOR EACH ROW
+  WHEN (
+    NEW.unit IS NULL OR btrim(NEW.unit) = '' OR btrim(NEW.unit) = 'Nos'
+    OR NEW.group_name IS NULL OR btrim(NEW.group_name) = ''
+  )
+  EXECUTE FUNCTION public.tb_guard_stock_unit_group();
+
+CREATE TRIGGER tb_guard_stock_unit_group_ins
+  BEFORE INSERT ON public.stock_items
+  FOR EACH ROW
+  WHEN (
+    NEW.unit IS NULL OR btrim(NEW.unit) = '' OR btrim(NEW.unit) = 'Nos'
+    OR NEW.group_name IS NULL OR btrim(NEW.group_name) = ''
+  )
+  EXECUTE FUNCTION public.tb_guard_stock_unit_group_ins();
+
+COMMIT;</code></pre>
+
+<h3>6.3 Revert — instant, changes no data</h3>
+<pre class="sql"><code>DROP TRIGGER  IF EXISTS tb_guard_stock_unit_group     ON public.stock_items;
+DROP TRIGGER  IF EXISTS tb_guard_stock_unit_group_ins ON public.stock_items;
+DROP FUNCTION IF EXISTS public.tb_guard_stock_unit_group();
+DROP FUNCTION IF EXISTS public.tb_guard_stock_unit_group_ins();</code></pre>
+
+<h3>6.4 Verification query</h3>
+<pre class="sql"><code>SELECT tgname,
+       CASE tgenabled WHEN 'O' THEN 'enabled' ELSE tgenabled::text END AS state,
+       pg_get_triggerdef(oid) LIKE '%btrim%' AS has_btrim
+FROM pg_trigger
+WHERE tgrelid = 'public.stock_items'::regclass AND NOT tgisinternal
+ORDER BY tgname;</code></pre>
+<p>Expect 2 rows, both <code>enabled</code>, both <code>has_btrim = true</code>.</p>
+<div class="callout warn">
+  <span class="tag">Easy to misread</span>
+  <p><code>tgenabled</code> renders as <code>O</code> — the <strong>letter O</strong>, for “origin” — when the trigger is <strong>enabled</strong>. It is easily mistaken for a zero.</p>
+</div>
+
+<h3>6.5 Why the trigger must be dropped and recreated, not just replaced</h3>
+<p><code>CREATE OR REPLACE FUNCTION</code> updates only the function body. The <code>WHEN (...)</code> clause lives on the <strong>trigger</strong>, and Postgres has no way to alter it in place. Replacing only the function leaves the old, narrower <code>WHEN</code> gate deciding whether the new logic runs at all — so <code>'  Nos  '</code> and <code>''</code> would still never reach it. <em>This was hit live on yynuu mid-session.</em></p>
+
+<h2 id="s7">7. Safety record</h2>
+
+<h3>7.1 ztugw (client production)</h3>
+<div class="scroll">
+<table>
+  <tr><th>Item</th><th>Before</th><th>After</th></tr>
+  <tr><td><code>stock_items</code> rows</td><td>17,246</td><td><strong>17,246</strong></td></tr>
+  <tr><td>Junk rows (<code>btrim(unit)='Nos' AND group_name IS NULL</code>)</td><td>22</td><td><strong>22</strong></td></tr>
+  <tr><td>Triggers on <code>stock_items</code></td><td><em>none</em></td><td><code>tb_guard_stock_unit_group</code>, <code>tb_guard_stock_unit_group_ins</code> — both enabled, both <code>has_btrim = true</code></td></tr>
+  <tr><td><code>max(synced_at)</code></td><td><code>2026-07-25 13:16:44</code></td><td>unchanged (no sync has run)</td></tr>
+</table>
+</div>
+<p><strong>Pre-flight confirmed the RCA doc is stale on this point:</strong> ztugw had <strong>no</strong> stock guard at apply time — only <code>tb_guard_voucher_mass_delete</code> (different trigger, different table, untouched). The doc's “✅ applied to ztugw” no longer held; the earlier revert had taken.</p>
+<p><strong>Writes made to ztugw:</strong> exactly two — the DDL transaction in §6.2, and one self-cleaning smoke test (<code>ZZG-QTY</code>, plus scratch table <code>public.zz_chk</code>). Both deleted and verified gone; row count returned to 17,246 exactly. No other write of any kind was made to client production at any point in this session.</p>
+
+<h4>Smoke test result on ztugw</h4>
+<div class="scroll">
+<table>
+  <tr><th>step</th><th>stage</th><th>unit</th><th>group</th><th>qty</th><th>rate</th><th>part_code</th><th>synced_at</th></tr>
+  <tr><td>1</td><td>after seed</td><td>PAIR</td><td>TESTGRP</td><td>5</td><td>100</td><td>PC1</td><td class="kv">11:57:49.630646</td></tr>
+  <tr><td>2</td><td>after degraded</td><td>PAIR</td><td>TESTGRP</td><td><strong>5</strong></td><td>100</td><td>PC1</td><td class="kv">11:57:49.630646</td></tr>
+  <tr><td>3</td><td>after whitespace</td><td>PAIR</td><td>TESTGRP</td><td><strong>5</strong></td><td>100</td><td>PC1</td><td class="kv">11:57:49.630646</td></tr>
+  <tr><td>4</td><td>after sold-out</td><td>PAIR</td><td>TESTGRP</td><td><strong>0</strong></td><td>100</td><td>PC1</td><td class="kv">11:58:19.566376</td></tr>
+</table>
+</div>
+<p>Steps 2–3 identical to step 1 <strong>including <code>synced_at</code> to the microsecond</strong> — both degraded writes abandoned entirely, and <code>closing_qty</code> held at 5 rather than being zeroed (which is what v1 would have allowed). Step 4 proves normal syncing is unaffected.</p>
+
+<h3>7.2 yynuu (testing)</h3>
+<p>Row count <strong>13,253 before and after</strong>, zero leftover test rows under any prefix. The guard trigger was read but <strong>never dropped, disabled, or altered</strong> outside the deliberate v2 upgrade.</p>
+<p><strong>Non-disruption suite — 10/10 passed</strong> (<code>guard_v2_nondisruption.py</code>):</p>
+<pre><code>PASS  item sells out (qty 40 -&gt; 0), healthy unit+group  -&gt;  closing_qty=0
+PASS  legitimate unit change PAIR -&gt; SET                -&gt;  unit='SET'
+PASS  legitimate group change BOSCH -&gt; ADDISON          -&gt;  group='ADDISON'
+PASS  real Tally unit 'NOS' (uppercase) writes through  -&gt;  unit='NOS'
+PASS  rate/part_code/qty churn on a healthy row         -&gt;  rate=75 part_code='NEW' qty=9
+PASS  brand-new healthy item inserts untouched          -&gt;  unit='BOTTLE' group='PIDILITE'
+PASS  bulk insert 600 healthy rows (506 ms)             -&gt;  rows=600 nulled=0
+PASS  bulk RE-SYNC of 600 rows, all qty updated (295ms) -&gt;  rows_not_updated=0
+PASS  mixed batch: 100 healthy rows applied             -&gt;  applied=100/100
+PASS  mixed batch: 100 degraded rows rejected           -&gt;  protected=100/100</code></pre>
+<p>The <strong>sold-out</strong> case matters most: it is the scenario where an over-eager guard would silently freeze stock levels and never let them reach zero. It passes because the <code>WHEN</code> clause is false for a row carrying a real unit and a real group — the function is never entered. The <strong>mixed batch</strong> is the realistic partial-degradation case: 200 rows in one payload, sorted correctly per-row.</p>
+<div class="callout info">
+  <span class="tag">One deliberate behaviour change</span>
+  <p>A sync that legitimately sends “this item now has no stock group” is blocked — the guard restores the old group. In Tally every stock item has a parent, so a truly null group from a healthy read is unusual. A direct <code>UPDATE</code> still works.</p>
+</div>
+
+<h3>7.3 Residual untested surface — stated plainly</h3>
+<ul>
+  <li><strong>Scale.</strong> 600 rows tested; ztugw holds 17,246. Nothing suggests a cliff — the <code>WHEN</code> clause short-circuits before any work — but that is a 28× extrapolation.</li>
+  <li><strong>Render mode.</strong> Untested with v2. Client is confirmed <code>hybrid</code>, so this is a fan-out concern.</li>
+  <li><strong>The real engine.</strong> All payloads were hand-built or mock-driven; no real TallyBridge sync has run against v2. And none can until §8 is fixed.</li>
+</ul>
+
+<h2 id="s8">8. The sync outage — a second RCA</h2>
+
+<h3>8.1 Timeline (BetterStack, source <code>2537912</code>)</h3>
+<div class="scroll">
+<table>
+  <tr><th style="width:190px">When</th><th>What</th></tr>
+  <tr><td><strong>07-25 13:16:49</strong></td><td>Last <strong>fully successful</strong> sync. ODBC probe ok → <code>stock_items</code> 14,461 rows via <strong>odbc</strong> → upload <code>http_status: 200</code>. Wrote <code>synced_at = 13:16:44</code></td></tr>
+  <tr><td>07-25 13:21:57, 13:27:01</td><td><code>Heartbeat found no changes - skipping sync</code> → clean completion. <strong>Healthy</strong></td></tr>
+  <tr><td>07-25 13:32:07</td><td>Last event of the day (19:02 IST — end of business)</td></tr>
+  <tr><td><strong>07-26</strong></td><td>Zero client events. Sunday</td></tr>
+  <tr><td><strong>07-27 02:44:38</strong></td><td><code>Starting sync</code> → <code>[Tally] Connected to TallyPrime</code> → <strong>then nothing</strong></td></tr>
+  <tr><td>07-27 02:44 → 03:28</td><td><code>Heartbeat: sync still running (20s interval)</code> × <strong>1,687</strong></td></tr>
+  <tr><td><strong>07-27 03:28:53</strong></td><td><code>[ERR] Sync exceeded the hard limit of 2700s</code></td></tr>
+  <tr><td>07-27 → 12:48:56</td><td>The same cycle <strong>12 times</strong>, ~50 min apart. Never once completes</td></tr>
+  <tr><td><strong>07-28</strong></td><td><strong>Zero events, in both the hot and historical collections.</strong> Verified twice</td></tr>
+</table>
+</div>
+
+<div class="callout danger">
+  <span class="tag">What 07-28 does and does not tell you</span>
+  <p>Nothing reached BetterStack today. That is <em>all</em> it establishes. It is equally consistent with: the machine being off, TallyBridge being closed, no internet on that machine, log shipping being broken, or the source key having changed.</p>
+  <p>An earlier draft of this handout asserted “TallyBridge not running at all” — that was an inference presented as fact, and is <strong>withdrawn</strong>. <strong>Today is an absence of evidence, not evidence of a hang.</strong> The hang below is evidenced on 07-27 only, where there are logs showing it.</p>
+</div>
+
+<div class="callout note">
+  <span class="tag">Correction recorded deliberately</span>
+  <p>Mid-session I read the 07-25 13:21/13:27 entries as hangs and concluded the outage began 07-25. That was wrong — those were healthy no-change heartbeats; my query filtered on <code>stock_items</code>/<code>Starting sync</code>, so the “no changes” lines were invisible and I read absence as failure. <strong>The outage begins 07-27 02:43.</strong></p>
+</div>
+
+<h3>8.2 Where it hangs</h3>
+<p>Every failed attempt stops at exactly the same place:</p>
+<pre><code>[TallyBridge] Starting sync: K V ENTERPRISES
+[Tally] Connected to TallyPrime
+   &larr; 45 minutes of heartbeats, then the watchdog</code></pre>
+<p>The next step on a healthy run is <code>[ODBC] Probe succeeded via TallyODBC64_9000</code>. So the hang is inside <code>odbc_bridge.probe()</code>, called at <code>sync_main.py:2105</code>.</p>
+
+<h3>8.3 Root cause — an unguarded blocking call inside <code>probe()</code></h3>
+
+<div class="callout ok">
+  <span class="tag">Established by evidence</span>
+  <p><code>[Tally] Connected to TallyPrime</code> prints only when an HTTP round-trip to port 9000 returns product info — so <strong>TallyPrime itself was up and answering on 07-27</strong>. Between that print and the next expected line (<code>[ODBC] Probe succeeded…</code>) there is nothing but variable assignment and <code>odbc_bridge.probe()</code>. <strong>The hang is inside <code>probe()</code>.</strong></p>
+  <p>Also established: the helper was not merely <em>slow</em>. A slow-but-alive helper makes <code>readline()</code> block, the 30s guard fires, and <code>did not respond within 30s</code> is logged — exactly what happened on 07-24. On 07-27 that message never appears, so the simple slow case is ruled out.</p>
+</div>
+
+<div class="callout danger">
+  <span class="tag">Not established — which call blocked</span>
+  <p><code>probe()</code> contains <strong>three</strong> unguarded blocking calls, and the logs cannot distinguish them, because all three produce the identical signature: no output, no exception, no log line.</p>
+</div>
+
+<div class="scroll">
+<table>
+  <tr><th style="width:44px"></th><th>Candidate</th><th style="width:190px">Where</th><th style="width:150px">Blocks forever?</th></tr>
+  <tr><td>(a)</td><td><code>subprocess.Popen(...)</code> spawning PowerShell</td><td><code>_start()</code>, ~line 246</td><td>yes, unguarded</td></tr>
+  <tr><td>(b)</td><td><code>stdin.write()</code> + <code>flush()</code> if the child isn't draining</td><td><code>_send()</code>, ~line 277</td><td>yes, unguarded</td></tr>
+  <tr><td>(c)</td><td><code>stderr.read()</code> on the empty-line path</td><td>line 310</td><td>yes, unguarded</td></tr>
+</table>
+</div>
+
+<p>Candidate (c) is spelled out below because it is the least obvious of the three and the easiest to reintroduce. <strong>It is not asserted to be the one that fired.</strong> The fix must bound all three.</p>
+
+<blockquote><p><strong>Decisive test, on the client machine:</strong> check the process list for a stray <code>powershell.exe</code> running <code>tally_odbc_helper.ps1</code>. Present → (b) or (c). Absent → (a).</p></blockquote>
+
+<h4>Candidate (c) in detail</h4>
+<pre class="bug"><code>line = read_result.get("line")
+if not line:
+    stderr_output = ""
+    if self._proc.stderr:
+        try:
+            stderr_output = self._proc.stderr.read()   # &larr; blocks until EOF
+        except Exception:
+            stderr_output = ""
+    raise RuntimeError(f"ODBC helper did not return a response. {stderr_output}".strip())</code></pre>
+
+<p><code>stderr</code> is a <code>subprocess.PIPE</code> (<code>_start()</code>, line ~260). <strong><code>.read()</code> on a pipe blocks until EOF, and EOF only arrives when the child process exits.</strong> On this path the child has <em>not</em> exited — <code>poll()</code> returned <code>None</code> moments earlier.</p>
+
+<p>Critically, this sits <strong>outside the 30-second guard</strong>, which bounds only <code>readline()</code>:</p>
+<pre><code>reader.join(timeout=ODBC_READ_TIMEOUT_SECONDS)   # 30s, line 295
+if reader.is_alive():                            # only catches a SLOW read
+    self.close()
+    raise RuntimeError("ODBC helper did not respond within 30s ...; falling back to XML.")</code></pre>
+
+<div class="callout danger">
+  <span class="tag">The mechanism</span>
+  <p>If the PowerShell helper closes stdout but stays alive, <code>readline()</code> returns an <strong>empty string immediately</strong> — the guard is satisfied — and execution falls straight into the unbounded <code>stderr.read()</code>. The <code>RuntimeError</code> on the following line is never reached, so <strong>nothing is ever logged</strong>.</p>
+</div>
+
+<p>This is <strong>consistent with</strong> the evidence — no 30s message, no error for 45 minutes, hang where <code>probe()</code> runs, identical 12 times. <em>So are candidates (a) and (b).</em> Consistency is not identification; do not read this as a positive ID.</p>
+<p><strong>A second instance of the same trap:</strong> <code>close()</code> calls <code>_send({"cmd": "quit"})</code>, and <code>probe()</code> calls <code>close()</code> inside its candidate loop — so the <em>teardown</em> path can wedge the same way.</p>
+
+<h3>8.4 Conclusion — both incidents are the same subsystem</h3>
+<div class="scroll">
+<table>
+  <tr><th style="width:150px"></th><th>What the ODBC helper did</th><th>Consequence</th></tr>
+  <tr><td><strong>07-24 11:06</strong></td><td>Responded slowly → 30s guard <strong>fired</strong> → logged → fell back to XML</td><td>Degraded XML read → <code>"Nos"</code> on 14,459 rows → <strong>the original RCA</strong></td></tr>
+  <tr><td><strong>07-27 onward</strong></td><td>stdout EOF while alive → guard <strong>did not fire</strong> → blocked on <code>stderr.read()</code></td><td>Sync never completes → <strong>3 days with no data</strong></td></tr>
+</table>
+</div>
+
+<p>The RCA's open question #13 — <em>why did the 07-24 XML read return unpopulated <code>PARENT</code>/<code>BASEUNITS</code></em> — now has a far better-supported frame than “Tally was mid-load or locked.” <strong>The ODBC helper on that machine is unhealthy, and was already misbehaving on 07-24.</strong> The XML fallback ran <em>because</em> ODBC failed; the degraded read was the downstream consequence. On 07-24 it was slow enough to force a bad fallback; by 07-27 it had stopped responding entirely.</p>
+<p>This does not fully close #13 — it explains why the <em>XML path</em> was used, not why <em>that XML response</em> came back name-only. But it relocates the investigation from “Tally is mysteriously flaky” to “one identifiable component on one machine is failing, progressively.”</p>
+
+<div class="callout ok">
+  <span class="tag">Clears the guard</span>
+  <p>The hang is in a PowerShell subprocess on the client's Windows machine, before any data is read and long before anything reaches Supabase. It began 02:43 UTC on 07-27, hours before the guard was applied that afternoon. A database trigger cannot participate in a client-side subprocess hang.</p>
+</div>
+
+<h3>8.5 Fix</h3>
+<p><strong>Immediate (unblocks the client):</strong> restart TallyBridge on that machine — it kills the wedged PowerShell helper. Nothing is running there today at all, so it must be started regardless.</p>
+<p><strong>Code:</strong> bound the stderr read the same way stdout is already bounded, or skip it entirely on this path since the process is known alive:</p>
+<pre class="sql"><code>line = read_result.get("line")
+if not line:
+    self.close()          # tear down the wedged helper
+    raise RuntimeError(
+        "ODBC helper closed its output stream without responding; falling back to XML."
+    )</code></pre>
+<p>Same treatment for the <code>stderr.read()</code> in the <code>poll() is not None</code> branch, and <code>close()</code> must not be able to block.</p>
+
+<div class="callout warn">
+  <span class="tag">Note the interaction</span>
+  <p>This fix makes the sync fall back to <strong>XML</strong> — which, until the parser fix lands, is precisely the path that fabricates <code>"Nos"</code>. The v2 guard now on ztugw covers that. The two fixes are complementary, and this is a strong argument for doing the parser change soon rather than leaving it queued.</p>
+</div>
+
+<p><strong>Observability</strong> — unchanged from the RCA's recommendation and now more urgent. The metrics line (<code>rows / bytes / fetch_ms / source</code>) is insufficient to diagnose its own headline event, and <code>bytes</code> is an untrustworthy 200-row extrapolation (§3.1). Persist the raw XML body on a degradation predicate; replace <code>bytes=</code> with the true <code>len(response.content)</code>; log per-field populated counts (<code>PARENT populated N/M</code>, <code>BASEUNITS populated N/M</code>) — the 07-24 sync wrote 14,459 rows with <strong>100% null <code>group_name</code></strong> and reported <code>status: success</code>.</p>
+
+<h2 id="s9">9. Revised remediation order</h2>
+<ol>
+  <li><strong>Restart TallyBridge on the client machine.</strong> Nothing else can be verified until syncs resume, and the client has had no data for 3 days. <em>(New — top priority.)</em></li>
+  <li><strong>Bound all three unguarded blocking calls in <code>odbc_bridge.probe()</code></strong> — the <code>Popen</code> spawn, the <code>stdin.write</code>/<code>flush</code>, and both <code>stderr.read()</code> sites — and make <code>close()</code> non-blocking. Since which one fired was never identified (§8.3), fixing only one is a coin flip. Small, contained; converts a permanent hang into the existing graceful XML fallback.</li>
+  <li><strong>Delete one of the duplicate DIVYA vouchers</strong> — a double-post of ~₹75k is one click away. <em>(RCA §10 #1.)</em></li>
+  <li><strong>Settle the <code>3 Ps</code> vs <code>11</code> quantity question</strong> — reproducible, larger in value than the unit bug, and needs the <strong>physical challan</strong>. Neither macOS- nor Windows-testable. <em>(RCA §10 #2.)</em></li>
+  <li><strong>Parser fix — expanded scope.</strong> <code>xml_parser.py</code> <strong>351, 523, 550</strong> + <code>structured_sections.json</code> <strong>529, 931</strong> → <code>None</code>/<code>null</code>, <strong>not</strong> empty string (<code>""</code> survives render-mode ingest as <code>''</code> and defeats the null checks). Then audit the three backend <code>|| "NOS"</code> sites. Write any degradation check against <code>""</code>, not <code>None</code>.</li>
+  <li><strong>Promote degradation detection (§7.2 #7).</strong> The only control protecting <code>closing_qty</code> and <code>part_code</code>, which no trigger and no parser change addresses.</li>
+  <li><strong>Commit the guard as a real migration.</strong> It is in no repository. Dump the live DDL from both projects, reconcile, commit.</li>
+  <li><strong>Repair the 22 junk rows</strong> — routine, <em>not</em> blocked by the guard (§3.2). Review before acting; the 19 Group-A brand rows and 3 mangled-name orphans are delete candidates, not repair candidates.</li>
+  <li><strong>Fan out to remaining tenants</strong>, gated on confirming each one's <code>SYNC_INGEST_MODE</code>.</li>
+  <li>Record the client's TallyPrime version (<code>Help &gt; About</code>) before any further Tally investigation.</li>
+</ol>
+
+<h2 id="s10">10. Reference</h2>
+
+<h3>Key code sites</h3>
+<div class="scroll">
+<table>
+  <tr><th style="width:340px">Path</th><th>Role</th></tr>
+  <tr><td><code>src/python/odbc_bridge.py</code> <code>probe()</code></td><td><strong>the sync hang — three unguarded blocking calls (§8.3)</strong></td></tr>
+  <tr><td><code>src/python/odbc_bridge.py:246, 277, 310</code></td><td>the three candidates: <code>Popen</code> spawn · <code>stdin.write</code>/<code>flush</code> · <code>stderr.read()</code></td></tr>
+  <tr><td><code>src/python/odbc_bridge.py:295</code></td><td>the 30s guard — bounds <code>readline()</code> <strong>only</strong></td></tr>
+  <tr><td><code>src/python/odbc_bridge.py:134</code></td><td><code>available()</code> — <code>os.name == "nt"</code>, Windows-only gate</td></tr>
+  <tr><td><code>src/python/xml_parser.py:351, 523, 550</code></td><td>fabricates <code>"Nos"</code> (550 is a <strong>stock</strong> site, not voucher)</td></tr>
+  <tr><td><code>src/python/definitions/structured_sections.json:529, 931</code></td><td><code>"default": "Nos"</code> ×2</td></tr>
+  <tr><td><code>src/python/definitions/odbc_sections.json</code></td><td>no default — structurally cannot emit <code>'Nos'</code></td></tr>
+  <tr><td><code>definition_extractor.py</code> <code>_is_empty</code></td><td>attribute-only dict is truthy → kills the <code>CLOSINGBALANCE</code> rescue</td></tr>
+  <tr><td><code>src/python/sync_main.py:1464</code></td><td>tries the definition-driven path <strong>first</strong></td></tr>
+  <tr><td><code>src/python/sync_main.py:1977, 1980</code></td><td><code>_BYTES_SAMPLE_SIZE = 200</code> · <code>estimate_payload_bytes</code></td></tr>
+  <tr><td><code>src/python/sync_main.py:2105</code></td><td><code>odbc_bridge.probe()</code> — where the hang occurs</td></tr>
+  <tr><td><code>src/python/tally_client.py:10</code></td><td><code>TALLY_URL</code> env var — makes the mock possible</td></tr>
+  <tr><td><code>backend/src/routes/sync.ts:262-264</code></td><td>voucher unit <strong>required</strong> — why a NULL fails closed</td></tr>
+  <tr><td><code>backend/src/routes/sync.ts:2137-2139</code></td><td>render-mode verbatim upsert (no <code>NULLIF</code>)</td></tr>
+  <tr><td><code>backend/src/routes/sync.ts:2629</code></td><td><code>seedCreatedStockItem</code> — third <code>stock_items</code> writer</td></tr>
+</table>
+</div>
+
+<h3>Identifiers</h3>
+<div class="scroll">
+<table>
+  <tr><td style="width:210px"><strong>ztugw</strong> (client prod)</td><td><code>ztugwhevemibdrzqafyw</code> · account <code>rohan.psom@gmail.com</code> · <strong>17,246</strong> rows</td></tr>
+  <tr><td>ztugw company</td><td><code>c47da0b1-b7dd-4589-bb66-73081022c2a3</code> (K V ENTERPRISES)</td></tr>
+  <tr><td><strong>yynuu</strong> (testing)</td><td><code>yynuuysvjeipawzfbeme</code> · account <code>niranjansiddharth0@gmail.com</code> · <strong>13,253</strong> rows</td></tr>
+  <tr><td>yynuu company</td><td><code>74704231-5692-465f-8bea-34588dcdb86b</code> (K V ENTERPRISES)</td></tr>
+  <tr><td>BetterStack source</td><td><code>2537912</code> <code>tallybridge-client</code> · table <code>t560530.tallybridge_client_2</code></td></tr>
+</table>
+</div>
+<div class="callout danger">
+  <span class="tag">Check before running anything</span>
+  <p><strong>Row count identifies the project.</strong> 17,246 = ztugw (client production). 13,253 = yynuu (testing). Both companies are named “K V ENTERPRISES”, and both dashboards say <code>PRODUCTION</code> — the account name in the breadcrumb and the row count are the only reliable discriminators.</p>
+</div>
+
+<h3>BetterStack MCP</h3>
+<p>Added this session at <strong>user scope</strong> (<code>~/.claude.json</code>), not project scope — no <code>.mcp.json</code> in the repo:</p>
+<pre><code>claude mcp add --transport http --scope user betterstack https://mcp.betterstack.com</code></pre>
+<p>Authenticate via <code>/mcp</code> → select → Enter. Exposes a ClickHouse <code>query</code> tool. Recent logs live in <code>remote(t560530_tallybridge_client_2_logs)</code> (<strong>last ~30 min only</strong>); anything older is in <code>s3Cluster(primary, t560530_tallybridge_client_2_s3)</code> with <code>_row_type = 1</code> for logs.</p>
+<pre><code>SELECT toDate(dt) AS day,
+       JSONExtract(raw, 'ingest_host', 'Nullable(String)') AS host,
+       count(*) AS events, min(dt) AS first_event, max(dt) AS last_event
+FROM s3Cluster(primary, t560530_tallybridge_client_2_s3)
+WHERE _row_type = 1 AND dt &gt; now() - INTERVAL 14 DAY
+GROUP BY day, host ORDER BY day ASC, events DESC</code></pre>
+
+<h3>Post-sync health check (run once syncs resume)</h3>
+<pre class="sql"><code>SELECT max(synced_at) AS last_sync_now,
+       count(*) FILTER (WHERE synced_at &gt; now() - interval '2 hours') AS updated_recently,
+       count(*) FILTER (WHERE btrim(unit) = 'Nos' AND group_name IS NULL) AS junk_rows,
+       count(*) AS total
+FROM public.stock_items;</code></pre>
+<ul>
+  <li><strong>Healthy:</strong> <code>last_sync_now</code> past <code>2026-07-25 13:16:44</code>, <code>updated_recently</code> in the thousands, <code>junk_rows</code> still 22, <code>total</code> ≈ 17,246.</li>
+  <li><strong>Roll the guard back if:</strong> a sync demonstrably ran but <code>last_sync_now</code> did not move, or <code>updated_recently</code> is near zero.</li>
+  <li><strong>Investigate, do not roll back, if:</strong> <code>junk_rows</code> climbs above 22 — a degraded read got through the INSERT path.</li>
+</ul>
+
+<h3>Reusable artifacts</h3>
+<p>All under the session scratchpad. <strong>Session-scoped — copy anything worth keeping into <code>src/python/tests/</code> before it is reaped.</strong></p>
+<div class="scroll">
+<table>
+  <tr><th style="width:330px">File</th><th>Proves</th></tr>
+  <tr><td><code>mock_tally_server.py</code> + <code>run_fetch.py</code> + <code>run_ingest.py</code></td><td><strong>The end-to-end harness.</strong> Fake TallyPrime gateway, stdlib only, <code>--mode degraded</code> / <code>--mode healthy</code>, drives the real unmodified engine. After the parser fix, the degraded leg must land <code>unit=NULL</code>, not <code>'Nos'</code></td></tr>
+  <tr><td><code>guard_v2_nondisruption.py</code></td><td>The 10/10 normal-sync suite in §7.2. Asserts <code>'yynuu'</code> in the URL before firing; self-cleans</td></tr>
+  <tr><td><code>c3_healthy_control.py</code></td><td><strong>The regression guard for the parser fix</strong> — 10 real units round-trip byte-exact, zero <code>"Nos"</code></td></tr>
+  <tr><td><code>c1_test_parse_stock.py</code>, <code>c1_test_definition_path.py</code>, <code>c2_test_structured_stock.py</code></td><td>Both parse paths, 8 degraded shapes, ABSENT vs EMPTY vs WHITESPACE</td></tr>
+  <tr><td><code>c5_test_voucher_units.py</code></td><td>All three <code>xml_parser</code> sites + both JSON defaults</td></tr>
+  <tr><td><code>byte_delta_test.py</code>, <code>byte_delta_test2.py</code>, <code>rows.json</code></td><td>The §3.1 refutation — drives the real <code>estimate_payload_bytes</code> over 2,000 genuine rows</td></tr>
+  <tr><td><code>zz07_*</code>, <code>zz08_*</code>, <code>zz09_*</code>, <code>zz10_*</code></td><td>The guard case matrix, the whitespace bypass, the INSERT gap, the §3.2 refutation</td></tr>
+</table>
+</div>
+<p>Run with the scratchpad venv from <code>src/python</code>. It pins <code>xmltodict==0.13.0</code> to match <code>requirements.txt</code> — the dict-vs-<code>None</code> behaviour for empty tags is version-sensitive, so this is not incidental.</p>
+
+<h2 id="s11">11. Still open</h2>
+<ol>
+  <li><strong>§3.3's 18/18 <code>synced_at</code> correlation was never re-verified</strong>, and it is now the load-bearing evidence for the antecedent since the byte delta was removed. Needs a read against ztugw.</li>
+  <li><strong>§3.4's re-scan control</strong> not executed. The doc's <code>curl</code> uses <code>push=queue</code>, which would write a <strong>third</strong> duplicate DIVYA voucher into client production. A <code>push</code> mode parameter exists and defaults to <code>"none"</code> (<code>handler.py:1762,1776</code>), so a non-writing re-scan is very likely possible — <strong>but the exact gating of the <code>push_queue</code> insert and the GCS write on the sale path was not traced, and must be confirmed by reading before any request is sent to client production.</strong></li>
+  <li><strong>Why <em>that</em> XML response came back name-only</strong> (RCA §5 Q13) — reframed by §8.4 but not closed.</li>
+  <li><strong>§7.4 #12 — which company is loaded.</strong> Three irreconcilable counts remain: 13,250 live vs 14,459 in the sync vs 17,246 in ztugw. Until settled, live probes are not authoritative.</li>
+  <li><strong><code>ARALDITE (180 G)</code> has a corrupt <code>group_name</code></strong> (<code>" Primary"</code>, ASCII 0x04). Confirmed present in yynuu too, so it is not a ztugw-only artifact.</li>
+  <li><strong>The guard is still in no repository.</strong></li>
+  <li><strong>2,787 orphan rows</strong> — the master write never reconciles deletions. <em>Deferred by request.</em></li>
+</ol>
+
+<footer>
+  Generated 2026-07-28 · companion to <code>session_handout_2026-07-28_guard_v2_and_odbc_hang.md</code> · predecessor <code>session_handout_2026-07-27_stock_unit_corruption_rca.md</code>
+</footer>
+
+</div>
+</body>
+</html>
