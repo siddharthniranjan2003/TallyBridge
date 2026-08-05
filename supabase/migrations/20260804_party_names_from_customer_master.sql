@@ -49,6 +49,24 @@
 --
 -- Idempotent: safe to run on any client/testing project, and safe to re-run.
 
+-- 2026-08-05: widened from 'Sundry Debtors' to include 'Sundry Creditors'.
+-- Evidence from the first five real client scans: A.V. UNIPACK PRIVATE LIMITED is
+-- filed under Sundry Creditors and was invoiced anyway (34 GST SALE vouchers). It
+-- only matched because fetch_targeted_party_rows still ILIKEs `vouchers`. 22 such
+-- suppliers carry 171 sale invoices between them, so they belong in the list
+-- rather than depending on the rescue. Client total: 3,578 -> 4,193.
+--
+-- STILL NOT COVERED, deliberately: 7 parties with real GST SALE vouchers sit under
+-- neither group -- MOHIT SALES AGENCIES, M S ENTERPRISES and R.R.TOOLS &
+-- EQUIPMENTS under `Traders`, CP GRAT-EX and WIKUS INDIA under
+-- `Manufacturer_ Micro/ Small`, EMKAY TOOLS under `Manufacturer_ Medicum/ Large`,
+-- and `Cash`. MOHIT SALES AGENCIES was scanned on 2026-08-04 and matched through
+-- the ILIKE rescue, which is what keeps these reachable. To cover them in the main
+-- list instead, add:
+--
+--     UNION ALL
+--     SELECT v.party_name FROM vouchers v WHERE v.voucher_type = 'GST SALE'
+
 CREATE OR REPLACE FUNCTION public.get_distinct_party_names()
  RETURNS TABLE(party_name text)
  LANGUAGE sql
@@ -56,7 +74,7 @@ CREATE OR REPLACE FUNCTION public.get_distinct_party_names()
 AS $function$
   SELECT DISTINCT btrim(l.name)
   FROM ledgers l
-  WHERE l.group_name = 'Sundry Debtors'
+  WHERE l.group_name IN ('Sundry Debtors', 'Sundry Creditors')
     AND l.name IS NOT NULL
     AND btrim(l.name) <> ''
   ORDER BY 1;

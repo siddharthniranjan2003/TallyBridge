@@ -10,10 +10,11 @@
 -- matching keeps working at its pre-fix reach (211 distinct customers, '3S DESIGN'
 -- .. 'Cash'). That fallback is load-bearing and deliberately kept.
 --
--- What reverting costs, measured on the client:
+-- What reverting costs, measured on the client (4,193 names -> 1,495):
 --   * the 2,207 Sundry Debtors with no voucher history become unmatchable again
---   * the 79 pure-purchase suppliers, `Cash` and `BHARTI AIRTEL` are re-admitted
---     to the sale candidate list
+--   * the 22 Sundry Creditors that carry real GST SALE vouchers fall back to being
+--     reachable only through the ILIKE rescue
+--   * `Cash` and `BHARTI AIRTEL` are re-admitted to the sale candidate list
 --
 -- To go back to the intermediate 20260803 behaviour instead of all the way to the
 -- fallback, re-apply 20260803_distinct_party_names.sql after this.
