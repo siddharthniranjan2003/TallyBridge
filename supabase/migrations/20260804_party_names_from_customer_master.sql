@@ -56,16 +56,30 @@
 -- suppliers carry 171 sale invoices between them, so they belong in the list
 -- rather than depending on the rescue. Client total: 3,578 -> 4,193.
 --
--- STILL NOT COVERED, deliberately: 7 parties with real GST SALE vouchers sit under
--- neither group -- MOHIT SALES AGENCIES, M S ENTERPRISES and R.R.TOOLS &
--- EQUIPMENTS under `Traders`, CP GRAT-EX and WIKUS INDIA under
--- `Manufacturer_ Micro/ Small`, EMKAY TOOLS under `Manufacturer_ Medicum/ Large`,
--- and `Cash`. MOHIT SALES AGENCIES was scanned on 2026-08-04 and matched through
--- the ILIKE rescue, which is what keeps these reachable. To cover them in the main
--- list instead, add:
+-- 2026-08-05: `Traders` added as well, which is what brings MOHIT SALES AGENCIES
+-- in -- it was scanned on 2026-08-04 and had been matching only via the rescue.
+--
+-- ⚠ THE GROUP NAME IS CASED DIFFERENTLY PER PROJECT. Tally exports whatever the
+-- user typed, so the client has 'Traders' and testing has 'TRADERS'. A literal
+--     IN ('Sundry Debtors','Sundry Creditors','Traders')
+-- therefore works on the client and silently matches ZERO Traders rows on
+-- testing -- measured: 2,535 vs 2,584, 49 customers missing with no error. Hence
+-- upper(btrim(...)), so one file behaves identically on both projects. Any group
+-- added here later must go in UPPER CASE for the same reason.
+--
+--   client   3,578 -> 4,198        testing   2,346 -> 2,584
+--
+-- STILL NOT COVERED: 4 parties with real GST SALE vouchers sit outside these three
+-- groups -- CP GRAT-EX and WIKUS INDIA (Manufacturer_ Micro/ Small), EMKAY TOOLS
+-- (Manufacturer_ Medicum/ Large) and `Cash` (Cash-in-hand). They stay reachable
+-- through fetch_targeted_party_rows, which still ILIKEs `vouchers`. A group
+-- whitelist leaks by design: file a customer under a new group in Tally and they
+-- drop out of this list silently. The whitelist-free alternative is to append
 --
 --     UNION ALL
 --     SELECT v.party_name FROM vouchers v WHERE v.voucher_type = 'GST SALE'
+--
+-- which covers anyone actually invoiced, whatever group they sit in.
 
 CREATE OR REPLACE FUNCTION public.get_distinct_party_names()
  RETURNS TABLE(party_name text)
@@ -74,7 +88,7 @@ CREATE OR REPLACE FUNCTION public.get_distinct_party_names()
 AS $function$
   SELECT DISTINCT btrim(l.name)
   FROM ledgers l
-  WHERE l.group_name IN ('Sundry Debtors', 'Sundry Creditors')
+  WHERE upper(btrim(l.group_name)) IN ('SUNDRY DEBTORS', 'SUNDRY CREDITORS', 'TRADERS')
     AND l.name IS NOT NULL
     AND btrim(l.name) <> ''
   ORDER BY 1;
