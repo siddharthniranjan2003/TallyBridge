@@ -1,0 +1,85 @@
+# Kong declarative config — rendered to kong.yml by scripts/bootstrap.mjs.
+#
+# Kong is what makes this stack a drop-in replacement for the hosted project
+# rather than "a Postgres with a REST API bolted on". It is the piece that serves
+# /rest/v1/* on one origin with `apikey` header auth, which is exactly the shape
+# @supabase/supabase-js and the Python engine already speak. Point SUPABASE_URL
+# at http://127.0.0.1:54321 and no application code changes at all.
+#
+# Trimmed to the two routes this deployment actually needs:
+#   /rest/v1/  -> PostgREST   (every read and write the app makes)
+#   /pg/       -> pg-meta     (Studio's backend; not called by the app)
+# No /auth/v1, /storage/v1, /realtime/v1 or /functions/v1 — those services are
+# not in the compose file.
+
+_format_version: "2.1"
+_transform: true
+
+consumers:
+  - username: DASHBOARD
+  - username: anon
+    keyauth_credentials:
+      - key: ${ANON_KEY}
+  - username: service_role
+    keyauth_credentials:
+      - key: ${SERVICE_ROLE_KEY}
+
+acls:
+  - consumer: anon
+    group: anon
+  - consumer: service_role
+    group: admin
+
+basicauth_credentials:
+  - consumer: DASHBOARD
+    username: ${DASHBOARD_USERNAME}
+    password: ${DASHBOARD_PASSWORD}
+
+services:
+  - name: rest-v1
+    url: http://rest:3000/
+    routes:
+      - name: rest-v1-all
+        strip_path: true
+        paths:
+          - /rest/v1/
+    plugins:
+      - name: cors
+      - name: key-auth
+        config:
+          # key_names must list `apikey` first: supabase-js sends the key in BOTH
+          # the `apikey` header and `Authorization: Bearer`. If Kong consumed the
+          # Authorization header instead, PostgREST would receive no JWT and would
+          # fall back to the anon role — reads would still work, writes would fail
+          # with a permissions error that points nowhere near the real cause.
+          key_names:
+            - apikey
+          hide_credentials: false
+      - name: acl
+        config:
+          hide_groups_header: true
+          allow:
+            - admin
+            - anon
+
+  # pg-meta powers Studio's table/SQL editor. `admin` only — the service_role key
+  # is the sole credential that can reach it. Upstream ships this route wide open
+  # on 0.0.0.0, which is an unauthenticated admin API over the whole ledger.
+  - name: meta
+    url: http://meta:8080/
+    routes:
+      - name: meta-all
+        strip_path: true
+        paths:
+          - /pg/
+    plugins:
+      - name: key-auth
+        config:
+          key_names:
+            - apikey
+          hide_credentials: false
+      - name: acl
+        config:
+          hide_groups_header: true
+          allow:
+            - admin

@@ -1,0 +1,9 @@
+# Generated per install by scripts/bootstrap.mjs. Holds this machine's Postgres
+# password, JWT secret, and the anon + service_role keys signed with it.
+.env
+
+# Rendered from kong.template.yml with the real keys embedded in plain text.
+volumes/api/kong.yml
+
+# Offline image tarballs produced by build-client-package.ps1 -IncludeImages.
+images/
