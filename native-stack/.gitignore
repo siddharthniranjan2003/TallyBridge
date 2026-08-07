@@ -1,0 +1,11 @@
+# Generated per install: .env (Postgres password, JWT secret, both role keys),
+# postgrest.conf and the Caddyfile, which embed those secrets in plain text.
+config/
+
+# Vendored binaries, fetched by fetch-vendor.ps1. ~450 MB with PostgreSQL.
+vendor/
+
+# The database itself.
+data/
+
+logs/
