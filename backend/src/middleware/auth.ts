@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'crypto';
 import type { Request, Response, NextFunction } from 'express';
-import { firebaseAuth } from '../db/firebase.js';
+import { getFirebaseAuth } from '../db/firebase.js';
 
 export async function requireApiKey(
   req: Request,
@@ -12,7 +12,10 @@ export async function requireApiKey(
   if (authHeader?.startsWith('Bearer ')) {
     const token = authHeader.slice(7);
     try {
-      const decoded = await firebaseAuth.verifyIdToken(token);
+      // Initialises the Firebase SDK on first use. On an API-key-only deployment
+      // (no FIREBASE_SERVICE_ACCOUNT_B64) this throws and is caught below as a
+      // 401 — which is correct: that deployment cannot verify Firebase tokens.
+      const decoded = await getFirebaseAuth().verifyIdToken(token);
       (req as Request & { firebaseUser: typeof decoded }).firebaseUser = decoded;
       next();
       return;
