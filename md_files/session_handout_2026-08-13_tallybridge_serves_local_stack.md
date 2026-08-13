@@ -9,6 +9,12 @@
 
 ## 0. TL;DR
 
+> **STATUS: BUILT AND WORKING.** `TallyBridge Setup 2.0.0.exe` installs, starts the whole
+> data stack itself, and serves both Website 2 screens from the client's machine with no
+> Supabase and no Cloud Run. Website 2 was built and opened against it and rendered real
+> data. Committed and pushed as `feat/app-serves-local-stack` (`7235b7c`).
+> **Start at §12 if you are picking this up fresh.**
+
 - **Scope cut.** The product is now three features: **MRP report (R1–R7)**, **Stock Info /
   Rate**, and **price list** — price list **deferred**, not in this phase.
 - **TallyBridge becomes the backend.** It spawns Postgres + PostgREST + the existing
@@ -320,17 +326,130 @@ Serve that build locally (or `flutter run -d chrome`). **Do not deploy it to Fir
 it points at 127.0.0.1, so it only works in a browser on the Tally PC, and it carries the
 service_role key.
 
-## 11. Next three commands
+## 11. Corrections to earlier sections of THIS document
+
+Written progressively during the session; these superseded themselves:
+
+- **§4's lifecycle (seed from cloud -> dual-write -> stop cloud write) was not what
+  happened.** The user chose a **fresh install + full sync from Tally** instead, which is
+  strictly better: it proves the extraction AND the disaster-recovery path, where seeding
+  from cloud only proves a copy. See §10's Tally-built database results.
+- **§4's golden-CSV diff was never run**, and matters much less than first argued. Once
+  PostgREST was kept, the *same backend code* runs against both databases, so a diff tests
+  data completeness rather than a port. The row-count diff in §10 covers that.
+- **The `--config-dir` fix in §8 is still open.** `local-stack.ts` works around it by
+  mirroring ProgramData into the stack directory.
+
+---
+
+## 12. START HERE — picking this up in a new chat
+
+### Where it stands
+
+| | |
+|---|---|
+| Local Postgres, fed from Tally, no cloud | done, verified |
+| MRP report + Stock Info served locally | done, verified |
+| `TallyBridge Setup 2.0.0.exe` (203.7 MB) | built, installed, runs the whole stack itself |
+| Website 2 built and opened against it | done — rendered real data |
+| Branch `feat/app-serves-local-stack` (`7235b7c`) | pushed |
+
+### Bring it up on this box
 
 ```powershell
-cd C:\project\TallyBridge\native-stack ; .\start.ps1
-node .\scripts\healthcheck.mjs
-$env:TB_ENV_FILE="C:\project\TallyBridge\native-stack\config\.env"
-node ..\local-stack-shared\scripts\schema-parity.mjs
+# 1. TallyBridge (starts postgres, postgrest, caddy, backend itself -- ~15s)
+Start-Process "$env:LOCALAPPDATA\Programs\TallyBridge\TallyBridge.exe"
+
+# 2. Website 2 -- Flutter 3.47.0 is at C:\src\flutter; a NEW shell has it on PATH
+cd C:\project\AiAccountant
+flutter run -d chrome --dart-define-from-file=env/testing-local.json --dart-define=SITE=rate
 ```
 
-Then capture the golden CSVs (§4 step 0) — needs the `API_KEY_CLIENT` value from Cloud
-Run, which is not in this repo.
+If `flutter` is not found, the shell predates the install: `$env:Path = "C:\src\flutter\bin;$env:Path"`.
+
+`env/testing-local.json` is **gitignored** and exists only on this machine. It is a
+separate file from `testing.json` on purpose: both sites build from the same env file, so
+editing `testing.json` would repoint Website 1 (ops) at localhost on its next rebuild.
+
+### Reading the reports
+
+`hero_sku_health`, `buying_mistakes` and `risk_watch` come back **empty**, and
+`dead_capital` holds 13,203 of 13,237 items. **That is the data, not a bug** — the Tally
+books have almost no vouchers after 2025-08-04, so the report's 6-month sales window is
+nearly empty and almost everything classifies as dead. Use `/full_portfolio_health` to
+see everything.
+
+### Do this next, in order
+
+1. **Make the app read the API key from the stack config.** `bootstrap.mjs` generates
+   `BACKEND_API_KEY` per machine, but the desktop config keeps its own `apiKey` /
+   `controlPlaneApiKey`. When they diverge the push-queue poller gets
+   `[Control][Push] Queue fetch failed: HTTP 401` forever. It was aligned **by hand** on
+   this machine and **will break on any fresh install**. Smallest change with the biggest
+   payoff.
+2. **Read credential + RLS.** The Rate screen currently authenticates to PostgREST with
+   the **service_role** key, which bypasses RLS and cannot ship anywhere public. Fine on
+   loopback, mandatory to fix before any exposure. `903_lockdown_anon.sql:31-37` already
+   prescribes the answer: RLS policies plus targeted SELECT grants on the four tables, not
+   re-granting ALL to anon. And `902_grants.sql:10-15` makes it non-optional: "if this
+   stack is ever exposed beyond loopback, RLS becomes mandatory".
+3. **Domain -> Cloudflare Tunnel + Access.** Until this exists Website 2 works **only in a
+   browser on the Tally PC**. The user does not own a domain yet. Nothing else blocks it.
+4. **Verify first-run bootstrap.** `LocalStack.bootstrap()` runs `install.ps1` when no
+   config exists — **it has never actually executed**, because every run here found an
+   existing config. On a genuinely fresh machine the packaged app is *supposed* to install
+   itself; unproven.
+5. **Backups.** Still nothing schedules a `pg_dump`. After cutover this machine is the
+   only copy of the books.
+
+### Setting up a second machine
+
+Committed and sufficient: all source, the 17 schema files, `install.ps1` / `start.ps1` /
+`stage-for-app.ps1`, and `python-dist\tallybridge-engine.exe` (so **no Python or
+PyInstaller needed**).
+
+Prerequisites: Node 18+, Git, **Windows Developer Mode ON**, and Flutter for Website 2.
+
+```powershell
+git clone https://github.com/siddharthniranjan2003/TallyBridge.git
+cd TallyBridge ; git checkout feat/app-serves-local-stack
+npm install
+cd backend ; npm install ; npm run build ; cd ..
+cd native-stack
+.\fetch-vendor.ps1 -IncludePostgres ; .\scripts\trim-vendor.ps1
+.\install.ps1 -NoServices -SkipVendor -DataDir "$env:ProgramData\TallyBridge\data"
+cd .. ; npm run build:stack ; npx electron-builder --publish never
+```
+
+Then fill the database: a full sync from a TallyPrime on that machine, or
+`copy-live-to-local.mjs` from cloud (which needs a `backend\.env` holding the live keys —
+**not in git**).
+
+**Two things will bite:**
+
+1. **Developer Mode.** Without it *both* `electron-builder` (symlinks in the signing
+   toolchain) and `flutter build web` (plugin symlinks) fail. Registry toggle, needs
+   admin once, no reboot.
+2. **Every key is per-machine.** `SERVICE_ROLE_KEY` and `BACKEND_API_KEY` are regenerated
+   by `bootstrap.mjs` on each install, so `env/testing-local.json` must be rebuilt with
+   *that* machine's values, and the desktop config's `apiKey` must be set to its
+   `BACKEND_API_KEY` (see item 1 above).
+
+### Not in git
+
+`env.deployment` (deliberately untouched) · `native-stack\config` (this machine's
+secrets) · `native-stack\data` and `%ProgramData%\TallyBridge\data` (the books) ·
+`native-stack\vendor` (306 MB, re-fetch it) · `dist-client\` and `release\` (including the
+2.0.0 installer) · `backend\.env` · `node_modules`. In the **aiaccountant** repo:
+`env/testing-local.json` is gitignored, and the Flutter build rewrote `pubspec.lock`,
+`analysis_options.yaml` and the generated plugin registrants — left uncommitted.
+
+### Still outstanding, non-code
+
+**Rotate the `service_role` key in `n8n/gsheet_appscript.js`** (§7). The repo is public,
+the key is valid to 2036, and pushing this branch also pushed the previously-local-only
+`feat/on-prem-supabase-stacks` commits — including the 68 MB installer binary — to that
+public repo.
 
 ---
 
