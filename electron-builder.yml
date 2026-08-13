@@ -16,6 +16,13 @@ extraResources:
     to: assets/
   - from: python-dist/tallybridge-engine.exe
     to: python-runtime/tallybridge-engine.exe
+  # The on-machine data stack: PostgreSQL, PostgREST, Caddy, node and the built
+  # Express backend, plus the flattened schema and install scripts. Staged by
+  # native-stack/stage-for-app.ps1 (run it via `npm run build:stack`), which also
+  # asserts that config\ and data\ -- this machine's secrets and books -- are not
+  # in the payload. src/main/local-stack.ts resolves this as resources\stack.
+  - from: dist-client/tallybridge-native/
+    to: stack/
 
 win:
   icon: assets/icon.ico

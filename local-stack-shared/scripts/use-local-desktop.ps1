@@ -161,7 +161,17 @@ Set-Field $config "syncIngestUrl"       "$supabaseUrl/functions/v1/ingest-sync"
 Set-Field $config "syncIngestKey"       $localEnv.SERVICE_ROLE_KEY
 if ($IngestMode) { Set-Field $config "syncIngestMode" $IngestMode }
 
-$config | ConvertTo-Json -Depth 20 | Set-Content $configPath -Encoding utf8
+# WriteAllText with UTF8Encoding($false), NOT Set-Content -Encoding utf8: PowerShell
+# 5.1 writes a BOM, and electron-store hands the raw bytes to JSON.parse, which
+# rejects a leading U+FEFF. That throws inside store.ts at MODULE LOAD -- before
+# app.whenReady() -- so TallyBridge dies during startup having logged nothing at
+# all, and the failure looks nothing like "the config switcher corrupted a file".
+# Same trap this repo already works around in build-client-package.ps1.
+[System.IO.File]::WriteAllText(
+  $configPath,
+  ($config | ConvertTo-Json -Depth 20),
+  (New-Object System.Text.UTF8Encoding($false))
+)
 
 Write-Host "desktop app -> LOCAL stack" -ForegroundColor Green
 Show-Target

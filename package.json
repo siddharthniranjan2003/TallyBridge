@@ -1,6 +1,6 @@
 {
   "name": "tallybridge",
-  "version": "1.2.19",
+  "version": "2.0.0",
   "description": "TallyPrime cloud sync desktop connector",
   "main": "dist/main/index.js",
   "scripts": {
@@ -8,8 +8,10 @@
     "build:renderer": "vite build",
     "build:main": "tsc -p tsconfig.main.json",
     "build:python": "cd src/python && pyinstaller --onefile --name tallybridge-engine --distpath ../../python-dist --workpath ../../python-build --add-data definitions;definitions --add-data tally_odbc_helper.ps1;. --collect-all xmltodict --collect-all requests --collect-all dotenv sync_main.py",
+    "build:stack": "powershell -NoProfile -ExecutionPolicy Bypass -File native-stack/stage-for-app.ps1",
     "build": "npm run build:renderer && npm run build:main",
-    "dist": "npm run build && npm run build:python && electron-builder",
+    "dist": "npm run build && npm run build:python && npm run build:stack && electron-builder",
+    "dist:app": "npm run build && npm run build:stack && electron-builder",
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {

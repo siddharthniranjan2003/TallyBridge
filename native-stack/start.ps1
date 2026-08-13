@@ -45,7 +45,27 @@ if ($svc) {
   # half-broken for reasons that are not in its log.
   & (Join-Path $pgBin "pg_isready.exe") -h 127.0.0.1 -p $e.PGPORT -q 2>$null | Out-Null
   if ($LASTEXITCODE -ne 0) {
-    & (Join-Path $pgBin "pg_ctl.exe") -D $e.PGDATA -l (Join-Path $logs "postgres.log") -w -o "-p $($e.PGPORT)" start | Out-Null
+    # Start-Process, not a bare call. Invoked directly, pg_ctl and the postgres it
+    # launches inherit THIS shell's stdout handle; anything piping or capturing
+    # this script then blocks forever waiting for an EOF that only arrives when
+    # the database shuts down. Same trap as Start-Tracked below, which is why the
+    # note there says -NoNewWindow -- this line was the one path that missed it.
+    # -Wait keeps the synchronous semantics the comment above depends on.
+    $pgArgs = @(
+      "-D", "`"$($e.PGDATA)`"",
+      "-l", "`"$(Join-Path $logs 'postgres.log')`"",
+      "-w",
+      "-o", "`"-p $($e.PGPORT)`"",
+      "start"
+    )
+    $pg = Start-Process -FilePath (Join-Path $pgBin "pg_ctl.exe") -ArgumentList $pgArgs `
+            -WindowStyle Hidden -PassThru -Wait `
+            -RedirectStandardOutput (Join-Path $logs "pg_ctl.out.log") `
+            -RedirectStandardError  (Join-Path $logs "pg_ctl.err.log")
+    if ($pg.ExitCode -ne 0) {
+      Get-Content (Join-Path $logs "pg_ctl.err.log") -Tail 20 -ErrorAction SilentlyContinue
+      throw "pg_ctl start failed (exit $($pg.ExitCode)); see logs\postgres.log"
+    }
   }
   Write-Host "  postgres  127.0.0.1:$($e.PGPORT)" -ForegroundColor Green
 
@@ -53,7 +73,20 @@ if ($svc) {
     $pidFile = Join-Path $logs "$name.pid"
     if (Test-Path $pidFile) {
       $old = Get-Process -Id (Get-Content $pidFile) -ErrorAction SilentlyContinue
-      if ($old) { Write-Host ("  {0} already running (pid {1})" -f $name, $old.Id) -ForegroundColor DarkGray; return }
+      # Windows recycles PIDs, so "some process holds this id" is NOT "our process
+      # is still running". A pid file left by an earlier session pointed at an
+      # svchost after a reboot; this branch then reported postgrest as already
+      # running and started nothing, leaving port 3000 closed while every other
+      # check passed -- exactly the half-broken stack the comment above warns
+      # about. Match the image name as well as the id.
+      $expected = [IO.Path]::GetFileNameWithoutExtension($exe)
+      if ($old -and $old.Name -eq $expected) {
+        Write-Host ("  {0} already running (pid {1})" -f $name, $old.Id) -ForegroundColor DarkGray; return
+      }
+      if ($old) {
+        Write-Host ("  {0} pid file is stale (pid {1} is now {2}) -- restarting" -f $name, $old.Id, $old.Name) -ForegroundColor Yellow
+      }
+      Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
     }
     # -WindowStyle Hidden, NOT -NoNewWindow. -NoNewWindow makes the child share
     # this shell's console, with two consequences: the child inherits the

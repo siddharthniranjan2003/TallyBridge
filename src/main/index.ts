@@ -10,6 +10,7 @@ import { SyncEngine } from "./sync-engine";
 import { setupAutoUpdater } from "./updater";
 import { store } from "./store";
 import { tallyGate } from "./tally-gate";
+import { LocalStack } from "./local-stack";
 
 if (!isDev) {
   initLogger();
@@ -19,6 +20,8 @@ let mainWindow: BrowserWindow | null = null;
 let localPushServer: LocalPushServer | null = null;
 let pushQueuePoller: PushQueuePoller | null = null;
 let syncEngineRef: SyncEngine | null = null; // module-scope handle so quit handlers can reap the sync child
+let localStack: LocalStack | null = null;
+let stackStopped = false; // guards the re-entrant app.quit() in the before-quit handler
 let isQuitting = false; // set true for a real quit (e.g. install-restart) so close-to-tray is bypassed
 
 //***Abha
@@ -92,7 +95,7 @@ function createWindow() {
   });
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   //***Abha
   // A duplicate launch that failed to grab the lock has already called app.quit();
   // bail out before doing any startup work so it doesn't spin up a second engine.
@@ -124,6 +127,22 @@ app.whenReady().then(() => {
   }
 
   createWindow();
+
+  // The data stack comes up before anything that talks to it: the sync engine
+  // ingests through the backend, and the push server and poller both call the
+  // control plane. Window first, though — bringing up Postgres takes a few
+  // seconds and the user should not stare at nothing meanwhile.
+  //
+  // A failure here is logged and swallowed rather than fatal. The app is still
+  // worth having open: Settings works, and the log says what went wrong. Killing
+  // the window would leave a client with an app that vanishes on launch and no
+  // way to see why.
+  localStack = new LocalStack();
+  try {
+    await localStack.start();
+  } catch (err) {
+    logger.error(`[stack] failed to start: ${err instanceof Error ? err.message : err}`);
+  }
 
   const syncEngine = new SyncEngine(mainWindow!);
   syncEngineRef = syncEngine;
@@ -181,8 +200,21 @@ app.on("window-all-closed", () => {
   // keep app running in tray
 });
 
-app.on("before-quit", () => {
+app.on("before-quit", (event) => {
   pushQueuePoller?.stop();
   localPushServer?.stop();
   syncEngineRef?.kill();
+
+  // Stopping Postgres is asynchronous and must finish before the process exits,
+  // or the postmaster dies without a checkpoint and the next launch pays for it
+  // with crash recovery. before-quit is synchronous, so hold the quit, shut the
+  // stack down, then quit again — stackStopped breaks the re-entrancy, since the
+  // second app.quit() fires this handler once more.
+  if (localStack?.isRunning() && !stackStopped) {
+    event.preventDefault();
+    void localStack.stop().finally(() => {
+      stackStopped = true;
+      app.quit();
+    });
+  }
 });
