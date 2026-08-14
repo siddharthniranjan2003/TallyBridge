@@ -8,7 +8,7 @@ import { LocalPushServer } from "./local-push-server";
 import { PushQueuePoller } from "./push-queue-poller";
 import { SyncEngine } from "./sync-engine";
 import { setupAutoUpdater } from "./updater";
-import { store } from "./store";
+import { store, resolveControlPlaneUrl, resolveControlPlaneApiKey } from "./store";
 import { tallyGate } from "./tally-gate";
 import { LocalStack } from "./local-stack";
 
@@ -46,6 +46,49 @@ if (!gotSingleInstanceLock) {
   });
 }
 //***Abha sharma
+
+/**
+ * Point the saved config at the stack this app just started, and adopt its key.
+ *
+ * bootstrap.mjs mints BACKEND_API_KEY fresh on every machine, but the desktop
+ * config carries its own copy of the control-plane key. Nothing keeps the two in
+ * step, and when they drift every push-queue poll returns 401 for good — with a
+ * message ("Unauthorized") that says nothing about two files disagreeing. That
+ * cost real time once already, and it would recur on every fresh install.
+ *
+ * The stack is the source of truth because it is the thing that generated the
+ * key, so re-derive from it on each launch rather than storing a second copy.
+ *
+ * Guarded on the control plane already pointing at loopback: an install still
+ * aimed at the cloud keeps its own credentials untouched.
+ */
+function reconcileControlPlaneWithStack(stack: LocalStack) {
+  const { url, apiKey } = stack.controlPlane;
+  if (!url || !apiKey) return;
+
+  const configuredUrl = resolveControlPlaneUrl({
+    controlPlaneUrl: store.get("controlPlaneUrl"),
+    backendUrl: store.get("backendUrl"),
+  });
+  const pointsAtThisMachine =
+    !configuredUrl || /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/i.test(configuredUrl);
+  if (!pointsAtThisMachine) return;
+
+  if (store.get("controlPlaneUrl") !== url) {
+    store.set("controlPlaneUrl", url);
+    logger.info(`[stack] control plane -> ${url}`);
+  }
+
+  const configuredKey = resolveControlPlaneApiKey({
+    controlPlaneApiKey: store.get("controlPlaneApiKey"),
+    apiKey: store.get("apiKey"),
+  });
+  if (configuredKey !== apiKey) {
+    store.set("controlPlaneApiKey", apiKey);
+    store.set("apiKey", apiKey);
+    logger.info("[stack] control-plane key realigned with the local stack");
+  }
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -140,6 +183,7 @@ app.whenReady().then(async () => {
   localStack = new LocalStack();
   try {
     await localStack.start();
+    reconcileControlPlaneWithStack(localStack);
   } catch (err) {
     logger.error(`[stack] failed to start: ${err instanceof Error ? err.message : err}`);
   }

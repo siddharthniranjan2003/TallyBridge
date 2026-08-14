@@ -63,6 +63,19 @@ export class LocalStack {
   private env: StackEnv = {};
   private stackDir = "";
   private started = false;
+  private backendUrl = "";
+  private backendApiKey = "";
+
+  /**
+   * Where the backend ended up and the key it will accept. Read after start().
+   *
+   * These are generated per machine by bootstrap.mjs, so nothing may hardcode
+   * them or keep a second copy that can drift -- see the reconciliation in
+   * index.ts for why that matters.
+   */
+  get controlPlane(): { url: string; apiKey: string } {
+    return { url: this.backendUrl, apiKey: this.backendApiKey };
+  }
 
   /**
    * Repo layout in dev, `resources\stack` in a packaged build. Everything the
@@ -295,6 +308,8 @@ export class LocalStack {
     // report silently serve cloud data with every health check still passing.
     const gatewayUrl = `http://127.0.0.1:${gwPort}`;
     const apiKey = this.env.BACKEND_API_KEY || "localdevkey";
+    this.backendUrl = `http://127.0.0.1:${backendPort}`;
+    this.backendApiKey = apiKey;
     const backendEnv: Record<string, string> = {
       PORT: String(backendPort),
       SUPABASE_URL: gatewayUrl,
